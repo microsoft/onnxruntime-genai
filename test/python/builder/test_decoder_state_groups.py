@@ -508,7 +508,7 @@ def test_varlen_ops_emit_compact_state_updates_at_exact_slots():
         state_update_value_shape=["batch_size", 3, 48],
     )
     conv = model.nodes[-1][1]
-    assert conv["inputs"] == ["x", "weight", "cu", "bias", "past", "capture_count", ""]
+    assert conv["inputs"] == ["x", "weight", "cu", "bias", "past", "capture_count"]
     assert conv["outputs"] == ["/conv/output_0", "present", "state_update.0.conv_value"]
     assert conv["state_update_capacity"] == 3
     assert conv["dilation"] == 1
@@ -873,7 +873,6 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
     assert model.make_conv_state_update_kwargs(0) == {
         "state_update_capacity": 3,
         "state_update_capture_count": model.input_names["state_update.capture_count"],
-        "state_update_active": model.input_names["state_update.active"],
         "state_update_value": model.output_names["state_update.conv_value"][0],
         "state_update_value_shape": model.output_shapes["state_update.conv_value"],
     }

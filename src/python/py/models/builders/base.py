@@ -85,6 +85,7 @@ class Model:
         *, graph_name=None, graph_opset=20,
     ):
         if graph_name is not None:
+            self.graph_attrs = {**Model.default_graph_attrs(), "ai.onnx": graph_opset}
             Model.make_graph(self, graph_name, opset=graph_opset)
             return
         if config is None or extra_options is None:
@@ -140,7 +141,7 @@ class Model:
         self.layer_types = (
             list(config.layer_types[: self.num_layers])
             if getattr(config, "layer_types", None) is not None
-            else ["full_attention"] * self.num_layers
+            else [self.default_layer_type(config)] * self.num_layers
         )
         self.vocab_size = config.vocab_size
         self.activation = (
@@ -172,9 +173,17 @@ class Model:
         self.hf_remote = extra_options.get("hf_remote", False)
         self.revision = extra_options.get("base_revision")
 
+        self.graph_attrs = Model.default_graph_attrs()
+
         # States for building the model
-        self.make_graph("main_graph", opset=22)
-        self.graph.opset_imports["com.microsoft"] = 1
+        Model.make_graph(
+            self,
+            "main_graph",
+            opset=self.graph_attrs["ai.onnx"],
+            ir_version=self.graph_attrs["ir_version"],
+            producer_name=self.graph_attrs["producer_name"],
+        )
+        self.graph.opset_imports["com.microsoft"] = self.graph_attrs["com.microsoft"]
 
         # EP-specific variables
         self.ep = ep
@@ -296,6 +305,7 @@ class Model:
         # Embedding-specific variables
         self.embed_attrs = {
             "scale": 1,                  # Scale value to multiply output of Embedding layer by
+            "emit_component": self.use_paged_attention,  # Standalone lookup for external embedding consumers.
         }
 
         # LayerNorm-specific variables
@@ -488,7 +498,7 @@ class Model:
             rope_scaling = config.rope_scaling
             for key in rope_scaling:
                 if not hasattr(config, "rope_parameters"):
-                    setattr(config, "rope_parameters", dict())
+                    config.rope_parameters = dict()
                 if not hasattr(config.rope_parameters, key):
                     config.rope_parameters[key] = rope_scaling[key]
 
@@ -619,6 +629,8 @@ class Model:
         # Manage the inputs for paged attention
         if self.use_paged_attention:
             self.input_shapes["input_ids"] = ["num_tokens"]
+            if self.exclude_embeds:
+                self.input_shapes["inputs_embeds"] = ["num_tokens", self.hidden_size]
             self.input_shapes["past_key_values.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             if "attention_mask" in self.input_names:
@@ -1254,16 +1266,17 @@ class Model:
             and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
         )
 
-    def make_tied_quantized_embedding_input_names(self):
+    def make_tied_quantized_embedding_input_names(self, lm_head):
         # Quantized tied embeddings in make_embedding() consume lm_head weights using
-        # algorithm-specific naming.
+        # algorithm-specific naming. Returns (bits, block_size, weight, scales, zero points),
+        # all taken from `lm_head` so they cannot disagree.
         #
         # Reference for quantized input names that will be produced:
         # +------------+-------------+--------------------------------------+--------------------------+-------------------------------+
         # | Symmetry   | Algorithm   | Weight Input Name Format             | Scales Input Name Format | Zero-Points Input Name Format |
         # +------------+-------------+--------------------------------------+--------------------------+-------------------------------+
-        # | asymmetric | default     | *.MatMul.weight                      | N/A                      | N/A                           |
-        # | symmetric  | default     | *.MatMul.weight_Q4                   | *.MatMul.weight_scales   | N/A                           |
+        # | asymmetric | default     | *.MatMul.weight_Q4 or _Q8            | *.MatMul.weight_scales   | *.MatMul.weight_zero_points   |
+        # | symmetric  | default     | *.MatMul.weight_Q4 or _Q8            | *.MatMul.weight_scales   | N/A                           |
         # | asymmetric | rtn*        | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | *.MatMul.weight_zp            |
         # | symmetric  | rtn*        | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | N/A                           |
         # | asymmetric | k_quant*    | *.MatMul.weight_Q4G32 or _Q8G32      | *.MatMul.weight_scale    | *.MatMul.weight_zp            |
@@ -1273,20 +1286,19 @@ class Model:
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
         # Pre-quantized lm_head (e.g. quant_auto): make_matmul_nbits registers weight under
-        # the MatMulNBits naming scheme rather than the to_nbits naming scheme. Return those
-        # names directly so make_embedding's GatherBlockQuantized references the right initializers.
-        # self.weights is the loaded model object (set in make_model before make_embedding runs).
-        wlm = getattr(getattr(self, "weights", None), "lm_head", None)
-        if wlm is not None and getattr(wlm, "qweight", None) is not None:
-            bits = wlm.bits
-            has_zeros = getattr(wlm, "qzeros", None) is not None
+        # the MatMulNBits naming scheme rather than the to_nbits naming scheme, and keeps the
+        # group size of its checkpoint.
+        if getattr(lm_head, "qweight", None) is not None:
+            has_zeros = getattr(lm_head, "qzeros", None) is not None
             return (
-                bits,
+                lm_head.bits,
+                int(lm_head.group_size),
                 "lm_head.MatMulNBits.qweight",
                 "lm_head.MatMulNBits.scales",
                 "lm_head.MatMulNBits.qzeros" if has_zeros else "",
             )
 
+        block_size = int(self.quant_attrs["matmul_block_size"])
         base_method = self.quantization_algo
         placement = self.matmul_mixed_precision
 
@@ -1300,10 +1312,11 @@ class Model:
         bits = resolve_dtype(last_matmul_type).bits if last_matmul_type else default_bits
         is_symmetric = self.quant_attrs["is_symmetric"]
 
-        if base_method == "rtn" or (base_method == "default" and bits != 4):
+        if base_method == "rtn":
             return (
                 bits,
-                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs['matmul_block_size']}",
+                block_size,
+                f"lm_head.MatMul.weight_Q{bits}G{block_size}",
                 "lm_head.MatMul.weight_scale",
                 "lm_head.MatMul.weight_zp" if not is_symmetric else "",
             )
@@ -1311,7 +1324,8 @@ class Model:
         if base_method == "k_quant":
             return (
                 bits,
-                f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs['matmul_block_size']}",
+                block_size,
+                f"lm_head.MatMul.weight_Q{bits}G{block_size}",
                 "lm_head.MatMul.weight_scale",
                 "lm_head.MatMul.weight_zp",
             )
@@ -1320,9 +1334,10 @@ class Model:
         assert base_method == "default", "Unknown quantization algo config name detected"
         return (
             bits,
-            f"lm_head.MatMul.weight_Q{bits}" if is_symmetric else "lm_head.MatMul.weight",
-            "lm_head.MatMul.weight_scales" if is_symmetric else "",
-            "",
+            block_size,
+            f"lm_head.MatMul.weight_Q{bits}",
+            "lm_head.MatMul.weight_scales",
+            "" if is_symmetric else "lm_head.MatMul.weight_zero_points",
         )
 
     def make_paged_config_inputs(self, inputs):
@@ -1379,13 +1394,16 @@ class Model:
                 dynamic_batching["max_scheduled_tokens"] = int(self.extra_options["max_scheduled_tokens"])
             genai_config["engine"] = {"dynamic_batching": dynamic_batching}
 
+    def load_generation_config(self, extra_kwargs):
+        return GenerationConfig.from_pretrained(
+            self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
+        )
+
     def make_genai_config(self, config, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         try:
             # Override search attributes in config based on values in generation_config.json
-            gen_config = GenerationConfig.from_pretrained(
-                self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
-            )
+            gen_config = self.load_generation_config(extra_kwargs)
             defaults = {
                 "bos_token_id": None,
                 "do_sample": False,
@@ -1574,7 +1592,6 @@ class Model:
         """
         Override in subclasses to modify genai_config before it is written to disk.
         """
-        pass
 
     def make_hidden_state_shape(self, seq_dim="sequence_length", last_dim=None):
         """Return a standard 3D shape or a 2D paged-attention shape."""
@@ -1583,6 +1600,23 @@ class Model:
             first_dim = self.hidden_rows_dim if seq_dim == "sequence_length" else seq_dim
             return [first_dim, last_dim]
         return ["batch_size", seq_dim, last_dim]
+
+    def default_layer_type(self, config):
+        """Return the attention type of every layer when the config has no `layer_types`.
+
+        Configs such as Mistral and Phi-3 only carry `sliding_window`, which Hugging Face
+        applies to every layer. `use_sliding_window=False` (Qwen) or a missing/non-positive window
+        means full attention. So does a window that is at least the context length (for example
+        Phi-4-mini's 262144 with a 131072 context): it never masks anything, and the windowed KV
+        cache on CUDA would require a cache at least that large.
+        """
+        sliding_window = getattr(config, "sliding_window", None)
+        if not (getattr(config, "use_sliding_window", True) and isinstance(sliding_window, int) and sliding_window > 0):
+            return "full_attention"
+        context_length = getattr(self, "context_length", None)
+        if isinstance(context_length, int) and sliding_window >= context_length:
+            return "full_attention"
+        return "sliding_attention"
 
     def is_local(self, layer_id):
         """Return whether Hugging Face marks this layer as sliding-window attention."""
@@ -2128,9 +2162,19 @@ class Model:
         ):
             self.make_value(output, ir.DataType.INT32, shape)
 
-    def make_graph(self, graph_name, opset=20, ir_version=10):
+    @staticmethod
+    def default_graph_attrs():
+        """Return the ONNX graph metadata used by the builders' default graphs."""
+        return {
+            "ai.onnx": 22,
+            "com.microsoft": 1,
+            "ir_version": 10,
+            "producer_name": "onnxruntime-genai",
+        }
+
+    def make_graph(self, graph_name, opset=20, ir_version=10, producer_name="onnxruntime-genai"):
         self.graph = ir.Graph(inputs=(), outputs=(), nodes=(), name=graph_name, opset_imports={"": opset})
-        self.model = ir.Model(self.graph, ir_version=ir_version, producer_name="onnxruntime-genai")
+        self.model = ir.Model(self.graph, ir_version=ir_version, producer_name=producer_name)
         self.values = {}
         self.node_names = set()
 
@@ -2666,6 +2710,32 @@ class Model:
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value(output, dtype, shape=shape)
 
+    def make_tensor_scatter(
+        self,
+        name,
+        data,
+        updates,
+        indices,
+        dtype,
+        shape,
+        *,
+        output=None,
+        axis=-2,
+        mode="linear",
+    ):
+        """Update slices of a tensor with the standard ONNX TensorScatter op."""
+        output = output or f"{name}/output_0"
+        self.make_node(
+            "TensorScatter",
+            inputs=[data, updates, indices],
+            outputs=[output],
+            name=name,
+            axis=axis,
+            mode=mode,
+        )
+        self.make_value(output, dtype, shape=shape)
+        return output
+
     def make_lp_normalization(self, name, root_input, dtype, shape, axis=-1, p=2):
         output = f"{name}/output_0"
         self.make_node("LpNormalization", inputs=[root_input], outputs=[output], name=name, axis=axis, p=p)
@@ -2674,6 +2744,16 @@ class Model:
     def make_div(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Div", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_mod(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Mod", inputs=inputs, outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_abs(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Abs", inputs=[root_input], outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
     def make_tanh(self, name, root_input, dtype, shape):
@@ -2830,7 +2910,8 @@ class Model:
         state_update_capacity = kwargs.get("state_update_capacity", 0)
         if state_update_capacity:
             inputs.append(kwargs["state_update_capture_count"])
-            inputs.append(kwargs.get("state_update_active", ""))
+            if kwargs.get("state_update_active"):
+                inputs.append(kwargs["state_update_active"])
 
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
@@ -2857,15 +2938,18 @@ class Model:
         if state_update_capacity:
             self.make_value(kwargs["state_update_value"], self.io_dtype, shape=kwargs["state_update_value_shape"])
 
-    def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
+    def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5, activation=None):
         output = f"{name}/output_0"
+        attrs = {"epsilon": epsilon}
+        if activation is not None:
+            attrs["activation"] = activation
         self.make_node(
             "GatedRMSNorm",
             inputs=[root_input, scale, gate],
             outputs=[output],
             name=name,
             domain="com.microsoft",
-            epsilon=epsilon,
+            **attrs,
         )
         self.make_value(output, self.io_dtype, shape=shape)
 
@@ -2956,6 +3040,7 @@ class Model:
     def make_matmul_fp8(self, matmul, basename, root_input, **kwargs):
         input_scale_tensor = getattr(matmul, "input_scale", None)
         input_scale = float(input_scale_tensor.float().item()) if input_scale_tensor is not None else None
+        kwargs.setdefault("block_size", getattr(matmul, "block_size", None))
         return self.make_matmul_block_quantized_fp8_weight(
             basename, root_input, matmul.weight, matmul.weight_scale, input_scale, **kwargs
         )
@@ -3009,12 +3094,18 @@ class Model:
             raise ValueError(f"FP8 weight for '{basename}' must have shape [N, K], got {tuple(weight.shape)}.")
 
         out_features = int(weight.shape[0])
-        block_size = int(weight.shape[1])
-        scale = self.prepare_matmul_block_quantized_scales(weight_scale, out_features, 1)
+        in_features = int(weight.shape[1])
+        block_size = kwargs.pop("block_size", None)
+        if block_size is None:
+            block_size = in_features
+        if block_size <= 0:
+            raise ValueError(f"FP8 block size for '{basename}' must be positive, got {block_size}.")
+        block_count = (in_features + block_size - 1) // block_size
+        scale = self.prepare_matmul_block_quantized_scales(weight_scale, out_features, block_count)
         if scale is None:
             raise ValueError(
                 f"FP8 weight scale for '{basename}' has shape {tuple(weight_scale.shape)}, "
-                f"expected a scalar or [{out_features}, 1]."
+                f"expected a scalar or [{out_features}, {block_count}]."
             )
 
         prefix = basename[1:].replace("/", ".")
@@ -3404,14 +3495,17 @@ class Model:
                 raise ValueError("embedding_quant_type=int4 currently requires int4 model precision.")
             if requested_bits != self.quant_attrs["bits"]:
                 can_reuse_lm_head = False
+        if not can_reuse_lm_head:
+            # The LM head cannot back the lookup, so the graph is untied after all.
+            self.tied_quantized_embeddings = False
+            self.tied_unquantized_embeddings = False
 
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and the export model
         # is quantized. Quantized d_type in set_onnx_dtype is INT4/UINT4.
-        if self.tied_quantized_embeddings and can_reuse_lm_head:
-            bits, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = self.make_tied_quantized_embedding_input_names()
-            # A pre-quantized LM head keeps the group size of its checkpoint.
-            is_prequantized = getattr(lm_head, "qweight", None) is not None
-            block_size = int(lm_head.group_size if is_prequantized else self.quant_attrs["matmul_block_size"])
+        if self.tied_quantized_embeddings:
+            bits, block_size, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = (
+                self.make_tied_quantized_embedding_input_names(lm_head)
+            )
 
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
@@ -3466,7 +3560,7 @@ class Model:
                 gather_output = f"{slice_name}/output_0"
 
         # Use Transpose + Gather for tied embeddings for float embedding layers
-        elif self.tied_unquantized_embeddings and can_reuse_lm_head:
+        elif self.tied_unquantized_embeddings:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(
@@ -4087,8 +4181,7 @@ class Model:
         # For other EPs (CPU, CUDA, WebGPU), create regular If node with multiple outputs
         # Make the following subgraph to decide which cos/sin caches to use in the rotary embeddings
         #
-        # attention_mask --> Shape --> Gather --> Greater --> If --> (cos_cache, sin_cache)
-        #                             (idx=1)
+        # rope_context_length --> Greater --> If --> (cos_cache, sin_cache)
         #
         # Or for PagedAttention (no attention_mask input):
         #
@@ -4097,17 +4190,23 @@ class Model:
         #
 
         basename = "/model/rope_caches_subgraph"
-        gather_name = ""
-        if self.attention_attrs["op_type"] == "GroupQueryAttention":
-            gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather"
+        if not self.use_paged_attention and "input_ids" in self.input_names:
+            self.input_names["rope_context_length"] = "rope_context_length"
+            self.input_types["rope_context_length"] = ir.DataType.INT64
+            self.input_shapes["rope_context_length"] = []
+            self.model.metadata_props["com.microsoft.genai.rope_context_length_input"] = "rope_context_length"
+            self.model.metadata_props["com.microsoft.genai.original_context_length"] = str(self.original_context_length)
+            context_length_input = self.input_names["rope_context_length"]
+        elif self.attention_attrs["op_type"] == "GroupQueryAttention":
+            context_length_input = "/model/attn_mask_reformat/attn_mask_subgraph/Gather/output_0"
         elif self.attention_attrs["op_type"] == "PagedAttention":
             self.make_paged_rotary_multi_cache_subgraph()
-            gather_name = "/model/context_length_subgraph/Mul"
+            context_length_input = "/model/context_length_subgraph/Mul/output_0"
         else:
-            gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
+            context_length_input = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2/output_0"
 
         greater_name = f"{basename}/Greater"
-        greater_inputs = [f"{gather_name}/output_0", f"/model/constants/INT64/{self.original_context_length}"]
+        greater_inputs = [context_length_input, f"/model/constants/INT64/{self.original_context_length}"]
         self.make_greater(greater_name, greater_inputs, shape=[])
         if_name = f"{basename}/If"
 
@@ -4832,7 +4931,7 @@ class Model:
 
     def make_gated_delta_net_attributes(self, kwargs):
         """Attribute policy shared by the dense and packed emitters so both layouts stay equivalent."""
-        return {
+        attrs = {
             "update_rule": kwargs.get("update_rule", "gated_delta"),
             "scale": kwargs.get("scale", 0.0),
             "gate_activation": kwargs.get("gate_activation", "none"),
@@ -4840,13 +4939,18 @@ class Model:
             "qk_l2_norm": kwargs.get("qk_l2_norm", 0),
             "chunk_size": kwargs.get("chunk_size", 64),
         }
+        if "gate_lower_bound" in kwargs:
+            attrs["gate_lower_bound"] = kwargs["gate_lower_bound"]
+        return attrs
 
     def make_gated_delta_net_gates(self, name, kwargs):
         """Cast the decay/beta gates to the float32 the kernel accumulates in."""
         decay_cast = f"{name}/decay_fp32/Cast"
         beta_cast = f"{name}/beta_fp32/Cast"
-        self.make_cast(decay_cast, kwargs["decay"], ir.DataType.FLOAT, kwargs["gate_shape"])
-        self.make_cast(beta_cast, kwargs["beta"], ir.DataType.FLOAT, kwargs["gate_shape"])
+        decay_shape = kwargs.get("decay_shape", kwargs.get("gate_shape"))
+        beta_shape = kwargs.get("beta_shape", kwargs.get("gate_shape"))
+        self.make_cast(decay_cast, kwargs["decay"], ir.DataType.FLOAT, decay_shape)
+        self.make_cast(beta_cast, kwargs["beta"], ir.DataType.FLOAT, beta_shape)
         return f"{decay_cast}/output_0", f"{beta_cast}/output_0"
 
     def make_gated_delta_net(self, name, **kwargs):
@@ -5725,19 +5829,26 @@ class Model:
         up = self.values[f"{up_name}/output_0"].producer()
         if gate.op_type != up.op_type or gate.domain != up.domain or gate.inputs[0] is not up.inputs[0]:
             return
-        if (gate.domain, gate.op_type) not in (("", "MatMul"), ("com.microsoft", "MatMulNBits")):
+        if (gate.domain, gate.op_type) not in (
+            ("", "MatMul"),
+            ("com.microsoft", "MatMulNBits"),
+            ("com.microsoft", "MatMulBlockQuantizedFp8Weight"),
+        ):
             return
         if gate.attributes != up.attributes or len(gate.inputs) != len(up.inputs):
             return
         nbits = gate.op_type == "MatMulNBits"
+        fp8_block = gate.op_type == "MatMulBlockQuantizedFp8Weight"
         if nbits and (
             len(gate.inputs) > 5
             or gate.attributes["N"].as_int() != self.intermediate_size
             or ("weight_prepacked" in gate.attributes and gate.attributes["weight_prepacked"].as_int() != 0)
         ):
             return
-        # MatMulNBits initializers are output-channel major; g_idx is shared across channels.
-        packed_inputs = 4 if nbits else 2
+        if fp8_block and len(gate.inputs) > 4:
+            return
+        # MatMulNBits and MatMulBlockQuantizedFp8Weight initializers are output-channel major; g_idx/input_scale are shared.
+        packed_inputs = 4 if nbits else (3 if fp8_block else 2)
         tensors = []
         for index, (left, right) in enumerate(zip(gate.inputs[1:], up.inputs[1:], strict=True), 1):
             if left is None or right is None or left.const_value is None or right.const_value is None:
@@ -5749,17 +5860,19 @@ class Model:
                     return
                 tensors.append(None)
                 continue
-            axis = 0 if nbits else 1
+            axis = 0 if (nbits or fp8_block) else 1
             if len(left.shape) <= axis:
                 return
-            if not nbits and (len(left.shape) != 2 or left.shape[1] != self.intermediate_size):
+            if not (nbits or fp8_block) and (len(left.shape) != 2 or left.shape[1] != self.intermediate_size):
                 return
-            if nbits and left.shape[0] != self.intermediate_size:
+            if (nbits or fp8_block) and left.shape[0] != self.intermediate_size:
                 return
             tensors.append((axis, left, right))
 
         if nbits:
             fused_name += "NBits"
+        elif fp8_block:
+            fused_name += "Fp8"
         inputs = [gate.inputs[0].name]
         for index, tensor in enumerate(tensors, 1):
             if tensor is None:
@@ -5767,9 +5880,15 @@ class Model:
             else:
                 axis, left, right = tensor
                 name = f"{fused_name[1:].replace('/', '.')}.input_{index}"
-                self.make_initializer(
-                    np.concatenate((left.const_value.numpy(), right.const_value.numpy()), axis=axis), name
-                )
+                arr = np.concatenate((left.const_value.numpy(), right.const_value.numpy()), axis=axis)
+                if left.dtype == ir.DataType.FLOAT8E4M3FN:
+                    self.make_initializer(
+                        torch.from_numpy(arr.view(np.uint8)).view(torch.float8_e4m3fn),
+                        name,
+                        to=ir.DataType.FLOAT8E4M3FN,
+                    )
+                else:
+                    self.make_initializer(arr, name)
                 inputs.append(name)
         attributes = {name: attribute.value for name, attribute in gate.attributes.items()}
         if nbits:
@@ -6866,7 +6985,7 @@ class Model:
                     self.make_embedding(module.weight)
                 else:
                     # Exclude embedding layer from model
-                    if self.extra_options.get("dflash2_path"):
+                    if self.embed_attrs["emit_component"] or self.extra_options.get("dflash2_path"):
                         self.embedding_model = self.make_embedding_component(module.weight)
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
                     self.layernorm_attrs["skip_input"] = "inputs_embeds"

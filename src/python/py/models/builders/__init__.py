@@ -6,19 +6,22 @@
 # Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Portions of this file consist of AI generated content.
 # -------------------------------------------------------------------------
+from .bailing import BailingMoeV3Model
 from .base import Model
 from .chatglm import ChatGLMModel
 from .ernie import ErnieModel
-from .gemma import Gemma2Model, Gemma3Model, Gemma4MoEModel, Gemma4Model, GemmaModel
+from .gemma import Gemma2Model, Gemma3Model, Gemma4Model, Gemma4MoEModel, GemmaModel
 from .gptoss import GPTOSSModel
 from .granite import GraniteModel, GraniteMoEHybridModel
 from .hunyuan import HunyuanDenseV1Model
 from .internlm import InternLM2Model
-from .lfm2 import LFM2AudioModel, LFM2Model, LFM2MoEModel
+from .lfm2 import LFM2AudioModel, LFM2Model, LFM2MoEModel, LFM3Model
+from .lfm2_vl import LFM2VLModel
 from .llama import LlamaModel
 from .mistral import Mistral3TextModel, MistralModel
 from .mtp import MTPModel
 from .nemotron import NemotronModel
+from .nemotron_parse import NemotronParseModel
 from .olmo import OLMoModel
 from .phi import (
     Phi3MiniLongRoPEModel,
@@ -55,6 +58,7 @@ from .smollm import SmolLM3Model
 from .whisper import WhisperModel
 
 __all__ = [
+    "BailingMoeV3Model",
     "ChatGLMModel",
     "ErnieModel",
     "GPTOSSModel",
@@ -70,12 +74,15 @@ __all__ = [
     "LFM2AudioModel",
     "LFM2MoEModel",
     "LFM2Model",
+    "LFM2VLModel",
+    "LFM3Model",
     "LlamaModel",
     "MTPModel",
     "Mistral3TextModel",
     "MistralModel",
     "Model",
     "NemotronModel",
+    "NemotronParseModel",
     "OLMoModel",
     "Phi3MiniLongRoPEModel",
     "Phi3MiniModel",

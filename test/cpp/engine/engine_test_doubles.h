@@ -124,6 +124,11 @@ struct RecordingCacheManager : CacheManager {
 
   size_t MaxDraftTokensPerStep() const override { return max_draft_tokens_per_step_; }
 
+  bool PrefixCachingEnabled() const override {
+    return model_->config_->engine.dynamic_batching &&
+           model_->config_->engine.dynamic_batching->prefix_caching.value_or(true);
+  }
+
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override { return allocated_; }
 
   bool IsResident(const std::shared_ptr<Request>& request) const override {
@@ -657,6 +662,7 @@ struct CountingCudaDeviceState {
   size_t device_to_host_copies{};
   size_t host_to_device_copies{};
   bool separate_host_mirror{};
+  bool recycles_host_mirrors{};
   size_t synchronize_calls{};
   size_t memory_queries{};
   size_t integrated_queries{};
@@ -740,6 +746,7 @@ struct CountingCudaDevice final : DeviceInterface {
   }
   std::unique_ptr<KeyValueCache> CreateKeyValueCache(State&) override { return {}; }
   void Synchronize() override { ++state->synchronize_calls; }
+  bool RecyclesHostMirrorsAfterUpload(size_t) const override { return state->recycles_host_mirrors; }
   void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
     ++state->memory_queries;
     if (state->fail_memory_query) {

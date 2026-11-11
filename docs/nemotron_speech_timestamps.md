@@ -45,9 +45,10 @@ thresholds are rejected while loading the configuration.
 ## Decoding flows
 
 Both paths start with audio processed into features, followed by generated token IDs. Model
-configuration determines whether acoustic timing is produced. `TokenPostProcessor`
-forwards borrowed token and optional timing views to its internal `TokenPostProcessorInternal`, which
-owns decoding and timestamp processing. Ordinary tokenizer decoding is unchanged.
+configuration determines whether acoustic timing is produced. `ASRPostProcessor`
+forwards borrowed token and optional timing views from its public `ProcessNext()`
+to a private `ProcessNext(outputs)` overload and directly owns decoding and
+timestamp processing. Ordinary tokenizer decoding is unchanged.
 `timestamp_level` controls timestamp generation:
 
 ```mermaid
@@ -63,12 +64,12 @@ flowchart TB
 
   subgraph timed[With timestamps: word, segment, or all]
     setup[Processor copies model configuration] --> stream
-    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[TokenPostProcessor.ProcessNextTokens]
-    stream --> internal[Internal TokenPostProcessorInternal.Process]
+    timed_tokens[Private Generator.GetTokenOutputs: IDs + frame intervals] --> stream[ASRPostProcessor.ProcessNext]
+    stream --> internal[Private ASRPostProcessor.ProcessNext with outputs]
     internal --> ortx[Extensions: vocabulary facts + ordinary cached decode]
     ortx --> align[GenAI MetadataCoreState: group words and align buffered frames]
     align --> events[Per-call word / segment events with frame and second bounds]
-    events --> read[GetNextTokenResults: read only]
+    events --> read[GetNextResults: read only]
     stream --> final[Finalize: flush trailing word / segment]
     final --> trailing[Trailing word / segment events]
   end
@@ -89,7 +90,7 @@ For a locally installed Nemotron model outside the test fixtures, set
 `AudioSpeechValidationTests.NemotronProcessorEmitsChunkStartSample`.
 That test uses CPU session options, even when the model package specifies CUDA.
 
-For the timed path, create `TokenPostProcessor(generator)` after configuring
+For the timed path, create `ASRPostProcessor(generator)` after configuring
 the model and creating the generator. The processor obtains its model from the
 generator rather than taking a separate model argument. The generator supplies
 *when* each token occurred; Extensions supplies
@@ -105,11 +106,11 @@ completed event text for the lifetime of the returned per-call result. The gener
 pairs tokens and intervals by emission position, not by token ID.
 
 The private generator getter borrows the existing per-step transducer output;
-Nemotron continues to supply zero or one token per step. The internal stream accepts
+Nemotron continues to supply zero or one token per step. The private overload accepts
 ordered token/timing values and can process a whole offline batch or incremental
 batches with the same finalization rules. This does not add a public offline producer API.
 
-At setup, the generator-facing adapter calculates `seconds_per_frame` and the
+At setup, the processor constructor calculates `seconds_per_frame` and the
 rounded gap threshold once from the existing model configuration. The internal
 timestamp code receives those derived values, not another copy of sample rate,
 hop length, and subsampling factor. Native token input uses an optional
@@ -120,9 +121,9 @@ exposed by the public C output handles or field accessors.
 ## Decoding
 
 Configure timestamp level and segment rules before creating the generator and
-`TokenPostProcessor`. After each generation step, call `ProcessNextTokens()`
-(C++/C#) or `process_next_tokens()` (Python), then read `GetNextTokenResults()` or
-`get_next_token_results()`. All sequential emissions are processed in order,
+`ASRPostProcessor`. After each generation step, call `ProcessNext()`
+(C++/C#) or `process_next()` (Python), then read `GetNextResults()` or
+`get_next_results()`. All sequential emissions are processed in order,
 including steps that emit zero or multiple tokens. Reading results repeatedly
 does not change them. The private generator getter is not exposed to applications.
 Enabled timestamps require present, valid acoustic timing. Intervals are half-open
@@ -139,9 +140,9 @@ concatenating all emitted words or all emitted segments reproduces the decoded t
 In every binding, read and copy needed text and scalar values into the application's
 transcript before the next processor mutation. Result wrappers do not retain old native output.
 
-C exposes opaque result, `OgaTokenPostProcessorTimestampResult`, and timestamp-record
-handles with typed accessors. `OgaTokenPostProcessorResultGetTimestampResult()`
-returns the container; `OgaTokenPostProcessorTimestampResultGetTimestampRecord()`
+C exposes opaque result, `OgaASRPostProcessorTimestampResult`, and timestamp-record
+handles with typed accessors. `OgaASRPostProcessorResultGetTimestampResult()`
+returns the container; `OgaASRPostProcessorTimestampResultGetTimestampRecord()`
 selects a word or segment by `OgaTimestampRecordKind` and index. C++ exposes the
 same opaque handles through method-only wrappers. Use `GetText()` and
 `GetTimestampResult()` on a result, `GetWordCount()` / `GetSegmentCount()` and
@@ -169,6 +170,59 @@ finalization emits no duplicate events. `Reset()` / `reset()` clears all process
 state together; it does not reset the generator. The generator must outlive its
 processor. See [Token post-processing](metadata_decode.md) for the full lifecycle.
 
+The Nemotron examples demonstrate the complete flow:
+
+- `examples/c/src/model_asr.cpp`
+- `examples/csharp/ModelASR/Program.cs`
+- `examples/python/model-asr.py`
+
+For segment-only output in the C# ModelASR sample, configure `model.timestamp_level` as `segment`.
+The sample builds output only from completed segment events, including the trailing segment emitted
+by finalization. It prints each segment as `[StartTime - StopTime] SegmentText`; it does not
+concatenate token fragments.
+
+The general Nemotron examples render word mode as `[StartTime - StopTime]WordText` followed by one
+space, with no space after the interval. Segment mode renders
+`[StartTime - StopTime] SegmentText`. All mode reports both views separately: the segment-timestamp
+transcript followed by the per-word timestamp transcript.
+
+### Building the examples
+
+These examples require the officially released GenAI `0.19.0` headers, language bindings, and native
+libraries containing the processor APIs. The initial implementation landed in
+[PR #2591](https://github.com/microsoft/onnxruntime-genai/pull/2591), and the opaque result and ASR
+dispatch refactors have merged in [PR #2797](https://github.com/microsoft/onnxruntime-genai/pull/2797)
+and [PR #2799](https://github.com/microsoft/onnxruntime-genai/pull/2799). These APIs are available in
+GenAI `0.19.0`:
+
+- For Python, install the official wheel with `pip install onnxruntime-genai==0.19.0`. Create `ASRPostProcessor(generator)`
+  and call `process_next()`
+  after generation and `finalize()` at the end, then read typed objects from
+  `get_next_results()`: use nullable `result.timestamp_result`, then
+  `words` or `segments`, and each record's `text` and `(start, stop)` `time_interval`
+  properties. Append the needed values to
+  application-owned transcript storage before the next processing call; the
+  returned objects are borrowed, not independent snapshots.
+- For C++, build the `model_asr` target with `MODEL_ASR=ON` and set `OGA_INCLUDE_DIR` and `OGA_LIB_DIR`
+  to the headers and native library from the official `0.19.0` release archive.
+- For C#, the CPU and CUDA NuGet references both use `0.19.0`; use the normal package-based build.
+  See the [ASR sample](../examples/csharp/ModelASR/README.md), including its
+  segment-timestamp configuration instructions.
+
+GenAI `0.19.0` is required even for plain-text mode. Selecting `timestamp_level: "off"` does not
+remove the timestamp API references from the C++ or C# example source.
+
+With the `0.19.0` Python package installed, run the example regressions from the repository root:
+
+```bash
+python -m pytest test/python/test_onnxruntime_genai_api.py --test_models test/models -k asr_example
+```
+
+The real-speech cases use `test/models/nemotron-speech-streaming` and `test/audios/jfk.flac`. Set
+`NEMOTRON_STREAMING_MODEL_PATH` to use a model outside the test fixtures. They exercise every timestamp
+level, trailing finalization, and VAD-skipped silence; they skip when the model or audio is absent.
+The VAD case requires a model with a configured VAD component. These tests run inference on CPU.
+
 ## Interval semantics
 
 Frame and time intervals are half-open: `[start, stop)`. Each RNNT token initially covers one
@@ -178,6 +232,7 @@ by VAD. Time values are seconds rounded to two decimal places.
 Punctuation remains attached to its word. Segments complete on configured suffixes, configured
 frame gaps, or finalization.
 
-When `timestamp_level` is `off`, use ordinary `GetNextTokens()` and tokenizer stream `Decode()`.
+When `timestamp_level` is `off`, the examples use the processor's ordinary text results.
+Applications needing only text may also use `GetNextTokens()` and tokenizer stream `Decode()`.
 The streaming processor does not create timestamp origin metadata, the transducer does not append
 token intervals, and the tokenizer stream does not buffer intervals or build timestamp events.

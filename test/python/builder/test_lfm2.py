@@ -8,7 +8,8 @@ epsilon falls back to 1e-6 and `LFM2Model` must set the checkpoint's value. Stan
 the layernorm epsilon; a GroupQueryAttention node that fuses the Q/K norms (CUDA and WebGPU) carries its
 own `qk_norm_epsilon` attribute.
 
-In a padded batch, each row must keep the conv state of its own last real tokens, not of the pads.
+In a padded batch, each row must keep the conv state of its own last real tokens, not of the pads. In a paged
+export, each packed sequence must keep its own conv state.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import re
 
 import numpy as np
 import pytest
-from _builder_test_utils import load_builder_module, ort_runs_causal_conv_with_state
+from _builder_test_utils import check_node_shapes, load_builder_module, ort_runs_causal_conv_with_state
 
 torch = pytest.importorskip("torch")
 onnx = pytest.importorskip("onnx")
@@ -336,6 +337,52 @@ def test_lfm2_conv_state_of_each_row(tmp_path):
         np.testing.assert_array_equal(present[row], columns[row, :, real_tokens : real_tokens + state_size])
 
 
+@pytest.mark.parametrize("activation", ["none", "silu"])
+@pytest.mark.parametrize("use_bias", [False, True])
+def test_dml_causal_conv_matches_torch_across_prefill_and_decode(tmp_path, activation, use_bias):
+    model, _ = _build_tiny_lfm2(ep="dml")
+    assert not any(node.op_type == "CausalConvWithState" for node in model.model.graph)
+    rng = np.random.default_rng(6)
+    channels, state_size = model.hidden_size, model.conv_L_cache - 1
+    weight = rng.standard_normal((channels, 1, state_size + 1)).astype(np.float32)
+    bias = rng.standard_normal(channels).astype(np.float32) if use_bias else None
+    model.make_initializer(torch.from_numpy(weight), "test.weight", to=model.io_dtype)
+    if use_bias:
+        model.make_initializer(torch.from_numpy(bias), "test.bias", to=model.io_dtype)
+    conv_input = "/model/layers.0/conv/Mul_1/output_0"
+    model.make_causal_conv_with_state(
+        "/test/conv",
+        root_input=conv_input,
+        weight="test.weight",
+        bias="test.bias" if use_bias else "",
+        past_conv_state="past.0.conv",
+        present_conv_state="test.present",
+        activation=activation,
+        channels=channels,
+    )
+    ir.save(model.model, tmp_path / "model.onnx")
+    subgraph = onnx_utils.Extractor(onnx.load(tmp_path / "model.onnx")).extract_model(
+        [conv_input, "past.0.conv"], ["/test/conv/output_0", "test.present"]
+    )
+    session = ort.InferenceSession(subgraph.SerializeToString(), providers=["CPUExecutionProvider"])
+    past = rng.standard_normal((2, channels, state_size)).astype(np.float32)
+    for length in (7, 1, 4, 1):
+        inputs = rng.standard_normal((2, channels, length)).astype(np.float32)
+        columns = np.concatenate([past, inputs], axis=2)
+        expected = torch.nn.functional.conv1d(
+            torch.from_numpy(columns),
+            torch.from_numpy(weight),
+            torch.from_numpy(bias) if use_bias else None,
+            groups=channels,
+        )
+        if activation == "silu":
+            expected = torch.nn.functional.silu(expected)
+        output, present = session.run(None, {conv_input: inputs, "past.0.conv": past})
+        np.testing.assert_allclose(output, expected.numpy(), rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(present, columns[:, :, -state_size:])
+        past = present
+
+
 @requires_causal_conv_with_state
 def test_lfm2_left_padded_batch_keeps_each_rows_last_columns(tmp_path):
     # With left padding every row ends at the last column, so each row keeps the op's own state, as before
@@ -431,13 +478,36 @@ def test_lfm2_last_real_token_with_a_static_mask(tmp_path):
     assert position([[0, 0, 1, 1], [1, 0, 1, 1], [1, 1, 0, 0]], sequence_length=4) == [4, 4, 2]
 
 
-def test_lfm2_paged_export_keeps_the_conv_op_state():
-    # Paged exports have no attention mask to find the last real token with.
-    model, _ = _build_tiny_lfm2({"use_paged_attention": True}, "cuda", ir.DataType.FLOAT16)
+@pytest.mark.parametrize("kind", sorted(TINY_MODELS))
+def test_lfm2_paged_conv_layers_keep_each_sequence_apart(kind):
+    # CausalConvWithState would run the packed tokens of all sequences as one sequence.
+    model, _ = _build_tiny_lfm2({"use_paged_attention": True}, "cuda", ir.DataType.FLOAT16, kind=kind)
 
     graph = model.model.graph
     assert _conv_state_producers(graph) == {
-        "present.0.conv": "CausalConvWithState",
-        "present.2.conv": "CausalConvWithState",
+        "present.0.conv": "VarlenCausalConvWithState",
+        "present.2.conv": "VarlenCausalConvWithState",
     }
-    assert not [node.name for node in graph if node.op_type == "GatherElements"]
+    for layer_id in _conv_layers(model):
+        conv = graph.node(f"/model/layers.{layer_id}/conv/VarlenCausalConvWithState")
+        assert [value.name if value is not None else "" for value in conv.inputs] == [
+            f"/model/layers.{layer_id}/conv/Mul_1/output_0",
+            f"model.layers.{layer_id}.conv.conv.weight",
+            "cumulative_sequence_lengths",
+            "",
+            f"past.{layer_id}.conv",
+        ]
+        assert conv.attributes["activation"].value == "none"
+    assert model.make_decoder_state_groups({}, {}) == [
+        {"kind": "paged_kv", "layer_ids": [1, 3]},
+        {"kind": "fixed_conv", "layer_ids": [0, 2]},
+    ]
+    # A rank-3 Transpose of the packed rank-2 tokens fails to load in onnxruntime.
+    assert not [node.name for node in graph if "/conv/" in node.name and node.op_type == "Transpose"]
+    check_node_shapes(ir.serde.serialize_model(model.model))
+
+
+@pytest.mark.parametrize("kind", sorted(TINY_MODELS))
+def test_lfm2_paged_conv_layers_need_cuda(kind):
+    with pytest.raises(NotImplementedError, match="CUDA only"):
+        _build_tiny_lfm2({"use_paged_attention": True}, "webgpu", ir.DataType.FLOAT16, kind=kind)

@@ -28,7 +28,7 @@ struct StandardAllocator : OrtAllocator {
   StandardAllocator() : OrtAllocator{} {
     version = ORT_API_VERSION;
     OrtAllocator::Alloc = [](OrtAllocator* /*this_*/, size_t size) -> void* { return new std::byte[size]; };
-    OrtAllocator::Free = [](OrtAllocator* /*this_*/, void* p) { delete reinterpret_cast<std::byte*>(p); };
+    OrtAllocator::Free = [](OrtAllocator* /*this_*/, void* p) { delete[] reinterpret_cast<std::byte*>(p); };
   }
 };
 
@@ -706,6 +706,13 @@ inline OrtSessionOptions& OrtSessionOptions::AddConfigEntry(const char* config_k
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::AddFreeDimensionOverrideByName(
+    const char* dim_name, int64_t dim_value) {
+  Ort::ThrowOnError(
+      Ort::api->AddFreeDimensionOverrideByName(this, dim_name, dim_value));
+  return *this;
+}
+
 inline bool OrtSessionOptions::HasConfigEntry(const char* config_key) const {
   int out = 0;
   Ort::ThrowOnError(Ort::api->HasSessionConfigEntry(this, config_key, &out));
@@ -1005,16 +1012,20 @@ inline std::string OrtModelMetadata::LookupCustomMetadataMap(const char* key) co
 }
 
 inline std::vector<std::string> OrtModelMetadata::GetCustomMetadataMapKeysAllocated() const {
-  char** out;
+  char** out{};
   int64_t num_keys = 0;
   Ort::ThrowOnError(Ort::api->ModelMetadataGetCustomMetadataMapKeys(this, &Ort::standard_allocator, &out, &num_keys));
+
+  // Own the returned memory so it will be freed
+  auto strings_deleter = [num_keys](char** keys) {
+    for (int64_t i = 0; i < num_keys; ++i)
+      Ort::standard_allocator.Free(&Ort::standard_allocator, keys[i]);
+    Ort::standard_allocator.Free(&Ort::standard_allocator, keys);
+  };
+  std::unique_ptr<char*, decltype(strings_deleter)> strings_guard(out, strings_deleter);
   if (num_keys <= 0) {
     return {};
   }
-
-  // Own the returned memory so it will be freed
-  auto strings_deletor = [num_keys](char** out) { for(int64_t i = 0; i < num_keys; ++i) delete out[i]; };
-  std::unique_ptr<char*, decltype(strings_deletor)> strings_guard(out, strings_deletor);
 
   std::vector<std::string> result;
   for (int64_t i = 0; i < num_keys; ++i)

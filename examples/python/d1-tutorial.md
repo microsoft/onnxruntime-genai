@@ -1,4 +1,6 @@
-# Run d1-3B decisions with ONNX Runtime GenAI
+# Run d1 decisions with ONNX Runtime GenAI
+
+Sections 1 to 7 are about d1-3B. [Section 8](#8-d1-2b) covers text decisions with d1-2B.
 
 ## What d1-3B is
 
@@ -23,6 +25,10 @@ pip install torch "transformers>=5.14" onnx onnx_ir huggingface_hub   # for the 
 For an NVIDIA GPU, install `onnxruntime-genai-cuda` instead, in its own virtual environment (each
 package brings its own ONNX Runtime). Version 0.18.0 needs the CUDA 13 runtime libraries and an NVIDIA
 driver 580 or newer.
+
+onnxruntime-genai 0.18.0 cannot read d1-3B's `tokenizer.json`, and it resizes some images one 32-pixel
+step differently than d1 (for example a 400-pixel side). With 0.18.0, patch the file after each export
+as in [step 3 of an earlier version of this tutorial](https://github.com/microsoft/onnxruntime-genai/blob/7f090db1731887b6a1b3f2715642df4ffe0e7863/examples/python/d1-tutorial.md#3-fix-the-tokenizer).
 
 `d1-decisions.py` imports `common.py` from the same folder. Take both from the same commit of
 [`examples/python`](https://github.com/microsoft/onnxruntime-genai/tree/main/examples/python):
@@ -52,27 +58,7 @@ prompt needs gigabytes for logits that a decision never reads.
 The int8 export logs `[ERROR] Gather only supports 4 bits quantization.` a few times; the export still
 succeeds. int4 also works but is not recommended: it can flip the answer when two options are close.
 
-## 3. Fix the tokenizer
-
-The tokenizer in GenAI cannot parse the pre-tokenizer pattern in d1-3B's `tokenizer.json` yet. Replace
-it with the equivalent pattern, as for LFM2.5-VL-3B. Run this once for every export folder:
-
-```python
-import json
-from pathlib import Path
-
-export = Path("./d1-3b/cpu")  # also ./d1-3b/cuda and ./d1-3b/cpu-vl
-path = export / "tokenizer.json"
-tokenizer = json.loads(path.read_text(encoding="utf-8"))
-old = r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s"
-new = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
-split = tokenizer["pre_tokenizer"]["pretokenizers"][0]
-assert split["pattern"]["Regex"] == old
-split["pattern"]["Regex"] = new
-path.write_text(json.dumps(tokenizer, ensure_ascii=False), encoding="utf-8")
-```
-
-## 4. Run a request
+## 3. Run a request
 
 `request.json`:
 
@@ -120,7 +106,7 @@ in the other examples. Output from the int8 CPU model (rounded):
 }
 ```
 
-## 5. Request and response format
+## 4. Request and response format
 
 The request and the answers have the same shape as d1's own `system_one()`.
 
@@ -140,124 +126,35 @@ The request and the answers have the same shape as d1's own `system_one()`.
 
 `usage.input_tokens` counts the shared part of the prompt once, plus each question, as d1 does.
 
-Before it runs the model, the script refuses a request with other fields in the request or a question,
-an unknown `type`, missing `instructions`, bad `criteria`, a NUL character, a prompt longer than the
-model's context, or images for a model without a vision model. The command line then prints one
-`error: ...` line and exits with code 2.
+Before it runs the model, the script refuses a request with other fields in the request or a question, an unknown `type`, a typed answer such as `box`, a choice with `"multiple": true`, missing `instructions`, bad `criteria`, a NUL character, a prompt longer than the model's context, or images for a model without a vision model. The command line then prints one `error: ...` line and exits with code 2.
 
-## 6. Images
+## 5. Images
 
-To answer questions about images, run d1-3B as an `lfm2_vl` pipeline; the
-[LFM2-VL tutorial](lfm2-vl-tutorial.md) explains the parts. These steps are for the CPU export (the
-embedding model below is float32).
+To answer questions about images, build d1-3B with `exclude_embeds=true`. The builder then also writes
+the vision model, the embedding model and their configs; the [LFM2-VL tutorial](lfm2-vl-tutorial.md)
+explains the parts. This is newer than onnxruntime-genai 0.18.0, so until the next release run the
+builder from a clone of this repository (with a newer wheel, run `python -m onnxruntime_genai.models.builder`
+with the same arguments):
 
-1. Build the decoder without the embeddings, then fix its tokenizer as in [step 3](#3-fix-the-tokenizer):
+```bash
+git clone --depth 1 https://github.com/microsoft/onnxruntime-genai
 
-   ```bash
-   python -m onnxruntime_genai.models.builder -i ./d1-3b/pytorch -o ./d1-3b/cpu-vl -p int8 -e cpu \
-       --extra_options exclude_embeds=true prune_lm_head=true
-   ```
+# CPU
+python onnxruntime-genai/src/python/py/models/builder.py -i ./d1-3b/pytorch -o ./d1-3b/cpu-vl -p int8 -e cpu \
+    --extra_options exclude_embeds=true prune_lm_head=true
 
-2. Reuse the vision model of LFM2.5-VL-3B: d1-3B's vision tower and projector are bit-identical to it.
+# NVIDIA GPU
+python onnxruntime-genai/src/python/py/models/builder.py -i ./d1-3b/pytorch -o ./d1-3b/cuda-vl -p fp16 -e cuda \
+    --extra_options exclude_embeds=true prune_lm_head=true
+```
 
-   ```bash
-   hf download LiquidAI/LFM2.5-VL-3B-ONNX --revision 020f9311343b8f3c6d9789b4dd300e749ec52cd1 \
-       --include "onnx/vision_encoder.onnx*" --local-dir ./lfm2.5-vl-3b-onnx
-   cp ./lfm2.5-vl-3b-onnx/onnx/vision_encoder.onnx* ./d1-3b/cpu-vl/
-   ```
-
-3. Build `embeddings.onnx` from d1-3B's own embedding table (d1-3B retrained it). It looks up
-   `input_ids` and puts `image_features` where the image token (id 124907) is:
-
-   ```python
-   import numpy as np
-   import onnx
-   from onnx import TensorProto, helper, numpy_helper
-   from safetensors import safe_open
-
-   hidden_size, image_token_id = 2048, 124907
-   with safe_open("./d1-3b/pytorch/model.safetensors", "pt") as f:
-       table = f.get_tensor("model.language_model.embed_tokens.weight").float().numpy()
-
-
-   def const(name, value):
-       value = numpy_helper.from_array(np.array(value, np.int64))
-       return helper.make_node("Constant", [], [name], value=value)
-
-
-   nodes = [
-       helper.make_node("Gather", ["embed_tokens.weight", "input_ids"], ["embeds"], axis=0),
-       helper.make_node("Shape", ["embeds"], ["embeds_shape"]),
-       const("rows", [-1, hidden_size]),
-       helper.make_node("Reshape", ["embeds", "rows"], ["flat_embeds"]),
-       const("image_token_id", image_token_id),
-       helper.make_node("Equal", ["input_ids", "image_token_id"], ["is_image"]),
-       const("flat", [-1]),
-       helper.make_node("Reshape", ["is_image", "flat"], ["flat_is_image"]),
-       helper.make_node("NonZero", ["flat_is_image"], ["positions"]),
-       helper.make_node("Transpose", ["positions"], ["indices"], perm=[1, 0]),
-       helper.make_node("ScatterND", ["flat_embeds", "indices", "image_features"], ["flat_out"]),
-       helper.make_node("Reshape", ["flat_out", "embeds_shape"], ["inputs_embeds"]),
-   ]
-   inputs = [
-       helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]),
-       helper.make_tensor_value_info("image_features", TensorProto.FLOAT, ["num_tokens", hidden_size]),
-   ]
-   embeds_shape = ["batch_size", "sequence_length", hidden_size]
-   outputs = [helper.make_tensor_value_info("inputs_embeds", TensorProto.FLOAT, embeds_shape)]
-   weights = [numpy_helper.from_array(table, "embed_tokens.weight")]
-   graph = helper.make_graph(nodes, "d1_embedding", inputs, outputs, weights)
-   model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=9)
-   path = "./d1-3b/cpu-vl/embeddings.onnx"
-   onnx.save(model, path, save_as_external_data=True, location="embeddings.onnx.data")
-   ```
-
-4. Add the `embedding` and `vision` sections to the `genai_config.json` the builder wrote, and write
-   `processor_config.json` (the LFM2.5-VL-3B values, with d1-3B's bicubic resize):
-
-   ```python
-   import json
-   from pathlib import Path
-
-   model = Path("./d1-3b/cpu-vl")
-   config = json.loads((model / "genai_config.json").read_text(encoding="utf-8"))
-   session_options = {"log_id": "onnxruntime-genai", "provider_options": []}
-   config["model"]["embedding"] = {
-       "filename": "embeddings.onnx", "session_options": session_options,
-       "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
-       "outputs": {"inputs_embeds": "inputs_embeds"},
-   }
-   config["model"]["vision"] = {
-       "filename": "vision_encoder.onnx",
-       "config_filename": "processor_config.json",
-       "session_options": session_options,
-       "patch_size": 16, "spatial_merge_size": 2, "max_num_patches": 1024,
-       "inputs": {
-           "pixel_values": "pixel_values",
-           "attention_mask": "pixel_attention_mask",
-           "image_sizes": "spatial_shapes",
-       },
-       "outputs": {"image_features": "image_features"},
-   }
-   (model / "genai_config.json").write_text(json.dumps(config, indent=4), encoding="utf-8")
-
-
-   def step(name, kind, **attrs):
-       return {"operation": {"name": name, "type": kind, **({"attrs": attrs} if attrs else {})}}
-
-
-   transforms = [
-       step("decode_image", "DecodeImage", color_space="RGB"),
-       step("resize", "Resize", height=512, width=512, interpolation="CUBIC", smart_resize=1,
-            min_pixels=65536, max_pixels=262144, patch_size=16, merge_size=2),
-       step("rescale", "Rescale", rescale_factor=1 / 255),
-       step("normalize", "Normalize", mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-       step("to_channel_first", "Permute3D", dims=[2, 0, 1]),
-       step("image_sizes", "PixtralImageSizes"),
-   ]
-   processor = {"processor": {"name": "lfm2_vl_image_processor", "transforms": transforms}}
-   (model / "processor_config.json").write_text(json.dumps(processor, indent=2), encoding="utf-8")
-   ```
+The embedding model uses d1-3B's own embedding table (d1-3B retrained it) and puts the image features
+where the image token (id 124907) is. `processor_config.json` uses d1-3B's bicubic resize. The vision
+and embedding models are not quantized: they are float32 in the CPU export and float16 in the CUDA one,
+and they run on the decoder's execution provider. The same steps work for a WebGPU export
+(`-p fp32 -e webgpu`, with `onnxruntime-ep-webgpu` installed). Use fp32 on WebGPU: the plug-in's fp16
+kernels drift more. With the fp16 vision model, the image features of `cats.jpg` below have a smallest
+per-token cosine similarity to transformers of 0.832 on WebGPU, against 0.990 for the same file on the CPU.
 
 Then pass images with `--image`. Use `"state": null` when the images are the whole state. For example,
 with the two-cats picture from the model card and a `cats.json` that asks one `choice`, "How many cats
@@ -268,14 +165,13 @@ curl -o cats.jpg http://images.cocodataset.org/val2017/000000039769.jpg
 python d1-decisions.py -m ./d1-3b/cpu-vl -r cats.json --image cats.jpg
 ```
 
-The answer is `two` with a probability of about 0.985, as in transformers.
+The answer is `two` (transformers gives it a probability of 0.986).
 
-## 7. Limitations
+## 6. Limitations
 
 - One prefill per question: with several questions, the state is processed again for each question.
 - No image tiling: GenAI resizes each image once, while d1 cuts images above about 0.5 megapixels into
-  tiles, so answers on large images differ. When an image side falls exactly halfway between two
-  32-pixel steps (for example 400 pixels), GenAI rounds up and d1 rounds to the even step.
+  tiles, so answers on large images differ.
 - No escaping: special tokens such as `<|im_end|>` in caller text are read as special tokens, as in d1
   and llama.cpp.
 - A few rare whitespace runs (for example a line of only spaces) tokenize differently than in
@@ -283,7 +179,7 @@ The answer is `two` with a probability of about 0.985, as in transformers.
 - The script refuses some requests that d1's own code answers, for example an unknown `type`, a choice
   with one option, or a score with more than 10 levels.
 
-## 8. Accuracy and speed
+## 7. Accuracy and speed
 
 Measured with `d1-decisions.py` (onnxruntime-genai 0.18.0, ONNX Runtime 1.31.0) against d1-3B in
 transformers fp32, on 32 hand-written decisions (all three types; text, JSON, log and code states).
@@ -301,6 +197,76 @@ On the first 1000 items of public sets, GenAI gave the same top answer as transf
 
 - BoolQ: 998 (fp16, CUDA) and 995 (int8, CPU);
 - MNLI (matched): 997 (fp16, CUDA) and 995 (int8, CPU);
-- POPE (images, int8 CPU pipeline from [Images](#6-images)): 998.
+- POPE (images, built as in [Images](#5-images)): 1000 (fp16, CUDA) and 999 (int8, CPU).
 
 Use fp16 on CUDA, not bf16: bf16 gave fewer same top answers (BoolQ 994, MNLI 988) and more exact ties.
+
+## 8. d1-2B
+
+[LiquidAI/d1-2B](https://huggingface.co/LiquidAI/d1-2B) is a d1 model built on LFM3-VL. It is released under the [LFM Open License v1.0](https://huggingface.co/LiquidAI/d1-2B/blob/main/LICENSE). Read it before you use the model. This tutorial and its script do not change its terms.
+
+GenAI runs its text questions: `noul`, `choice` and `score`, each with one forward pass over its own prompt. Running the export needs onnxruntime-genai 0.19 or newer with ONNX Runtime 1.30 or newer. The builder needs `torchvision` and transformers 5.18 or newer, because it loads the model's own code, which fails on older transformers. The builder is newer than onnxruntime-genai 0.19.0, so until the next release run it from a clone of this repository (with a newer wheel, run `python -m onnxruntime_genai.models.builder` with the same arguments):
+
+```bash
+pip install "onnxruntime-genai>=0.19" torchvision "transformers>=5.18"
+git clone --depth 1 https://github.com/microsoft/onnxruntime-genai
+hf download LiquidAI/d1-2B --local-dir ./d1-2b/pytorch
+
+# CPU
+python onnxruntime-genai/src/python/py/models/builder.py -i ./d1-2b/pytorch -o ./d1-2b/cpu -p int8 -e cpu \
+    --extra_options hf_remote=true prune_lm_head=true
+cp ./d1-2b/pytorch/calibration.json ./d1-2b/cpu/
+
+# NVIDIA GPU (with onnxruntime-genai-cuda installed)
+python onnxruntime-genai/src/python/py/models/builder.py -i ./d1-2b/pytorch -o ./d1-2b/cuda -p fp16 -e cuda \
+    --extra_options hf_remote=true prune_lm_head=true
+cp ./d1-2b/pytorch/calibration.json ./d1-2b/cuda/
+
+python d1-decisions.py -m ./d1-2b/cpu -r request.json
+```
+
+`hf_remote=true` runs Python code from the checkpoint, because only that code registers the model. With `request.json` from [section 3](#3-run-a-request), the int8 CPU model answers on the Xeon 8480+ (rounded; other CPUs differ in the third decimal):
+
+```json
+{
+  "answers": {
+    "refund": {"type": "noul", "noul": 0.9974},
+    "team": {"type": "choice", "choice": "billing", "confidence": 0.9639,
+             "probabilities": {"billing": 0.9639, "technical": 0.0192, "fraud": 0.0168}},
+    "urgency": {"type": "score", "score": 0.0, "confidence": 0.7769,
+                "probabilities": {"0": 0.7769, "1": 0.204, "2": 0.0191},
+                "legend": {"0": "Can wait", "1": "Today", "2": "Blocking the customer now"}}
+  },
+  "usage": {"input_tokens": 160, "output_tokens": 0}
+}
+```
+
+The script picks these from the model type, `lfm3`, to match d1-2B's own code:
+
+- Each question is a whole prompt. On d1-2B's 6 full-attention layers the state and the question read each other in both directions (GroupQueryAttention with `causal=0`), so a state is processed again for each question and `usage.input_tokens` counts it each time. The other 18 layers stay causal.
+- The prompt ends in an empty reasoning block, `<think></think>`.
+- Special tokens in caller text are escaped with a zero-width space, so `<|im_end|>` in a state cannot close the turn.
+- Option scores are divided by the temperature in `calibration.json` (1.337 for d1-2B). The script refuses to run without that file.
+- `score` is the first level whose cumulative probability reaches one half, not the expected level.
+- A choice with more than 26 options uses the codes AA, AB and so on.
+
+What this does not do:
+
+- A choice with `"multiple": true` is refused: it needs one answer slot per option, and this script reads one position per question. The `text`, `number`, `date`, `box` and `boxes` types are refused for the same reason.
+- No images. They need the `lfm3_vl` pipeline, which GenAI does not have yet.
+- One question per pass. d1's own code reads up to 16 questions in one pass (`d1_set_size` in its `config.json`), and its model card says larger sets are faster and cost some accuracy on text; only one question per pass was compared here.
+- WebGPU, JS and DirectML are refused by the builder, and `d1-decisions.py` refuses `-e WebGpuExecutionProvider`, because `causal=0` runs on CPU and CUDA only. ONNX Runtime 1.29 and older fail to load the model.
+- Do not generate text with this export: its full-attention layers read later tokens, so it is for one forward pass over a whole prompt.
+
+Measured with `d1-decisions.py` (ONNX Runtime 1.31.0) against d1-2B's own `system_one(state, questions, set_size=1)` in transformers fp32, at revision `97c57047`, on 49 questions: the 32 hand-written decisions of section 7, 10 questions asked together over 3 states, 3 states or questions that hold special tokens, one with 30 options, one with no state, and 2 over a state of 2,600 tokens. Token ids were equal on all 49. States with long runs of whitespace are a known gap: GenAI's tokenizer can split them differently from Hugging Face's. On 60 such questions the ids differed on 12, probabilities moved by up to 0.085 and 2 top answers changed. [onnxruntime-extensions #1138](https://github.com/microsoft/onnxruntime-extensions/pull/1138) fixes most of these; 12 or more newlines in a row and U+0085 next to punctuation still differ with it. Times are for one question at a length already seen, with the default number of threads.
+
+| Machine, export | same top answer | largest probability difference | 42 / 289 / 4189 tokens |
+| --- | --- | --- | --- |
+| Linux, CUDA (H100), fp16 | 48/49 | 0.0015 | 5.0 / 6.6 / 37.7 ms |
+| Linux, CPU (Xeon 8480+, 26 vCPU), fp32 | 49/49 | 0.0000046 | 179 / 856 / 14437 ms |
+| Linux, CPU, int8 | 49/49 | 0.030 | 98 / 562 / 12065 ms |
+| macOS, CPU (M3 Ultra), fp32 | 49/49 | 0.0000014 | 132 / 637 / 11316 ms |
+
+The one different answer on fp16 is a `noul` at 0.4999 in transformers and 0.5015 here. On CUDA the first prompt at a new length takes about 170 ms, because cuDNN plans its attention for that length. If your prompts vary in length, set `ORT_ENABLE_CUDNN_FLASH_ATTENTION=0`: a first prompt then takes 14 to 44 ms, the times above stay within 1 ms, and the same top answers hold on 48/49 (largest difference 0.0045).
+
+An export without `causal=0` gives the same top answer on only 44 of the 49, with probabilities up to 0.60 apart.

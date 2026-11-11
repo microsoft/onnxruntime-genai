@@ -30,11 +30,14 @@
 namespace Generators {
 
 struct MultiModalLanguageModel : Model {
+  static std::shared_ptr<Model> Create(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);
+
   MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);
   MultiModalLanguageModel(const MultiModalLanguageModel&) = delete;
   MultiModalLanguageModel& operator=(const MultiModalLanguageModel&) = delete;
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
+  OrtSession* GetVisionSession() const override { return vision_session_.get(); }
 
   std::unique_ptr<OrtSession> vision_session_;     // pixel_values, [image_attention_mask], image_sizes -> image_features
   std::unique_ptr<OrtSession> speech_session_;     // audio_embeds, audio_sizes, audio_projection_mode -> audio_features
@@ -227,6 +230,8 @@ struct MultiModalPipelineState : State {
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+  void DiscardNextLogits() override { discard_next_logits_ = true; }
+  void StartTurn() override { new_turn_ = true; }
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
@@ -265,6 +270,8 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<Lfm2AudioOutput> audio_output_;  // LFM2-Audio speech output, when the model has it
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
+  bool discard_next_logits_{};
+  bool new_turn_{};
 
   const std::string vision_adapter_name_{"vision"};
   const std::string speech_adapter_name_{"speech"};

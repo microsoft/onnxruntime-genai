@@ -22,7 +22,6 @@ struct ConvKeyValueCache : KeyValueCache {
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
-  template <typename T>
   void PickConvState(DeviceSpan<int32_t> beam_indices, int conv_index);
 
   DeviceInterface& Device() { return *model_.p_device_kvcache_; }
@@ -32,7 +31,7 @@ struct ConvKeyValueCache : KeyValueCache {
   const Model& model_{state_.model_};
 
   // Layer type info
-  std::vector<std::string> layer_types_;  // "conv" or "full_attention" per layer
+  std::vector<std::string> layer_types_;  // "conv", "full_attention" or "sliding_attention" per layer
   int layer_count_;
 
   // KV cache (only for attention layers)
@@ -49,8 +48,11 @@ struct ConvKeyValueCache : KeyValueCache {
   // bound to both). Enabled the same way as DefaultKeyValueCache: via
   // IsPastPresentShareBufferEnabled (genai search options) and/or a fixed kv seq_len
   // detected in the model graph by DetectAndConfigureFixedKvShape. Sequence capacity is
-  // the detected fixed dim when present, else search.max_length.
+  // the detected fixed dim when present, else search.max_length, except in window-sized layers (kv_windowed_).
   bool kv_share_buffer_{false};
+  // Per KV layer: a sliding_attention layer whose window-sized buffer is bound as past and present in every mode.
+  std::vector<bool> kv_windowed_;
+  int kv_window_capacity_{};
 
   // Conv state cache (only for conv layers)
   int conv_layer_count_{};

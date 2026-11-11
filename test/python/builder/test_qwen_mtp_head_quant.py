@@ -16,6 +16,7 @@ from loaders.qwen import Qwen4ExpMTPModel, QwenMTPModel
 from safetensors.torch import save_file
 
 from models.builders.qwen import Qwen4ExpModel, Qwen35DenseMTPModel, Qwen35Model, Qwen35MoEModel
+from models.builders.qwen3_8 import vision as qwen_vision
 
 
 def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):
@@ -40,6 +41,8 @@ class FakeComponent:
         self.hf_remote = False
         self.context_length = 128
         self.exclude_embeds = False
+        self.use_paged_attention = extra_options.get("use_paged_attention", False)
+        self.embed_attrs = {"emit_component": self.use_paged_attention}
         self.model_type = "qwen3_5_moe"
 
 
@@ -48,6 +51,7 @@ class FakeQwen4ExpComponent(FakeComponent):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.multimodal_rotary = multimodal_rotary
         self.model_type = "qwen4_exp"
+        self.hidden_size = 8
         self.hyper_connection_attrs = {"hidden_size": 8}
         self.output_shapes = {"hidden_states": ["batch_size", "sequence_length", 2]}
         self.filename = extra_options.get("filename", "text.onnx")
@@ -64,6 +68,47 @@ class FakeQwen4ExpComponent(FakeComponent):
 
     def make_hidden_state_shape(self, last_dim=None):
         return ["batch_size", "sequence_length", last_dim or 2]
+
+
+@pytest.mark.parametrize(
+    ("exclude_embeds", "dflash2_path", "expected_components"),
+    [(False, None, 0), (True, None, 1), (False, "drafter", 1)],
+)
+def test_qwen4_exp_builds_standalone_lookup_only_for_a_consumer(
+    monkeypatch, exclude_embeds, dflash2_path, expected_components
+):
+    from models.builders.base import Model  # noqa: PLC0415
+
+    monkeypatch.setitem(Qwen4ExpModel.__init__.__globals__, "Qwen4ExpTextModel", FakeQwen4ExpComponent)
+    options = {"use_paged_attention": True, "exclude_embeds": exclude_embeds, "dflash2_path": dflash2_path}
+    config = SimpleNamespace(
+        text_config=SimpleNamespace(mtp_num_hidden_layers=0, bos_token_id=0, eos_token_id=1, pad_token_id=0),
+        vision_config=SimpleNamespace(out_hidden_size=8),
+    )
+    composite = Qwen4ExpModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, options)
+    decoder = composite.decoder
+    decoder.exclude_embeds = True
+    decoder.num_layers = 1
+    decoder.layernorm_attrs = {}
+    weights = torch.nn.Sequential(torch.nn.Embedding(decoder.vocab_size, 8))
+    components = []
+    for method in (
+        "make_inputs_and_outputs",
+        "make_preprocessing_nodes",
+        "make_aux_hidden_states",
+        "make_postprocessing_nodes",
+    ):
+        monkeypatch.setattr(decoder, method, lambda: None, raising=False)
+    monkeypatch.setattr(decoder, "load_weights", lambda path: weights, raising=False)
+    monkeypatch.setattr(decoder, "is_layer", lambda module: False, raising=False)
+    monkeypatch.setattr(decoder, "has_lm_head", lambda module: False, raising=False)
+    monkeypatch.setattr(decoder, "make_embedding_component", lambda weight: components.append(weight), raising=False)
+
+    Model.make_model(decoder, "unused-checkpoint")
+
+    assert len(components) == expected_components
+    if components:
+        assert components[0] is weights[0].weight
 
 
 def test_composite_without_mtp_creates_only_decoder(monkeypatch):
@@ -236,8 +281,8 @@ def test_qwen4_exp_composite_saves_image_processor_config(monkeypatch, tmp_path)
     }
     preprocessor_path = tmp_path / "preprocessor_config.json"
     preprocessor_path.write_text(json.dumps(image_processor))
-    monkeypatch.setitem(
-        Qwen4ExpModel.save_processing.__globals__,
+    monkeypatch.setattr(
+        qwen_vision,
         "hf_hub_download",
         lambda *args, **kwargs: preprocessor_path,
     )
@@ -777,8 +822,9 @@ def _make_minimal_mtp_embedding_model(*, tied_quantized=False, tied_unquantized=
     model.make_reshape = make_reshape
     model.make_transpose = make_transpose
     model.make_node = make_node
-    model.make_tied_quantized_embedding_input_names = lambda: (
+    model.make_tied_quantized_embedding_input_names = lambda _lm_head: (
         8,
+        32,
         "lm_head.MatMul.weight_Q8G32",
         "lm_head.MatMul.weight_scale",
         None,

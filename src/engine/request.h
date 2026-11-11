@@ -13,6 +13,7 @@
 #include "engine_invariants.h"
 #include "step_plan.h"
 #include "turn_policy.h"
+#include "media.h"
 #include "../decoding/speculative_sampling.h"
 
 /**
@@ -90,6 +91,9 @@ struct RequestStepResult {
   int32_t matched_stop_string_index{-1};
   std::array<int32_t, kMaxGeneratedTokensPerStep> visible_tokens{};
   size_t visible_token_count{};
+  // Internal commit feedback, independent of stop buffering and caller event-drain rate.
+  size_t candidates_consumed{};
+  size_t tokens_appended{};
 };
 
 struct RequestTurnAdmission {
@@ -183,6 +187,7 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t BeginTurn(
       std::span<const int32_t> tokens,
       const TurnOptions& options);
+  uint64_t BeginTurn(const std::string& prompt, const TurnOptions& options, const Images* images);
   // Rewinds a completed Request to the sequence boundary before the identified Turn began.
   // Turn IDs are never reused; the next BeginTurn replays the retained prefix.
   void RewindToStartOfTurn(uint64_t turn_id);
@@ -291,6 +296,13 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   std::span<const int32_t> UnprocessedTokensCpu() const;
   std::span<const int32_t> TokensCpu() const { return tokens_host_; }
+  std::span<const int32_t> PrefixTokensCpu() const;
+  std::span<const MediaSpan> Media() const { return media_; }
+  std::array<int64_t, 3> Position(size_t row) const;
+  void ReserveMedia(size_t count);
+  void AppendMedia(std::span<const MediaSpan> media) noexcept;
+  bool RetryMediaPreparation(const std::shared_ptr<MediaItem>& item) noexcept;
+  void ClearMediaPreparationFailure() noexcept;
   void StagePrefixAdoption(size_t adopted_tokens);
   void RollbackPrefixAdoption() noexcept;
   void CommitPrefixAdoption() noexcept { prefix_adoption_staged_ = false; }
@@ -419,6 +431,19 @@ struct Request : std::enable_shared_from_this<Request>,
    * Updates the host-side token mirror and the request status.
    */
   RequestStepResult CompleteGeneration();
+
+  /**
+   * @brief Commits tokens an executor selected itself, in sequence order, and reports the step.
+   * @param tokens One to kMaxGeneratedTokensPerStep tokens the executor decided to commit.
+   *
+   * Each token goes through Search::CommitToken, so EOS and the session limit follow the ordinary
+   * bookkeeping (an EOS token ends the turn and is not appended). Stop strings observe every
+   * appended token. The turn limit, the context limit and a stop match end the turn at the first
+   * token that reaches them, with the same precedence as StageGeneration (stop string, EOS, turn
+   * limit, context limit); tokens after that one are not committed. The returned step lists the
+   * appended tokens only.
+   */
+  RequestStepResult CommitExternalTokens(std::span<const int32_t> tokens);
 
   /**
    * @brief Checks if the current generation turn reached a stopping condition.
@@ -599,6 +624,10 @@ struct Request : std::enable_shared_from_this<Request>,
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
+  mutable std::vector<int32_t> prefix_tokens_;
+  std::vector<MediaSpan> media_;
+  std::weak_ptr<MediaItem> failed_media_;
+  bool media_preparation_retried_{};
   friend struct Engine;
   friend struct ScheduledRequests;
   friend struct test::EngineRunTestAccess;
@@ -672,6 +701,7 @@ struct Request : std::enable_shared_from_this<Request>,
   struct DraftVerificationState {
     bool completed_generation{};
     bool eos{};
+    int32_t eos_token_id{-1};
     int32_t stop_match_index{-1};
 
     void Reset() noexcept { *this = DraftVerificationState{}; }

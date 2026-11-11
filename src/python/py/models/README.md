@@ -21,6 +21,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Config Only](#config-only)
     - [Hugging Face Authentication](#hugging-face-authentication)
     - [Hugging Face Remote Code](#hugging-face-remote-code)
+    - [Nemotron Parse Options](#nemotron-parse-options)
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Prune Language Modeling Head](#prune-language-modeling-head)
@@ -52,6 +53,7 @@ This folder contains the model builder for quickly creating optimized and quanti
       - [Quantize the KV Cache](#quantize-the-kv-cache)
     - [FP32 I/O for WebGPU EP](#fp32-io-for-webgpu-ep)
     - [BF16 I/O for CUDA EP](#bf16-io-for-cuda-ep)
+    - [Bailing BF16 KDA Prefill Precision](#bailing-bf16-kda-prefill-precision)
     - [LoRA Models](#lora-models)
   - [Unit Testing Models](#unit-testing-models)
     - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
@@ -63,6 +65,7 @@ This folder contains the model builder for quickly creating optimized and quanti
 The tool currently supports the following model architectures.
 
 - AMD OLMo
+- Bailing MoE V3 (Ling-3.0-tiny; see [configuration semantics](docs/model-specific-options.md#bailing-moe-v3-ling-30-tiny))
 - ChatGLM
 - DeepSeek
 - ERNIE 4.5
@@ -72,17 +75,36 @@ The tool currently supports the following model architectures.
 - Granite MoE Hybrid
 - HunYuan Dense V1
 - InternLM2
-- LFM2 (text and the decoders of LFM2-VL / LFM2.5-VL / d1-3B and LFM2-Audio / LFM2.5-Audio)
+- LFM2 (text, LFM2-VL / LFM2.5-VL / d1-3B with their vision models, and the decoders of LFM2-Audio / LFM2.5-Audio)
 - LFM2 MoE
+- LFM3 (text, d1-2B text decisions, and the decoders of LFM3-VL / LFM3-Audio / LFM3-Omni)
+  - d1-2B (`D1Model`) needs `hf_remote=true`, because only its remote code registers the model. Its full-attention layers read the whole prompt in both directions (GroupQueryAttention `causal=0`), so an export is for [`d1-decisions.py`](../../../../examples/python/d1-decisions.py), not for generating text. It runs on CPU and CUDA with ONNX Runtime 1.30 or newer; the builder refuses other execution providers, which do not have `causal=0`. Like LFM3-1.7B below, its CPU and CUDA exports without `exclude_embeds` give the 5 sliding-window layers window-sized KV caches. See the [d1 tutorial](../../../../examples/python/d1-tutorial.md).
+  - With `exclude_embeds=true` the LFM3-VL / LFM3-Audio / LFM3-Omni / d1-2B decoders are stages of the `lfm3_vl`, `lfm3_audio` and `lfm3_omni` pipelines, which the runtime cannot load yet.
+  - LFM3-1.7B has a 262144-token context. Its RoPE caches take about 134 MB in a model with fp16 inputs and outputs and 268 MB with fp32 ones (CPU exports, int4 included). Its full-attention layers keep a KV cache of `search.max_length` tokens, which defaults to that context, so set `search.max_length` to the length you need. In text exports for CPU and CUDA the sliding-window layers keep only their 256-token window (272 rows on CPU, 256 on CUDA), and each prompt of a right-padded batch runs alone; with `include_hidden_states` the export refuses such a batch instead. An export with window-sized caches needs a runtime with this support: an older onnxruntime-genai fails on it on CUDA at the first step and on CPU with padded batches or beam search, and the WebGPU provider does not load it. Export with `windowed_kv_cache=false` to get full-length caches in every layer, as earlier exports have. Exports with `use_paged_attention`, `enable_cuda_graph` or `exclude_embeds`, and exports for WebGPU or TRT-RTX, keep `search.max_length` tokens in those layers too. The runtime refuses CUDA graph capture on an export with window-sized caches. No LFM3 checkpoint has finished a run on TRT-RTX yet.
 - Llama
 - Mistral
 - Nemotron
+- Nemotron Parse
 - Phi
 - Qwen
 - SmolLM3
 - Whisper
 
 It is intended for supporting the latest, popular state-of-the-art models.
+
+Bailing exports require an ONNX Runtime build containing [ORT #33817](https://github.com/microsoft/onnxruntime/pull/33817), merged November 8, 2026 as `d93f5446f362d9c70bea81de953f32a26aa26d25`, for `MoEGroupRouter` and per-key KDA decay. The first `onnxruntime` and `onnxruntime-gpu` nightly wheels with it are `1.32.0.dev20261109001`; a CPU `onnxruntime` nightly also works with an `onnxruntime-ep-cuda12` nightly built after the merge. Older installed wheels, including the reviewed ORT 1.30.0 wheel, do not gain these operators automatically. The Linux CUDA CI workflow installs the nightly packages pinned in `test/python/cuda/ort-nightly/` and requires the CPU/CUDA routing and KDA tests to execute, not skip.
+
+Dense text LongRoPE exports using an `If` node declare an int64 scalar
+`rope_context_length` input. ONNX metadata entries
+`com.microsoft.genai.rope_context_length_input` and
+`com.microsoft.genai.original_context_length` identify that input and the cache
+switch boundary. The runtime keeps the input constant across a chunked prefill
+and replays cached tokens when the sequence switches factors, including after
+a rewind. These exports require a runtime supporting this contract; cache replay
+currently requires a single Generator sequence without beam search. Engine and
+speculative decoding (including n-gram decoding) reject this contract. KV-cache calibration reads the
+metadata and supplies each sample's context length. Paged, multimodal,
+and in-kernel cache-selection exports retain their existing interfaces.
 
 ## Usage
 
@@ -128,20 +150,40 @@ DFlash2 and DSpark selection requires a local checkpoint `path` and paged target
 
 Runtime fragments are applied after composite configuration generation. Objects merge recursively; arrays replace whole. The validator rejects absent engine or speculative capabilities, invalid allocation and draft limits, provider changes, and changes to graph-required session options. WebGPU paged attention requires a positive `num_blocks` in the effective allocation policy. This may come from legacy extra options or `runtime_config.engine.dynamic_batching.num_blocks`; the runtime overlay takes precedence. Combining `gpu_utilization_factor` with a fixed capacity is rejected; WebGPU always requires a positive fixed capacity.
 
-`runtime_config.engine.dynamic_batching.dflash2_max_snapshots` limits retained windowed DFlash 2 prefix snapshots for a hybrid target with fixed state and prefix caching enabled. It defaults to `1`, accepts integers from `0` through `2147483647`, and uses `0` to disable drafter snapshots without disabling target prefix caching. The runtime caps the count by the shared cache memory budget and target checkpoint capacity (`max_batch_size`). The same field is accepted in `runtime_profiles[].overlay.engine.dynamic_batching`. For a supported paged DFlash 2 export, use either form in the structured builder invocation:
+Prefix caching is enabled by default for supported layouts. Structured `runtime_config.engine.dynamic_batching`
+accepts `prefix_caching`, `max_snapshots`, `dflash2_max_snapshots`, and
+`snapshot_cache`.
+The latter specifies VRAM, RAM, and ephemeral disk budgets shared by an Engine's
+registered snapshot components, rather than separate per-model allowances.
+Currently only DFlash ring snapshots participate; target KV and fixed state are
+not counted. `dflash2_max_snapshots` defaults to `1`, accepts integers from `0`
+through `2147483647`, and adds a DFlash-only count ceiling after the byte budgets;
+zero disables DFlash snapshots without disabling target prefix caching.
+`max_snapshots` is an optional additional Engine-wide count ceiling and is
+unbounded when omitted. Neither count can increase a byte budget or enable a
+storage tier. Omitting `snapshot_cache` preserves legacy device-resident snapshots
+under the existing cache reservation; an explicit empty object or zero budgets
+disable snapshot storage on CPU/CUDA. WebGPU ignores tier byte budgets and
+retains count-limited device-resident snapshots. The same fields are accepted in
+runtime-profile overlays; a profile's `snapshot_cache` replaces the base object
+completely rather than merging omitted tiers. See
+[tiered snapshot configuration](../../../../docs/paged_attention_engine.md#tiered-snapshot-cache)
+for limits, policy, and a complete runtime JSON example.
+
+For a supported paged DFlash 2 export, use either form in the structured builder invocation:
 
 ```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i target_checkpoint -o output -p int4 -e cuda \
   --builder_config_version 2 --extra_options use_paged_attention=true \
   --drafter_options '{"drafter_type":"dflash2","path":"drafter_checkpoint"}' \
-  --runtime_config '{"engine":{"dynamic_batching":{"dflash2_max_snapshots":4}}}'
+  --runtime_config '{"engine":{"dynamic_batching":{"prefix_caching":true,"dflash2_max_snapshots":4,"snapshot_cache":{"ram_bytes":1073741824}}}}'
 
 # From source, at the repository root:
 python src/python/py/models/builder.py -i target_checkpoint -o output -p int4 -e cuda \
   --builder_config_version 2 --extra_options use_paged_attention=true \
   --drafter_options '{"drafter_type":"dflash2","path":"drafter_checkpoint"}' \
-  --runtime_config '{"runtime_profiles":[{"id":"larger-snapshot-pool","eligibility":{"minimum_total_device_memory_bytes":34359738368},"overlay":{"engine":{"dynamic_batching":{"dflash2_max_snapshots":4}}}}]}'
+  --runtime_config '{"runtime_profiles":[{"id":"larger-snapshot-pool","eligibility":{"minimum_total_device_memory_bytes":34359738368},"overlay":{"engine":{"dynamic_batching":{"prefix_caching":true,"dflash2_max_snapshots":4,"snapshot_cache":{"ram_bytes":1073741824}}}}}]}'
 ```
 
 `component_options` is omitted by default. When present, it exports a final-hidden-state backbone without its LM/MTP heads and packages either generic pre-built ONNX heads or one pinned model-specific artifact. Generic declarations require a non-empty `heads` array with unique safe names and filenames; every logical input/output binding must name an actual graph input/output. Revision fields are rejected for generic heads. Model-specific declarations use `model_source` instead of `heads` and require non-empty `artifact_revision` and `base_revision` pins. Component mode cannot be combined with `drafter_options`.
@@ -299,9 +341,16 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 python builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=true
 ```
 
+#### Nemotron Parse Options
+
+See [Nemotron Parse](docs/nemotron_parse.md) for model-specific export options,
+runtime behavior, and validation commands.
+
 #### Exclude Embedding Layer
 
 This scenario is for when you want to exclude the embedding layer from your ONNX model.
+
+For LFM2-VL models (`Lfm2VlForConditionalGeneration`, such as LFM2-VL, LFM2.5-VL and d1-3B), this option builds the whole image pipeline: next to the decoder, the builder writes the embedding model (`embeddings.onnx`), the vision model (`vision.onnx`) and `processor_config.json`, and adds their sections to `genai_config.json`. The vision and embedding models are never quantized. The vision model uses the decoder's input/output precision, except that it uses FP16 when the decoder uses BF16.
 
 ```bash
 # From wheel:
@@ -365,9 +414,120 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 This scenario is for when you want to build a model that uses the `PagedAttention` operator so it can be served by ONNX Runtime GenAI's continuous-batching engine. When enabled, the builder replaces `GroupQueryAttention` with `PagedAttention`, packs all sequences of the batch into a single flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged `[num_blocks, block_size, num_key_value_heads, head_size]` buffers, and removes the `attention_mask` input in favor of the `block_table`, `cumulative_sequence_lengths`, and `past_sequence_lengths` metadata inputs. It also removes `position_ids` when RoPE is fused into attention; architectures that require an external MRoPE op retain packed position IDs (for example, Qwen3.5/3.8 uses `[3, num_tokens]`). Set `prune_lm_head=true` to add a `logits_indices` input, gather the packed hidden states consumed by generation or draft verification, and output `[num_logits, vocab_size]` logits. By default, it projects every packed hidden state and outputs `[num_tokens, vocab_size]` logits.
 
-Paged attention supports CUDA with `fp16` or `bf16` precision and WebGPU with `fp16` precision. Paged exports include the CPU `attention_metadata` input used by the runtime to provide stable query and KV bounds without downloading device sequence lengths in every attention layer. Paged attention cannot be combined with `exclude_embeds` or `exclude_lm_head`. `paged_block_size` defaults to `256` and must be a power of two and at least `16`, matching what the ONNX Runtime PagedAttention op accepts; for models with short and long rotary caches, it must also evenly divide `original_max_position_embeddings`. The vendored FlashAttention paged kernel needs the block to be a multiple of its tile as well (256 for `head_size <= 64`, 128 for `head_size <= 128`, otherwise 64), so a smaller block stays valid but makes ORT fall back to another attention backend. A quantized KV cache is exempt from the tile requirement alone: FlashAttention still serves it, through a dense dequantized path with no page alignment to satisfy. A block drafter (`dflash2_path`/`dspark_path`) shares the target's block size and usually has the smaller head size, so it reaches its tile at a larger block than the target does. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`. `paged_chunk_size` must be a positive integer and is written to `search.chunk_size`. It caps the prompt tokens a single request contributes to one step, whereas `max_scheduled_tokens` caps the step as a whole; a value at or above `max_scheduled_tokens` therefore has no effect, and a smaller one lets concurrent prefills interleave rather than letting one request consume the step budget on its own. Models whose sliding-window layers are served from a ring of blocks hold only `paged_chunk_size + window_size - 1` positions, so they require chunked prefill and default to `paged_block_size`. For every other paged model it is written only when passed.
+Paged attention supports CUDA with `fp16` or `bf16` precision and WebGPU with `fp16` precision. Paged exports include the CPU `attention_metadata` input used by the runtime to provide stable query and KV bounds without downloading device sequence lengths in every attention layer. Paged attention cannot be combined with `exclude_lm_head`; `exclude_embeds` is supported only for the packed Qwen vision packages described below. `paged_block_size` defaults to `256` and must be a power of two and at least `16`, matching what the ONNX Runtime PagedAttention op accepts; for models with short and long rotary caches, it must also evenly divide `original_max_position_embeddings`. The vendored FlashAttention paged kernel needs the block to be a multiple of its tile as well (256 for `head_size <= 64`, 128 for `head_size <= 128`, otherwise 64), so a smaller block stays valid but makes ORT fall back to another attention backend. A quantized KV cache is exempt from the tile requirement alone: FlashAttention still serves it, through a dense dequantized path with no page alignment to satisfy. A block drafter (`dflash2_path`/`dspark_path`) shares the target's block size and usually has the smaller head size, so it reaches its tile at a larger block than the target does. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`. `paged_chunk_size` must be a positive integer and is written to `search.chunk_size`. It caps the prompt tokens a single request contributes to one step, whereas `max_scheduled_tokens` caps the step as a whole; a value at or above `max_scheduled_tokens` therefore has no effect, and a smaller one lets concurrent prefills interleave rather than letting one request consume the step budget on its own. Models whose sliding-window layers are served from a ring of blocks hold only `paged_chunk_size + window_size - 1` positions, so they require chunked prefill and default to `paged_block_size`. For every other paged model it is written only when passed.
 
-Prefix caching is enabled by default for dynamic batching and can be disabled by setting `engine.dynamic_batching.prefix_caching` to `false` in `genai_config.json`. The builder writes this opt-out automatically for paged sliding-window KV rings, MTP, DSpark, and full-attention DFlash 2 because those layouts mirror auxiliary state per target block and do not yet support prefix caching. DFlash 2 with a positive sliding window uses a fixed-size auxiliary pool and retains the default target prefix caching behavior.
+### Packed Qwen vision for the Engine
+
+Vision-bearing `Qwen3_5ForConditionalGeneration`, `Qwen3_5MoeForConditionalGeneration`, and `Qwen4ExpForConditionalGeneration` checkpoints can combine `use_paged_attention=true` with `exclude_embeds=true`. This includes Qwen3.8-27B (`Qwen3_5ForConditionalGeneration`) and Flash-Next (`Qwen4ExpForConditionalGeneration`). The composite emits a floating-point vision encoder, processor/tokenizer/template assets, a pure CPU embedding lookup, and the packed decoder; the lookup does not require a drafter. `text_only=true` cannot be combined with this excluded-embedding vision path. Existing text-only exports remain unchanged, and other paged/excluded-embedding combinations remain rejected.
+
+Complete packed vision exports retain the source model type (`qwen3_5`, `qwen3_5_moe`, or `qwen4_exp`). Text-only exports use the corresponding `_text` type and reject images. The Engine selects the packed execution path from the dynamic-batching configuration and validates the exported components, including three-axis positions and Flash-Next's sparse-indexer rotary history; renaming an existing text-only package does not make it vision-capable.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_qwen_checkpoint -o output -p int4 -e cuda \
+  --extra_options use_paged_attention=true exclude_embeds=true exclude_mtp=true
+
+# From source:
+python src/python/py/models/builder.py -i path_to_qwen_checkpoint -o output -p int4 -e cuda \
+  --extra_options use_paged_attention=true exclude_embeds=true exclude_mtp=true
+```
+
+This package uses the Engine prompt/images overload, not Generator's merge-embedding execution. DFlash2, auxiliary taps, and target INT8 KV retain their existing export options. Vision precision is independent of INT4 target weights. Runtime media limits are `engine.dynamic_batching.media_host_bytes` (512 MiB by default) and `media_device_bytes` (128 MiB by default), both positive integer byte counts; structured `runtime_config` and runtime profiles accept them. They bound canonical preprocessing/retention and projected features respectively, not provider workspace. See the [Engine vision contract](../../../../docs/paged_attention_engine.md#vision-inputs) and `examples/python/engine/vision-qa.py` for admission, incremental formatting, resource accounting, and limitations.
+
+Packed vision with MTP is not supported: use `exclude_mtp=true`, or select a supported block drafter for Qwen3.5-family targets. Flash-Next packed vision requires floating KV and does not support MTP or block drafters. It uses the ordinary paged Engine, not the specialized `qwen38_flash_graph` backend; a freshly exported complete package is required. Native FP8/NVFP4 checkpoint and operator requirements remain unchanged. Text-only MTP is unchanged. Vision-targeted adapters must first be merged into the source checkpoint; export rejects them instead of silently omitting their weights. Text-only adapters remain supported, and the vision loader accepts safetensors and PyTorch checkpoints, including sharded checkpoints.
+
+#### Flash-Next packed vision setup
+
+For native NVFP4 Flash-Next checkpoints, use FP16 I/O and floating KV while preserving native expert and Engram storage. The following bounded A100 80 GiB example uses `nvidia/Qwen3.8-Flash-Next-NVFP4` revision `fc694b54fb0174e0913e6adf86691ef85a4ead47` with two request slots, six scheduled rows, and eager target-only execution. Its 64-block pool holds at most 16384 resident rows shared across requests; this is separate from the model's 262144-row architecture context and the example's 4096-row request limit.
+
+Save this runtime fragment as `flash_runtime.json` before running the export:
+
+```json
+{
+  "model": {
+    "decoder": {
+      "session_options": {
+        "provider_options": [
+          {"cuda": {"enable_cuda_graph": "0", "arena_extend_strategy": "kSameAsRequested"}}
+        ]
+      }
+    }
+  },
+  "engine": {
+    "dynamic_batching": {
+      "num_blocks": 64,
+      "max_batch_size": 2,
+      "max_scheduled_tokens": 6,
+      "media_device_bytes": 1048576
+    }
+  },
+  "search": {"chunk_size": 6}
+}
+```
+
+```bash
+python src/python/py/models/builder.py -i path_to_pinned_flash_next_nvfp4_checkpoint -o output -p fp16 -e cuda \
+  --runtime_config flash_runtime.json \
+  --extra_options use_paged_attention=true exclude_embeds=true exclude_mtp=true prune_lm_head=true \
+  qmoe_weights_prepacked=1 num_blocks=64 max_batch_size=2 max_scheduled_tokens=6 paged_chunk_size=6
+```
+
+The K-packed NVFP4 operator requires matching runtime layout support. This example uses ORT source `7201c96570759372e18b122ffe6d4a24367d542a`, built as 1.32.0 with CUDA 12.8 and SM80; the released CUDA 13 ORT 1.31.1 provider does not correctly execute this layout. Build GenAI and its core/add-on and Python binaries against the same SDK. A runtime version number alone does not establish operator/layout compatibility.
+
+Run inference with `ORT_FORCE_DETERMINISTIC_MOE=1` to avoid unused dense MoE tactic-profiling scratch on this runtime's NVFP4 GEMV path. Keep the required builder session settings rather than overriding them through `runtime_config`. Increasing slots or scheduled rows changes state and expert-workspace demand; choose deployment limits explicitly rather than assuming this profile scales to larger batches. This example does not cover BF16 vision or the specialized `qwen38_flash_graph` backend.
+
+The public Engine benchmark uses the exported package's runtime settings:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ORT_FORCE_DETERMINISTIC_MOE=1 \
+  python examples/python/engine/vision-benchmark.py \
+    --model /path/to/flash-next-vision --image test/images/cars.jpg
+```
+
+It reports model loading, admission, encoder-only Runs, first-token latency, and token-event intervals. Each trial uses a fresh Engine and a 4096-row request, with a text warmup and three repetitions by default. For separate ORT node traces, add `--repeats 1 --profile flash-rotary`; profiling runs should not be compared directly with unprofiled timings.
+
+#### Qwen3.8-27B with DFlash2
+
+For the Qwen3.8-27B reference with seven-token DFlash2 verification, preserve the hybrid rollback capacity as well as the runtime draft limit:
+
+```bash
+python src/python/py/models/builder.py -i path_to_qwen_checkpoint -o output -p int4 -e cuda \
+  --extra_options use_paged_attention=true exclude_embeds=true exclude_mtp=true int4_block_size=32 \
+  enable_cuda_fpa_intb_gemm=true \
+  aux_hidden_state_layers=6,20,34,48,62 kv_cache_quant_scheme=int8_per_channel \
+  kv_cache_scale_file=vision_calibrated_scales.json dflash2_path=path_to_dflash2_checkpoint \
+  dflash2_num_draft_tokens=7 dflash2_precision=int4 state_update_capacity=7 max_draft_tokens=7
+```
+
+Static KV scales must cover image-conditioned activations; text-only scales are not automatically suitable. Compare floating-KV and INT8-KV logits and clipping on representative images and held-out geometry. The text-feed `kv_cache_calibration` utility does not directly feed this packed embedding-input hybrid graph.
+
+Compare performance with matching CUDA kernel, autotuning, and CPU-lookup prefault settings, not just matching quantization labels. Apply this fragment with `Config.overlay()` before creating the Model when using that kernel/prefault configuration; select eager/captured execution separately with the existing CUDA provider option:
+
+```json
+{
+  "model": {
+    "decoder": {
+      "session_options": {
+        "ep.cuda.fpa_intb_gemm": "1",
+        "session.use_device_allocator_for_initializers": "1",
+        "ep.cuda.matmul_nbits_m_chunk_size": "512",
+        "ep.cuda.enable_gemm_auto_tune": "1"
+      }
+    },
+    "embedding": {"prefault": true}
+  }
+}
+```
+
+Prefix caching is enabled by default for supported dynamic-batching layouts. Set
+`engine.dynamic_batching.prefix_caching` to `false` in `genai_config.json` to
+disable it. The builder writes an explicit `false` for paged
+sliding-window KV rings, MTP, DSpark, and full-attention DFlash 2 because those
+layouts mirror auxiliary state per target block and do not yet support prefix
+caching. DFlash 2 with a positive sliding window uses a fixed-size auxiliary pool
+and supports default-enabled target prefix caching and device-resident draft
+snapshots. Explicit tiered snapshot policies require a nonzero tier budget on
+CPU/CUDA as described above.
 
 `max_scheduled_tokens` and `num_blocks` are additional `engine.dynamic_batching` knobs and are written only when passed. `max_scheduled_tokens` caps the tokens in one dynamically batched forward pass and therefore caps the peak prefill activation, which is the largest transient in a long-context deployment. `num_blocks` sets the total block budget before auxiliary-cache reservations. The target's resolved pool can be smaller when MTP or a full-attention block drafter reserves cache memory, and all resident requests share that pool, so `num_blocks * paged_block_size` is only the single-request upper bound when the target owns every configured block. `num_blocks` is mutually exclusive with `gpu_utilization_factor`, which is omitted from the config when `num_blocks` is set.
 
@@ -377,9 +537,9 @@ Both options require positive integers. Auxiliary drafter caches share this memo
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda --extra_options use_paged_attention=true max_scheduled_tokens=2048 num_blocks=128
 ```
 
-Paged builds can describe non-legacy decoder state in `model.decoder.state_groups`. The Qwen hybrid builder emits exact logical layer IDs for sparse paged KV, fixed convolution state, and fixed recurrent state. Tensor name templates are emitted once under the decoder's `inputs` and `outputs`. Legacy models whose every decoder layer uses paged KV omit the manifest and preserve the existing implicit contract. The hybrid state manifest is experimental and its schema is not yet stable. GenAI's Engine supports Qwen3.8 hybrid paged-KV, fixed convolution, and recurrent-state execution on WebGPU, including 3-plane MRoPE position IDs shaped `[3, num_tokens]`. Packed 3-plane position IDs currently support text-only models; multimodal coordinates are not supported by the Engine.
+Paged builds can describe non-legacy decoder state in `model.decoder.state_groups`. The Qwen hybrid builder emits exact logical layer IDs for sparse paged KV, fixed convolution state, and fixed recurrent state. Tensor name templates are emitted once under the decoder's `inputs` and `outputs`. Legacy models whose every decoder layer uses paged KV omit the manifest and preserve the existing implicit contract. The hybrid state manifest is experimental and its schema is not yet stable. GenAI's Engine supports Qwen3.8 hybrid paged-KV, fixed convolution, and recurrent-state execution on WebGPU, including 3-plane MRoPE position IDs shaped `[3, num_tokens]`. Multimodal coordinates are enabled only for the packed Qwen vision contract above; other multimodal model/backend combinations are not enabled by the position tensor shape alone.
 
-Qwen3.8 sparse paged layers also expose per-layer `sparse_attention.%d.selected_indices` (`int32`, `[num_tokens, indexer_budget + indexer_compress_ratio - 1]`) and `sparse_attention.%d.selected_counts` (`int32`, `[num_tokens]`) inputs. Their name templates are recorded in the ONNX metadata as `qwen4_exp.selected_index_names` and `qwen4_exp.selected_count_names`. A packed-aware selector must populate these inputs before `SparsePagedAttention`; the current GenAI runtime does not produce them. Non-paged exports compute selections internally with `SparseAttentionIndexer` and do not have this external contract.
+Fresh Qwen3.8 sparse paged exports compute selections internally with `PackedSparseAttentionIndexer` and feed its indices/counts directly to `SparsePagedAttention`. The Engine owns the declared indexer state pools and supplies request-specific rotary history for complete vision exports. Older graphs exposing external `sparse_attention.%d.selected_indices` and `sparse_attention.%d.selected_counts` still require their selector; re-export rather than relabeling them to use the current contract.
 
 ```bash
 # From wheel:
@@ -791,6 +951,20 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options use_cuda_bf16=true
+```
+
+#### Bailing BF16 KDA Prefill Precision
+
+For Bailing CUDA BF16 exports with `use_paged_attention=true`, `gated_delta_net_bf16_precision` controls internal tensor-core precision in chunked KDA prefill. Accepted values are `bf16` (the Bailing default, native BF16 tiles), `fp16` (FP16 tiles with runtime range safeguards), and `fp32` (the runtime's higher-accuracy multi-slice path). This does not change model activations, weights, or the FP32 recurrent-state interface. Explicit use on other providers, non-paged exports, or non-BF16 I/O is rejected.
+
+An explicit `-p fp16` remains FP16 even for a BF16 checkpoint. Select `-p bf16`, or `-p int4 --extra_options use_cuda_bf16=true`, to request BF16 I/O; otherwise the normal resolved precision policy applies.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m inclusionAI/Ling-3.0-tiny -o ling-bf16 -p bf16 -e cuda --extra_options hf_remote=true use_paged_attention=true gated_delta_net_bf16_precision=fp32
+
+# From source, at the repository root:
+python src/python/py/models/builder.py -m inclusionAI/Ling-3.0-tiny -o ling-bf16 -p bf16 -e cuda --extra_options hf_remote=true use_paged_attention=true gated_delta_net_bf16_precision=fp32
 ```
 
 #### LoRA Models

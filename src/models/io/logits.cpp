@@ -30,7 +30,7 @@ Logits::Logits(State& state)
   }
 }
 
-DeviceSpan<float> Logits::Get() {
+DeviceSpan<float> Logits::Get(bool all_tokens_valid) {
   size_t element_count = shape_[0] * shape_[1] * shape_[2];
 
   // The model's output logits are {batch_size*num_beams, input_seq_len, vocab_size}
@@ -56,8 +56,8 @@ DeviceSpan<float> Logits::Get() {
     auto logits_last_tokens = ByteWrapTensor(*model_.p_device_logits_, *logits_of_last_token);
 
     for (int batch_index = 0; batch_index < state_.params_->search.batch_size; batch_index++) {
-      // Find the first non pad token from the end
-      size_t token_index = input_sequence_lengths[batch_index] - 1;
+      // Replayed committed tokens are valid even when their ID equals PAD.
+      size_t token_index = all_tokens_valid ? seq_length - 1 : input_sequence_lengths[batch_index] - 1;
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
         auto target = logits_last_tokens.subspan(vocab_index * element_size, vocab_size * element_size);
         auto source = logits_raw.subspan((vocab_index * seq_length + token_index * vocab_size) * element_size, vocab_size * element_size);

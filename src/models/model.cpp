@@ -31,15 +31,18 @@
 #include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
+#include "qwen38_graph.h"
 #include "speculative_decoding.h"
 #include "whisper.h"
 #include "parakeet.h"
 #include "nemotron_speech.h"
+#include "nemotron_bolt.h"
 #include "moonshine_streaming.h"
 #include "multi_modal.h"
 #include "lfm2.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
+#include "qwen38_graph_plane.h"
 #include "qwen_vl_model.h"
 #include "ep/amdgpu/interface.h"
 #include "ep/dml/interface.h"
@@ -80,6 +83,17 @@ std::string SharedInitializerFileIdentity(const fs::path& path) {
 bool IsPathValuedSessionOption(std::string_view key) {
   return key == kOrtSessionOptionsModelExternalInitializersFileFolderPath ||
          key == kOrtSessionOptionEpContextFilePath;
+}
+
+// Adds a string-valued session config entry, resolving the value of a path-valued key against the model root.
+void AddSessionConfigEntry(const Config& config, OrtSessionOptions& session_options, const std::string& key,
+                           const std::string& value) {
+  if (!value.empty() && IsPathValuedSessionOption(key)) {
+    const std::string resolved = config.ResolvePath(value).string();
+    session_options.AddConfigEntry(key.c_str(), resolved.c_str());
+  } else {
+    session_options.AddConfigEntry(key.c_str(), value.c_str());
+  }
 }
 
 }  // namespace
@@ -145,7 +159,7 @@ void State::DumpOutputs() {
 }
 
 void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
-                int graph_capture_variant) {
+                int graph_capture_variant, OrtIoBinding* binding) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
@@ -189,22 +203,25 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
-  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
-              output_names_.data(), outputs_.data(), output_names_.size());
+  if (binding) {
+    session.Run(run_options_.get(), *binding);
+    binding->SynchronizeOutputs();
+  } else {
+    session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+                output_names_.data(), outputs_.data(), output_names_.size());
+  }
 
   extra_outputs_.RegisterOutputs();
 
   DumpOutputs();
 }
 
-void State::SetRunOption(const char* key, const char* value) {
+void ApplyRunOption(OrtRunOptions& run_options, const char* key, const char* value) {
   if (strcmp(key, "terminate_session") == 0) {
     if (strcmp(value, "0") == 0) {
-      session_terminated_ = false;
-      run_options_->UnsetTerminate();
+      run_options.UnsetTerminate();
     } else if (strcmp(value, "1") == 0) {
-      session_terminated_ = true;
-      run_options_->SetTerminate();
+      run_options.SetTerminate();
     } else {
       // Value not expected
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
@@ -213,20 +230,27 @@ void State::SetRunOption(const char* key, const char* value) {
   } else if (strcmp(key, "enable_profiling") == 0) {
 #if ORT_API_VERSION >= 25
     if (strcmp(value, "0") == 0) {
-      run_options_->DisableProfiling();
+      run_options.DisableProfiling();
     } else {
       // Enable run-level profiling. The profiling output file is named: <prefix>_<timestamp>.json
       // Value "1" uses the default prefix; any other value is treated as a custom prefix.
       constexpr const char* default_profile_prefix = "onnxruntime_run_profile";
       const char* prefix = (strcmp(value, "1") == 0) ? default_profile_prefix : value;
-      run_options_->EnableProfiling(fs::path(prefix).c_str());
+      run_options.EnableProfiling(fs::path(prefix).c_str());
     }
 #else
     throw std::runtime_error("enable_profiling requires ONNX Runtime 1.25 or later");
 #endif
     return;
   }
-  run_options_->AddConfigEntry(key, value);
+  run_options.AddConfigEntry(key, value);
+}
+
+void State::SetRunOption(const char* key, const char* value) {
+  ApplyRunOption(*run_options_, key, value);
+  if (strcmp(key, "terminate_session") == 0) {
+    session_terminated_ = strcmp(value, "1") == 0;
+  }
 }
 
 /*
@@ -506,6 +530,13 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
+  if (config_->engine.dynamic_batching &&
+      config_->engine.dynamic_batching->device_memory_budget_bytes &&
+      p_device_->GetType() == DeviceType::CUDA) {
+    size_t free_bytes, total_bytes;
+    p_device_->GetAvailableMemory(free_bytes, total_bytes);
+    device_memory_budget_initial_free_bytes_ = free_bytes;
+  }
   AddSharedInitializers();
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
@@ -559,7 +590,10 @@ void Model::AddSharedInitializers() {
     const uint64_t offset = initializer.offset.empty() ? 0 : std::stoull(initializer.offset);
     const size_t length = static_cast<size_t>(std::stoull(initializer.length));
     const auto data_type = static_cast<ONNXTensorElementDataType>(initializer.data_type);
-    auto memory_info = p_device_->GetMemoryInfo();
+    // Generic CPU-backed providers need not expose device-only memory metadata.
+    auto memory_info = p_device_->GetType() == DeviceType::CPU
+                           ? OrtMemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)
+                           : p_device_->GetMemoryInfo();
 
     std::ostringstream key;
     key << SharedInitializerFileIdentity(data_path) << ':' << offset << ':' << length << ':'
@@ -710,13 +744,8 @@ void ApplySessionOptionsFromConfig(
    * Set all session options that are key-value pairs of strings.
    * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h
    */
-  for (auto& config_entry : config_session_options.config_entries) {
-    if (!config_entry.second.empty() && IsPathValuedSessionOption(config_entry.first)) {
-      const std::string resolved = config.ResolvePath(config_entry.second).string();
-      session_options.AddConfigEntry(config_entry.first.c_str(), resolved.c_str());
-    } else {
-      session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
-    }
+  for (const auto& [key, value] : config_session_options.config_entries) {
+    AddSessionConfigEntry(config, session_options, key, value);
   }
 
   // Register custom ops libraries only if explicitly configured. custom_ops_library comes first, then every entry of
@@ -797,6 +826,9 @@ void ApplySessionOptionsFromConfig(
     if (custom_library_path.is_relative()) {
       for (const auto& dir : allowed_dirs) {
         std::filesystem::path candidate = dir / custom_library_path;
+#if defined(_WIN32)
+        candidate = ResolveWindowsSharedLibraryPath(candidate);
+#endif
         if (std::filesystem::exists(candidate, ec)) {
           custom_library_file_prefix = std::filesystem::canonical(candidate).string();
           resolved = true;
@@ -923,7 +955,17 @@ void Model::CreateSessionOptions() {
   if (!p_device_)
     p_device_ = GetDeviceInterface(DeviceType::CPU);
 
+  // The runtime profile merges its session options into the decoder config entries, updating an entry in place or
+  // appending a new one. Apply only the entries it changed or added to the primary session options, resolved like the
+  // rest of the config. Replaying the others would undo that resolution and the provider setup above.
+  const auto entries_before_profile = config_->model.decoder.session_options.config_entries;
   ApplyRuntimeProfileForSelectedDevice(*config_, *p_device_);
+  const auto& entries = config_->model.decoder.session_options.config_entries;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    if (i >= entries_before_profile.size() || entries[i] != entries_before_profile[i]) {
+      AddSessionConfigEntry(*config_, *session_options_, entries[i].first, entries[i].second);
+    }
+  }
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
@@ -992,6 +1034,8 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       model_filename == config_->model.decoder.filename) {
     SessionInfo decoder_session_info;
     decoder_session_info.Add(*session);
+    ModelStateManifest::ResolveDisabledIndexerCapacity(
+        config_->model.decoder, decoder_session_info);
     ModelStateManifest{config_->model.decoder}.ValidateSession(decoder_session_info);
   }
 
@@ -1054,6 +1098,14 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  const bool text_only = ModelType::IsLLM(config->model.type);
+  if (text_only && (!config->model.vision.filename.empty() || !config->model.vision.pipeline.empty())) {
+    throw std::runtime_error(
+        "Text-only model type '" + config->model.type +
+        "' cannot configure a vision encoder. Export the complete vision-language model instead.");
+  }
+  if (config->model.type == "nemotron_bolt")
+    return std::make_shared<NemotronBoltModel>(std::move(config), ort_env);
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   if (!config->model.decoder.pipeline.empty() &&
@@ -1062,12 +1114,22 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
       throw std::runtime_error("Pipelined decoder is not supported for model type '" + config->model.type + "'");
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   }
-  if (ModelType::IsLFM2(config->model.type))
+  // Only paged exports have state groups; they run in the Engine, which takes a DecoderOnly_Model.
+  if (ModelType::IsLFM2(config->model.type) && !config->model.decoder.state_groups)
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (ModelType::IsLLM(config->model.type))
+  if (config->model.type == "qwen38_flash_graph")
+    return std::make_shared<Qwen38GraphModel>(std::move(config), ort_env);
+  if (text_only)
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+  if ((config->model.type == "qwen3_5" || config->model.type == "qwen3_5_moe" || config->model.type == "qwen4_exp") &&
+      config->engine.dynamic_batching) {
+    if (config->model.vision.filename.empty()) {
+      throw std::runtime_error("Packed Qwen vision requires an exported vision encoder.");
+    }
+    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+  }
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsStreamingEncDecASR(config->model.type))
@@ -1079,7 +1141,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+    return MultiModalLanguageModel::Create(std::move(config), ort_env, true, false);
   if (ModelType::IsMMM(config->model.type)) {
     // Auto-detect speech support: require both the speech ONNX model filename
     // and the preprocessing config to be present. If only one is set, throw
@@ -1096,7 +1158,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
           "speech.config_filename is set but speech.filename is missing. "
           "Both are required for audio support.");
     }
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, has_speech_model);
+    return MultiModalLanguageModel::Create(std::move(config), ort_env, true, has_speech_model);
   }
   if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);

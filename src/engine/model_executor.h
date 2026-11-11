@@ -5,16 +5,21 @@
 
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
+#include "../decoding/speculative_stats.h"
 #include "../models/decoder_only.h"
 #include "decoders/decoder.h"
 #include "scheduled_requests.h"
 #include "cache_manager.h"
 #include "execution_context.h"
 #include "step_plan.h"
+#include "turn_policy.h"
 
 namespace Generators {
+
+ExecutionFailureKind ClassifyOrtExecutionFailure(std::string_view message);
 
 class ModelExecutionError : public std::runtime_error {
  public:
@@ -36,9 +41,8 @@ class ModelExecutionError : public std::runtime_error {
  * ModelExecutor is the abstract execution boundary the Engine drives each step. Production assembles
  * the real decoder-backed executor via Create; supplying an alternative implementation (for example
  * one that returns scripted outcomes or injects an execution failure) lets the Engine's execution
- * path be exercised without running a real model. Only Decode is part of the boundary because
- * Engine::Run drives decoding; encoding stays on the concrete executor until it becomes part of the
- * Engine execution path.
+ * path be exercised without running a real model. The Engine schedules media encoding separately,
+ * before reserving decoder state; only Decode participates in this transaction boundary.
  */
 struct ModelExecutor {
   static std::unique_ptr<ModelExecutor> Create(std::shared_ptr<Model> model,
@@ -53,6 +57,36 @@ struct ModelExecutor {
                       ExecutionContext& context) = 0;
 
   virtual bool SupportsDraftVerification() const { return false; }
+
+  /**
+   * @brief True when Decode chooses the next tokens itself instead of attaching decoder state with logits.
+   *
+   * Such an executor (for example one whose graph selects greedy tokens and verifies its own speculative
+   * drafts on the device) declares its step with ScheduledRequests::BeginBackendStep and hands each row's tokens to
+   * ScheduledRequests::StageBackendRow; ScheduledRequests::GenerateNextTokens validates them and commits them through
+   * Request::CommitExternalTokens instead of sampling. Stop strings are valid for such a turn on the static path:
+   * committing is token-wise and a match only ends the turn, so nothing has to be rolled back.
+   */
+  virtual bool SelectsOwnTokens() const { return false; }
+
+  /**
+   * @brief Rejects, before any Request mutation, a turn this executor cannot serve.
+   *
+   * Called by Engine::BeginTurn after the generic policy validation. Throw std::runtime_error with a
+   * message that names the unsupported option.
+   */
+  virtual void ValidateTurn(const EffectiveTurnPolicy& /*policy*/, const TurnOptions& /*options*/) const {}
+
+  /** @brief Adds this executor's own speculative-decoding counters to `stats` (Engine::GetSpeculativeStats). */
+  virtual void AddSpeculativeStats(SpeculativeStats& /*stats*/) const {}
+
+  /** @brief Notifies an executor that selects its own tokens of the committed step outcomes. */
+  virtual void OnStepCommitted(const ScheduledRequests& /*scheduled_requests*/,
+                               std::span<const RequestStepResult> /*results*/) {}
+
+  // A nontransactional failure may have changed device state. Mutable contexts must remain
+  // poisoned after this Engine releases its lease.
+  virtual void OnExecutionFailure() noexcept {}
 
   virtual ~ModelExecutor() = default;
 };

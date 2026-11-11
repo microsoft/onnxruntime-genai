@@ -389,7 +389,6 @@ class Qwen35TextModel(Model):
         return {
             "state_update_capacity": capacity,
             "state_update_capture_count": self.input_names["state_update.capture_count"],
-            "state_update_active": self.input_names["state_update.active"],
             "state_update_value": self.output_names["state_update.conv_value"][layer_id],
             "state_update_value_shape": self.output_shapes["state_update.conv_value"],
         }

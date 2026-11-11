@@ -29,6 +29,7 @@ from builder_config import (
     validate_model_dependent_config,
 )
 from builders import (
+    BailingMoeV3Model,
     ChatGLMModel,
     ErnieModel,
     Gemma2Model,
@@ -44,11 +45,14 @@ from builders import (
     LFM2AudioModel,
     LFM2Model,
     LFM2MoEModel,
+    LFM2VLModel,
+    LFM3Model,
     LlamaModel,
     Mistral3TextModel,
     MistralModel,
     Model,
     NemotronModel,
+    NemotronParseModel,
     OLMoModel,
     Phi3MiniLongRoPEModel,
     Phi3MiniModel,
@@ -61,7 +65,6 @@ from builders import (
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen4ExpModel,
-    Qwen4ExpTextModel,
     Qwen25VLTextModel,
     QwenModel,
     SmolLM3Model,
@@ -275,7 +278,7 @@ def check_extra_options(
     if extra_options.get("use_paged_attention", False):
         incompatible_options = [
             key
-            for key in ("exclude_embeds", "exclude_lm_head")
+            for key in ("exclude_lm_head",)
             if extra_options.get(key, False)
         ]
         if incompatible_options:
@@ -425,6 +428,14 @@ def check_extra_options(
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
 
+    if extra_options.get("use_paged_attention", False) and extra_options.get("exclude_embeds", False):
+        if not (
+            getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe", "qwen4_exp"}
+            and getattr(config, "vision_config", None) is not None
+            and not extra_options.get("text_only", False)
+        ):
+            raise ValueError("use_paged_attention with exclude_embeds requires a complete Qwen vision composite.")
+
     if (
         execution_provider == "webgpu"
         and extra_options.get("use_paged_attention", False)
@@ -443,11 +454,14 @@ def check_extra_options(
 
     quantization_config = getattr(config, "quantization_config", {})
     if quantization_config.get("quant_method") == "fp8":
-        if getattr(config, "model_type", None) not in {"qwen4_exp", "qwen4_exp_text"}:
-            raise ValueError("Native FP8 checkpoint export is currently supported only for Qwen3.8.")
+        if getattr(config, "model_type", None) not in {"qwen4_exp", "qwen4_exp_text", "bailing_hybrid"}:
+            raise ValueError("Native FP8 checkpoint export is currently supported only for Qwen3.8 and BailingMoeV3.")
         if execution_provider not in {"cuda", "webgpu"}:
-            raise ValueError("Native Qwen3.8 FP8 checkpoint export requires the CUDA or WebGPU EP.")
-    if quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}:
+            raise ValueError("Native Qwen3.8/BailingMoeV3 FP8 checkpoint export requires the CUDA or WebGPU EP.")
+    if (
+        quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}
+        and getattr(config, "model_type", None) != "bailing_hybrid"
+    ):
         if execution_provider != "cuda":
             raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")
         if extra_options.get("moe_quant_type", "nvfp4") != "nvfp4":
@@ -725,7 +739,10 @@ def create_model(
     config_only = extra_options.get("config_only", False)
 
     # List architecture options in alphabetical order
-    if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
+    if config.architectures[0] == "BailingMoeV3ForCausalLM":
+        onnx_model = BailingMoeV3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "bailing_hybrid"
+    elif config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
         # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
         config.bos_token_id = 1
         config.hidden_act = "swiglu"
@@ -776,14 +793,25 @@ def create_model(
         onnx_model = LFM2MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "lfm2_moe"
     elif config.architectures[0] == "Lfm2VlForConditionalGeneration":
-        onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        # With the embedding layer excluded the decoder is one stage of the LFM2-VL vision pipeline;
-        # otherwise it is a standalone text model that happens to come from a VLM checkpoint.
-        onnx_model.model_type = "lfm2_vl" if onnx_model.exclude_embeds else "lfm2_vl_text"
+        if extra_options.get("exclude_embeds", False):
+            # The decoder, embedding and vision models of the lfm2_vl pipeline
+            onnx_model = LFM2VLModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        else:
+            # A standalone text model that happens to come from a VLM checkpoint
+            onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model.model_type = "lfm2_vl_text"
     elif config.architectures[0] == "Lfm2AudioForConditionalGeneration":
         onnx_model = LFM2AudioModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         # Same split as LFM2-VL: the decoder stage of the lfm2_audio pipeline, or a plain text model.
         onnx_model.model_type = "lfm2_audio" if onnx_model.exclude_embeds else "lfm2_audio_text"
+    elif config.architectures[0] == "Lfm3ForCausalLM":
+        onnx_model = LFM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] in LFM3Model.MULTIMODAL:
+        onnx_model = LFM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        # With the embedding layer excluded the decoder is one stage of the lfm3_vl / lfm3_audio /
+        # lfm3_omni pipeline (which the runtime does not have yet); otherwise a plain LFM3 text model.
+        _, pipeline = LFM3Model.MULTIMODAL[config.architectures[0]]
+        onnx_model.model_type = pipeline if onnx_model.exclude_embeds else "lfm3"
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
@@ -796,6 +824,8 @@ def create_model(
             onnx_model.model_type = "mistral3_text"
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "NemotronParseForConditionalGeneration":
+        onnx_model = NemotronParseModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
@@ -998,6 +1028,11 @@ def get_args():
                     Unsupported shapes, non-default zero points, and shared weight buffers stay raw.
                 use_device_allocator_for_initializers = true/false: Default false; opt into device allocation.
                     Paged Qwen3.8 sessions enable this automatically.
+                gated_delta_net_bf16_precision = bf16/fp16/fp32: Internal KDA prefill tensor-core precision.
+                    Bailing CUDA BF16 paged-attention exports only; explicit use elsewhere is rejected.
+                    Default bf16 uses native BF16 tiles; fp16 uses runtime range safeguards;
+                    fp32 uses the higher-accuracy multi-slice path. Model I/O and FP32 recurrent states are unchanged.
+                    Example: -p bf16 -e cuda --extra_options use_paged_attention=true gated_delta_net_bf16_precision=fp32
                 is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
                 op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
@@ -1052,6 +1087,8 @@ def get_args():
                 exclude_embeds = Remove embedding layer from your ONNX model.
                     Use this option when you want to remove the embedding layer from within your ONNX model.
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
+                    For LFM2-VL models (Lfm2VlForConditionalGeneration), the builder also writes the embedding model
+                    (embeddings.onnx), the vision model (vision.onnx) and processor_config.json.
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
@@ -1094,7 +1131,7 @@ def get_args():
                     small dynamic-convolution and candidate-selector projections dense. The body
                     uses the target's automatic hardware-specific packing policy. CUDA emits
                     the corresponding fpA-intB layout for
-                    projections the kernel supports (N % 64 for int4, N % 32 for int8); other
+                    projections the kernel supports (N %% 64 for int4, N %% 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
                     CUDA body activations and KV caches default to bf16. WebGPU uses FP16,
                     with FP32 residual/skip normalization and convolution-finish accumulation for FP16
@@ -1142,8 +1179,9 @@ def get_args():
                     By default, the model outputs [num_tokens, vocab_size] logits.
                     Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
                     attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
-                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or
-                    exclude_lm_head.
+                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_lm_head.
+                    exclude_embeds is supported only for complete Qwen3.5/Qwen4-Exp vision composites, exporting a pure CPU lookup
+                    and a separate vision encoder; it cannot be combined with text_only.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
                     accepts. Default is 256. Also written to the `engine.dynamic_batching` section of
@@ -1167,6 +1205,9 @@ def get_args():
                     With paged attention, eligible local layers use a ring of blocks while at least one full-context
                     layer remains. Without paged attention, supported execution providers use their windowed-cache
                     mode. Set to false to give every layer a full-length KV cache for comparison or compatibility.
+                    LFM3 has window-sized KV caches only in text exports for CPU and CUDA without paged attention or
+                    enable_cuda_graph; other exports keep full-length caches. An older onnxruntime-genai fails on
+                    LFM3 exports with window-sized caches on CUDA, and the WebGPU provider does not load them.
                 gpu_utilization_factor = Fraction of available GPU memory used for the paged KV-cache. Default is 0.6.
                     Must be greater than 0 and at most 1.
                 max_batch_size = Maximum number of requests in a dynamic batch. Default is 100.
@@ -1193,6 +1234,8 @@ def get_args():
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
+                    LFM3 exports with this option keep full-length KV caches, since the runtime refuses graph capture with
+                    window-sized ones.
                 enable_dml_graph = Enable DML graph capture during inference. Default is true.
                     If enabled, the model structure will be optimized for DML graph execution.
                     DML EP uses graph capture by default for best performance.

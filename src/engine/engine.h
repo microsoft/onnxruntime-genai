@@ -6,6 +6,7 @@
 #include "request.h"
 #include "model_executor.h"
 #include "scheduler.h"
+#include "backend_capabilities.h"
 #include "../decoding/speculative_stats.h"
 #include "../dflash2_drafter.h"
 
@@ -70,6 +71,7 @@ struct EngineEvent {
   uint64_t turn_id{};
   uint32_t flags{};
   int32_t token{};
+  int32_t terminal_token_id{-1};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
   EngineErrorCode error_code{EngineErrorCode::None};
   // Caller-facing index into the turn's stop-string list, valid only when finish_reason ==
@@ -86,7 +88,7 @@ using EngineStepErrorFactory =
  * @struct EngineDependencies
  * @brief Bundle of the collaborators the Engine drives.
  *
- * The Engine constructor assembles these from the model via CreateDependencies and forwards them
+ * The Engine constructor assembles these from the model via CreateEngineBackend and forwards them
  * to the dependency-injecting constructor, so there is a single construction flow. The injecting
  * constructor accepts a pre-assembled bundle, which also lets a caller supply alternative
  * collaborators. The cache manager, scheduler, and model executor are all abstract interfaces, so
@@ -105,6 +107,8 @@ struct EngineDependencies {
   bool dflash2_prefix_checkpoints_enabled{};
   // Test-only fault injection for allocation-sensitive durable error construction.
   EngineStepErrorFactory make_step_error{};
+  std::shared_ptr<PrefixSnapshotCache> snapshot_cache;
+  std::optional<BackendCapabilities> backend_capabilities;
 };
 
 void ValidateMtpModelCompatibility(const Config& config,
@@ -139,7 +143,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
    *              and its components.
    *
    * Assembles the Engine's scheduler, cache manager, and model executor for the model via
-   * CreateDependencies and delegates to the dependency-injecting constructor. Behavior is identical
+   * CreateEngineBackend and delegates to the dependency-injecting constructor. Behavior is identical
    * to constructing those collaborators inline.
    */
   Engine(std::shared_ptr<Model> model);
@@ -218,6 +222,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
                      const TurnOptions& options);
+  uint64_t BeginTurn(const std::shared_ptr<Request>& request,
+                     const std::string& prompt, const TurnOptions& options, const Images* images);
   void RewindRequestToStartOfTurn(
       const std::shared_ptr<Request>& request, uint64_t turn_id);
   void CloseRequest(const std::shared_ptr<Request>& request);
@@ -225,6 +231,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
 
  private:
   friend struct test::EngineRunTestAccess;
+  uint64_t AdmitTurn(const std::shared_ptr<Request>& request, std::span<const int32_t> tokens,
+                     const TurnOptions& options);
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept;
   // Logs one warning when the hosted speculative path cannot deliver the configured
@@ -289,10 +297,13 @@ struct Engine : std::enable_shared_from_this<Engine>,
                                           std::string_view message,
                                           std::exception_ptr error);
 
-  std::shared_ptr<Model> model_;                   // The model used by the Engine.
-  std::shared_ptr<CacheManager> cache_manager_;    // The cache manager for handling cached data.
+  std::shared_ptr<Model> model_;  // The model used by the Engine.
+  std::unique_ptr<MediaStore> media_store_;
+  std::shared_ptr<CacheManager> cache_manager_;  // The cache manager for handling cached data.
+  std::shared_ptr<PrefixSnapshotCache> snapshot_cache_;
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
+  BackendCapabilities backend_capabilities_;
   // Lazily created on the first stop-enabled BeginTurn (the no-stop fast path never touches this).
   // Shared by every Request's StopStringController so the tokenizer's underlying vocabulary/config
   // is loaded once per Engine rather than once per Request.

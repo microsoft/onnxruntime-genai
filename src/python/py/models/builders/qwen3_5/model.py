@@ -7,8 +7,10 @@ import os
 
 import onnx_ir as ir
 from builder_config import serialize_genai_config
+from loaders.vision import load_qwen35_visual
 
 from ..mtp import MTPModel
+from ..qwen3_8.vision import Qwen4ExpVisionModel, save_image_processor
 from .mtp import Qwen35DenseMTPModel, Qwen35MTPModel
 from .text import Qwen35MoETextModel, Qwen35TextModel
 
@@ -56,6 +58,19 @@ class Qwen35MoEModel(MTPModel):
         self.context_length = self.decoder.context_length
         self.exclude_embeds = self.decoder.exclude_embeds
         self.model_type = self.decoder.model_type
+        self.vision = None
+        self.vision_config = getattr(config, "vision_config", None)
+        if self.decoder.use_paged_attention and self.decoder.exclude_embeds:
+            if self.vision_config is None or self.decoder.extra_options.get("text_only", False):
+                raise ValueError(
+                    "The Qwen3.5 packed embedding export requires vision configuration and cannot use text_only."
+                )
+            if self.vision_config.out_hidden_size != self.decoder.hidden_size:
+                raise ValueError("The Qwen3.5 vision output width must match the decoder embedding width.")
+            if self.mtp is not None:
+                raise ValueError(
+                    "Packed Qwen3.5 vision does not support MTP; set exclude_mtp=true or select a block drafter."
+                )
 
     def make_mtp_init(self, config, extra_options):
         decoder_options = super().make_mtp_init(config, extra_options)
@@ -137,7 +152,27 @@ class Qwen35MoEModel(MTPModel):
             mtp_options.pop("kv_cache_scale_file", None)
 
     def make_model(self, input_path):
+        if self.decoder.use_paged_attention and self.decoder.exclude_embeds and self.decoder.adapter_path:
+            from peft.utils.save_and_load import load_peft_weights  # noqa: PLC0415
+
+            adapter = load_peft_weights(
+                self.decoder.adapter_path, device="cpu", cache_dir=self.decoder.cache_dir, token=self.hf_token
+            )
+            if any("visual" in name.split(".") for name in adapter):
+                raise ValueError(
+                    "Packed Qwen3.5 vision does not support vision-targeted adapters; export a merged checkpoint."
+                )
         self.decoder.make_model(input_path)
+        if self.decoder.use_paged_attention and self.decoder.exclude_embeds:
+            visual = load_qwen35_visual(
+                self.decoder.resolve_transformers_class("Qwen3_5VisionModel"),
+                self.vision_config,
+                input_path if os.path.isdir(input_path) else self.decoder.model_name_or_path,
+                cache_dir=self.decoder.cache_dir,
+                token=self.hf_token,
+                revision=getattr(self.decoder, "revision", None),
+            )
+            self.vision = Qwen4ExpVisionModel(self.vision_config, visual, self.decoder.io_dtype)
         if self.mtp is not None:
             print("Building MTP (multi-token prediction) head -> mtp.onnx")
             self.mtp.make_model(input_path)
@@ -146,6 +181,8 @@ class Qwen35MoEModel(MTPModel):
 
     def save_model(self, output_dir):
         self.decoder.save_model(output_dir)
+        if self.vision is not None:
+            self.vision.save_model(output_dir)
         if self.mtp is not None:
             self.mtp.save_model(output_dir)
             self.mtp_attrs["shared_initializers"] = self.share_initializers(
@@ -157,6 +194,8 @@ class Qwen35MoEModel(MTPModel):
     def make_genai_config(self, config, extra_kwargs, out_dir):
         self.decoder.model_type = self.model_type
         self.decoder.make_genai_config(config, extra_kwargs, out_dir)
+        if self.decoder.use_paged_attention and self.decoder.exclude_embeds:
+            self.add_vision_to_genai_config(config, out_dir)
         if self.mtp is not None:
             self.add_mtp_to_genai_config(out_dir)
         if self.dflash2 is not None:
@@ -184,6 +223,33 @@ class Qwen35MoEModel(MTPModel):
         with open(config_path, "w") as config_file:
             config_file.write(serialize_genai_config(genai_config))
         print("Set search.do_sample to false: a block drafter only proposes drafts for greedy turns.")
+
+    def add_vision_to_genai_config(self, config, out_dir):
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+        model_config = genai_config["model"]
+        model_config["image_token_id"] = config.image_token_id
+        model_config["vision_start_token_id"] = config.vision_start_token_id
+        model_config["vision"] = {
+            "filename": "vision.onnx",
+            "spatial_merge_size": config.vision_config.spatial_merge_size,
+            "patch_size": config.vision_config.patch_size,
+            "inputs": {"pixel_values": "pixel_values", "image_grid_thw": "image_grid_thw"},
+            "outputs": {"image_features": "image_features"},
+        }
+        # Configuration-only exports do not construct the lookup graph.
+        model_config.setdefault(
+            "embedding",
+            {
+                "filename": "embedding.onnx",
+                "session_options": {"intra_op_num_threads": 1},
+                "inputs": {"input_ids": "input_ids"},
+                "outputs": {"inputs_embeds": "inputs_embeds"},
+            },
+        )
+        with open(config_path, "w") as config_file:
+            config_file.write(serialize_genai_config(genai_config))
 
     def add_mtp_to_genai_config(self, out_dir):
         config_path = os.path.join(out_dir, "genai_config.json")
@@ -225,6 +291,8 @@ class Qwen35MoEModel(MTPModel):
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
+        if self.decoder.use_paged_attention and self.decoder.exclude_embeds:
+            save_image_processor(model_name_or_path, extra_kwargs, out_dir, self.hf_token)
 
     def require_specforge_aux_taps(self, target_layer_ids, drafter_name):
         if not target_layer_ids:
@@ -272,9 +340,9 @@ class Qwen35MoEModel(MTPModel):
         """Resolve how a block drafter gets its LM head, or ``None`` to keep it dense.
 
         The drafter's LM head *is* the target's, so it reuses the target's initializers rather
-        than quantizing a second copy (see ``adopt_target_tensors``). Only the
-        symmetric/``default`` ``MatMulNBits`` convention is wired up here; any other algorithm
-        or output format leaves the head dense instead of guessing at initializer names.
+        than quantizing a second copy (see ``adopt_target_tensors``). Only the 4-bit
+        symmetric/``default`` ``MatMulNBits`` convention is wired up here; any other algorithm,
+        bit width or output format leaves the head dense instead of guessing at initializer names.
         """
         decoder = self.decoder
         if decoder.exclude_lm_head or not decoder.is_lm_head_quantized():
@@ -285,7 +353,16 @@ class Qwen35MoEModel(MTPModel):
                 "DequantizeLinear/MatMul pair instead of the MatMulNBits this exporter can reuse."
             )
             return None
-        head_bits, weight_name, scales_name, zero_point_name = decoder.make_tied_quantized_embedding_input_names()
+        # decoder.make_model has already dropped its weights, so this predicts the to_nbits names.
+        head_bits, head_block_size, weight_name, scales_name, zero_point_name = (
+            decoder.make_tied_quantized_embedding_input_names(None)
+        )
+        if head_bits != 4:
+            print(
+                f"Leaving the block drafter's LM head dense: only a 4-bit target LM head is reused, "
+                f"and the target's is {head_bits}-bit."
+            )
+            return None
         shareable = (
             weight_name == f"lm_head.MatMul.weight_Q{head_bits}"
             and scales_name == "lm_head.MatMul.weight_scales"
@@ -298,6 +375,9 @@ class Qwen35MoEModel(MTPModel):
             )
             return None
         prepack = int(decoder.matmul_attrs["weights_prepacked"]) if decoder.ep == "cuda" else 0
+        if decoder.tied_quantized_embeddings:
+            # The prepack pass leaves a weight the tied embedding also reads in the raw layout.
+            prepack = 0
         adopt_target = not (prepack and decoder.io_dtype != ir.DataType.FLOAT16)
         if not adopt_target:
             print(
@@ -307,7 +387,7 @@ class Qwen35MoEModel(MTPModel):
             prepack = 0
         return {
             "bits": head_bits,
-            "block_size": int(decoder.quant_attrs["matmul_block_size"]),
+            "block_size": head_block_size,
             "prepack": prepack,
             "adopt_target": adopt_target,
         }
@@ -333,6 +413,10 @@ class Qwen35MoEModel(MTPModel):
                 "Leaving the block drafter's embedding dense: shared_embeddings makes the target "
                 "gather from its LM head weight, which this exporter does not know how to reuse."
             )
+            return None
+        if decoder.quant_attrs.get("embedding_bits", 4) != 4:
+            # embedding_quant_type=int8 writes its own model.embed_tokens.weight_Q8, which this exporter does not reuse.
+            print("Leaving the block drafter's embedding dense: the target's embedding table is not 4-bit.")
             return None
         # Only the symmetric/`default` convention names the table `*.weight_Q4` / `*.weight_scales`.
         if decoder.quantization_algo != "default" or not decoder.quant_attrs["is_symmetric"]:

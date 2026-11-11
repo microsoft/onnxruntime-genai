@@ -91,6 +91,10 @@ class DFlash2Builder(BlockDrafterBuilder):
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)
         self.cfg = cfg
+        self.make_drafter_config_init(cfg, max_position_embeddings, num_draft_tokens)
+        super().__init__("dflash2_graph", "dflash2")
+
+    def make_drafter_config_init(self, cfg, max_position_embeddings, num_draft_tokens):
         dfl = cfg["dflash_config"]
         self.dflash_config = dfl
 
@@ -132,7 +136,6 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.num_draft_tokens = self.block_size - 1
         self.input_embedding_scale = float(dfl.get("input_embedding_scale", 1.0))
         self.aux_hidden_size = self.hidden_size * len(self.target_layer_ids)
-        super().__init__("dflash2_graph", "dflash2")
 
     # ------------------------------------------------------------ rope caches
 
@@ -286,7 +289,7 @@ class DFlash2Builder(BlockDrafterBuilder):
     # ------------------------------------------------------------------ graph
 
     def make_model(self):
-        w = self.load_weights()
+        w = self.load_drafter_weights()
         self.declare_io()
         self._make_rope_caches()
 
@@ -303,6 +306,8 @@ class DFlash2Builder(BlockDrafterBuilder):
         )
         ctx = self.matmul("/dflash2/fc/MatMul", aux, w["fc.weight"], self.aux_hidden_size, self.hidden_size, "num_ctx")
         ctx_n = self.rms_norm("/dflash2/hidden_norm", ctx, w["hidden_norm.weight"], "num_ctx")
+        # Kept for drafters (LiLiCorr) whose candidate scorer reads the fc output of the anchor row.
+        self.ctx_pre_norm = ctx
         # --- query path ---
         emb_ext = self.make_embedding("/dflash2/embed_tokens/Gather", rows_q)
         emb = self.unary(
@@ -395,9 +400,13 @@ class DFlash2Builder(BlockDrafterBuilder):
             dtype=self.layernorm_attrs["residual_dtype"],
         )
 
-        self._make_candidates_and_selector(final, w)
+        self.make_candidates_and_selector(final, w)
         self.graph.sort()
         return self.model
+
+    def head_sink_input(self, layer_id):
+        """Name of the per-head attention-sink initializer of a layer, or "" when the drafter has none."""
+        return ""
 
     def _make_attention(self, i, x, context, rows_q):
         """Project the packed query and normalized context stream together."""
@@ -428,7 +437,7 @@ class DFlash2Builder(BlockDrafterBuilder):
                 "dflash2.cos_cache",
                 "dflash2.sin_cache",
                 "",  # slot_mapping: derived from block_table + past_sequence_lengths
-                "",  # head_sink
+                self.head_sink_input(i),
                 q_norm,
                 k_norm,
                 "",
@@ -526,7 +535,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             rows_q,
         )
 
-    def _make_candidates_and_selector(self, final, w):
+    def make_candidates_and_selector(self, final, w):
         n_spec, top_k, rank = self.num_draft_tokens, self.selector_top_k, self.selector_rank
 
         # Only the mask rows predict; the anchor at offset 0 is the bonus token.
@@ -698,7 +707,7 @@ class DFlash2Builder(BlockDrafterBuilder):
 
     # --------------------------------------------------------------- weights
 
-    def load_weights(self):
+    def load_drafter_weights(self):
         import safetensors.torch as safetensors_torch  # noqa: PLC0415
 
         weights = {}

@@ -8,6 +8,45 @@ import onnx_ir as ir
 class Standard:
     """Reusable expansions containing only standard ONNX operators."""
 
+    def make_causal_conv_with_state(self, name, **kwargs):
+        # Concat(past, input) -> depthwise Conv -> optional SiLU
+        #          +----------> Slice(last K-1) -> present
+        if kwargs.get("ndim", 1) != 1 or self.context_length_attrs["state_window"]:
+            raise NotImplementedError("Standard causal convolution requires ndim=1 and state_window=0")
+        activation = kwargs.get("activation", "silu")
+        if activation not in {"none", "silu"}:
+            raise ValueError(f"Unsupported causal convolution activation: {activation}")
+        channels = kwargs["channels"]
+        state_size = int(self.values[kwargs["weight"]].shape[-1]) - 1
+        shape = ["batch_size", channels, "sequence_length"]
+        concat_name = f"{name}/Concat"
+        self.make_concat(
+            concat_name, [kwargs["past_conv_state"], kwargs["root_input"]],
+            self.io_dtype, ["batch_size", channels, None], axis=2,
+        )
+        inputs = [f"{concat_name}/output_0", kwargs["weight"]]
+        if kwargs.get("bias"):
+            inputs.append(kwargs["bias"])
+        conv_name = name if activation == "none" else f"{name}/Conv"
+        self.make_conv(conv_name, inputs, self.io_dtype, shape, group=channels)
+        if activation == "silu":
+            self.make_sigmoid(f"{name}/Sigmoid", f"{conv_name}/output_0", self.io_dtype, shape)
+            self.make_mul(
+                name, [f"{conv_name}/output_0", f"{name}/Sigmoid/output_0"], self.io_dtype, shape,
+            )
+        self.make_node(
+            "Slice",
+            [
+                f"{concat_name}/output_0",
+                f"/model/constants/INT64/{[-state_size if state_size else np.iinfo(np.int64).max]}",
+                f"/model/constants/INT64/{[np.iinfo(np.int64).max]}",
+                "/model/constants/INT64/[2]",
+            ],
+            [kwargs["present_conv_state"]],
+            name=f"{name}/present/Slice",
+        )
+        self.make_value(kwargs["present_conv_state"], self.io_dtype, ["batch_size", channels, state_size])
+
     def make_gated_add(self, name, root_input, scaled_input, gate, shape):
         # scaled_input * gate -> Add(root_input)
         mul_name = f"{name}/Mul"
@@ -25,9 +64,11 @@ class Standard:
         self.make_node("Sigmoid", [b], [f"{name}/output_1"], name=f"{name}/Sigmoid")
         self.make_value(f"{name}/output_1", self.io_dtype, shape)
 
-    def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
+    def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5, activation=None):
+        if activation not in {None, "silu", "sigmoid"}:
+            raise ValueError(f"Unsupported GatedRMSNorm activation: {activation}")
         # root_input -> Reshape(heads) -> RMSNorm -> Flatten -> Cast(FP32) --+
-        # gate -> Cast(FP32) -> SiLU ------------------------------------+-> Mul -> Cast
+        # gate -> Cast(FP32) -> SiLU/Sigmoid -----------------------------+-> Mul -> Cast
         head_size = int(self.values[scale].shape[0])
         grouped_shape = [*shape[:-1], shape[-1] // head_size, head_size]
         # An inferred -1 is ambiguous when batch or sequence length is zero.
@@ -52,8 +93,11 @@ class Standard:
         self.make_cast(f"{name}/gate/Cast", gate, ir.DataType.FLOAT, shape)
         gate = f"{name}/gate/Cast/output_0"
         self.make_sigmoid(f"{name}/Sigmoid", gate, ir.DataType.FLOAT, shape)
-        self.make_mul(f"{name}/SiLU", [gate, f"{name}/Sigmoid/output_0"], ir.DataType.FLOAT, shape)
-        self.make_mul(f"{name}/Mul", [f"{name}/norm/Cast/output_0", f"{name}/SiLU/output_0"], ir.DataType.FLOAT, shape)
+        activated_gate = f"{name}/Sigmoid/output_0"
+        if activation != "sigmoid":
+            self.make_mul(f"{name}/SiLU", [gate, activated_gate], ir.DataType.FLOAT, shape)
+            activated_gate = f"{name}/SiLU/output_0"
+        self.make_mul(f"{name}/Mul", [f"{name}/norm/Cast/output_0", activated_gate], ir.DataType.FLOAT, shape)
         self.make_cast(name, f"{name}/Mul/output_0", self.io_dtype, shape)
 
     def make_mrotary_embedding(self, name, root_input, output, **kwargs):

@@ -202,7 +202,7 @@ TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
 #endif
 }
 
-TEST(CAPITests, TokenPostProcessorOpaqueResults) {
+TEST(CAPITests, ASRPostProcessorOpaqueResults) {
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 10);
@@ -210,52 +210,79 @@ TEST(CAPITests, TokenPostProcessorOpaqueResults) {
   auto tokenizer = OgaTokenizer::Create(*model);
   auto plain = OgaTokenizerStream::Create(*tokenizer);
   model.reset();
-  auto processor = OgaTokenPostProcessor::Create(*generator);
-  EXPECT_TRUE(processor->GetNextTokenResults().empty());
+  auto processor = OgaASRPostProcessor::Create(*generator);
+  EXPECT_TRUE(processor->GetNextResults().empty());
   const std::array<int32_t, 4> prompt{0, 0, 0, 52};
   generator->AppendTokens(prompt.data(), prompt.size());
   generator->GenerateNextToken();
-  processor->ProcessNextTokens();
-  const auto results = processor->GetNextTokenResults();
+  auto* base = OgaASRPostProcessorAsPostProcessor(processor.get());
+  ASSERT_NE(base, nullptr);
+  OgaCheckResult(OgaPostProcessorProcessNext(base));
+  const auto results = processor->GetNextResults();
   ASSERT_EQ(results.size(), 1U);
-  const auto* result = results[0];
+  const OgaASRPostProcessorResult* result = results[0];
   ASSERT_NE(result, nullptr);
-  EXPECT_EQ(processor->GetNextTokenResults()[0], result);
+  EXPECT_EQ(processor->GetNextResults()[0], result);
   const std::string expected = plain->Decode(generator->GetNextTokens()[0]);
   EXPECT_STREQ(result->GetText(), expected.c_str());
   EXPECT_EQ(result->GetTimestampResult(), nullptr);
-  const auto* native_result = OgaTokenPostProcessorGetResult(processor.get(), 0);
+  const auto* native_result = OgaASRPostProcessorGetResult(processor.get(), 0);
   EXPECT_EQ(result, native_result);
-  EXPECT_EQ(result->GetText(), OgaTokenPostProcessorResultGetText(native_result));
-  EXPECT_EQ(OgaTokenPostProcessorResultGetTimestampResult(native_result), nullptr);
-  EXPECT_EQ(OgaTokenPostProcessorResultGetTimestampResult(nullptr), nullptr);
-  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetWordCount(nullptr), 0U);
-  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetSegmentCount(nullptr), 0U);
-  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Words, 0), nullptr);
-  EXPECT_EQ(OgaTokenPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Segments, 0), nullptr);
-  EXPECT_EQ(OgaTokenPostProcessorGetResult(processor.get(), 1), nullptr);
+  EXPECT_EQ(result->GetText(), OgaASRPostProcessorResultGetText(native_result));
+  EXPECT_EQ(OgaASRPostProcessorResultGetTimestampResult(native_result), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorResultGetTimestampResult(nullptr), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetWordCount(nullptr), 0U);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetSegmentCount(nullptr), 0U);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Words, 0), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorTimestampResultGetTimestampRecord(nullptr, OgaTimestampRecordKind_Segments, 0), nullptr);
+  EXPECT_EQ(OgaASRPostProcessorGetResult(processor.get(), 1), nullptr);
   generator->GenerateNextToken();
   EXPECT_STREQ(result->GetText(), expected.c_str());
+  processor->ProcessNext();
+  EXPECT_EQ(processor->GetNextResults()[0]->GetText(), std::string{plain->Decode(generator->GetNextTokens()[0])});
   processor->Finalize();
   processor->Finalize();
-  ASSERT_EQ(processor->GetNextTokenResults().size(), 1U);
-  EXPECT_STREQ(processor->GetNextTokenResults()[0]->GetText(), "");
+  ASSERT_EQ(processor->GetNextResults().size(), 1U);
+  EXPECT_STREQ(processor->GetNextResults()[0]->GetText(), "");
   processor->Reset();
-  EXPECT_TRUE(processor->GetNextTokenResults().empty());
+  EXPECT_TRUE(processor->GetNextResults().empty());
   processor.reset();
   generator.reset();
 }
 
-TEST(CAPITests, TokenPostProcessorRejectsInvalidCreation) {
-  OgaTokenPostProcessor* processor = nullptr;
-  EXPECT_THROW(OgaCheckResult(OgaCreateTokenPostProcessor(nullptr, &processor)), std::runtime_error);
+TEST(CAPITests, ASRPostProcessorBaseLifecycle) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  auto generator = OgaGenerator::Create(*model, *params);
+  auto processor = OgaASRPostProcessor::Create(*generator);
+  const auto* asr = processor.get();
+  std::unique_ptr<OgaPostProcessor> base{OgaASRPostProcessorAsPostProcessor(processor.release())};
+  const std::array<int32_t, 4> prompt{0, 0, 0, 52};
+  generator->AppendTokens(prompt.data(), prompt.size());
+  generator->GenerateNextToken();
+  base->ProcessNext();
+  ASSERT_EQ(asr->GetNextResults().size(), 1U);
+  base->Finalize();
+  ASSERT_EQ(asr->GetNextResults().size(), 1U);
+  EXPECT_STREQ(asr->GetNextResults()[0]->GetText(), "");
+  base->Reset();
+  EXPECT_TRUE(asr->GetNextResults().empty());
+  base.reset();
+}
+
+TEST(CAPITests, ASRPostProcessorRejectsInvalidCreation) {
+  OgaASRPostProcessor* processor = nullptr;
+  EXPECT_THROW(OgaCheckResult(OgaCreateASRPostProcessor(nullptr, &processor)), std::runtime_error);
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
-  EXPECT_THROW(OgaCheckResult(OgaCreateTokenPostProcessor(generator.get(), nullptr)), std::runtime_error);
-  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorProcessNextTokens(nullptr)), std::runtime_error);
-  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorFinalize(nullptr)), std::runtime_error);
-  EXPECT_THROW(OgaCheckResult(OgaTokenPostProcessorReset(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaCreateASRPostProcessor(generator.get(), nullptr)), std::runtime_error);
+  EXPECT_EQ(OgaASRPostProcessorAsPostProcessor(nullptr), nullptr);
+  EXPECT_THROW(OgaCheckResult(OgaPostProcessorProcessNext(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaPostProcessorFinalize(nullptr)), std::runtime_error);
+  EXPECT_THROW(OgaCheckResult(OgaPostProcessorReset(nullptr)), std::runtime_error);
+  EXPECT_NO_THROW(OgaDestroyPostProcessor(nullptr));
 }
 
 TEST(CAPITests, EncodeBatchEmptyInputThrows) {
@@ -907,7 +934,7 @@ TEST(CAPITests, MarianBatchWithBeamsIOContract) {
   ASSERT_EQ(next_tokens.size(), expected_tokens.size());
   for (size_t beam = 0; beam < expected_tokens.size(); ++beam)
     EXPECT_EQ(next_tokens[beam], expected_tokens[beam]) << "beam " << beam;
-  EXPECT_THROW(OgaTokenPostProcessor::Create(*generator), std::runtime_error);
+  EXPECT_THROW(OgaASRPostProcessor::Create(*generator), std::runtime_error);
 }
 
 TEST(CAPITests, EndToEndPhi) {
@@ -1064,6 +1091,35 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
   auto generator = OgaGenerator::Create(*model, *params);
 
   generator->SetModelInput("test_input", *tensor);
+}
+
+TEST(CAPITests, SetInputsRejectsImagesAfterFirstPrompt) {
+  auto model = OgaModel::Create(MODEL_PATH "lfm2-vl");
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  const std::string image_path = std::string(MODEL_PATH) + "../images/cars.jpg";
+  const std::array<const char*, 1> image_paths{image_path.c_str()};
+  auto images = OgaImages::Load(image_paths);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 2048);
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetInputs(*processor->ProcessImages("<image>Describe this image.", images.get()));
+  generator->GenerateNextToken();
+  const size_t length = generator->GetSequenceCount(0);
+
+  auto later_image = processor->ProcessImages("<image>And this one?", images.get());
+  try {
+    generator->SetInputs(*later_image);
+    FAIL() << "SetInputs accepted an image after the first prompt";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("Only a generator's first inputs can carry images or audio"),
+              std::string::npos)
+        << e.what();
+  }
+  EXPECT_EQ(generator->GetSequenceCount(0), length);
+
+  auto later_text = processor->ProcessImages("And now?");
+  generator->SetInputs(*later_text);
+  EXPECT_EQ(generator->GetSequenceCount(0), length + static_cast<size_t>(later_text->Get("input_ids")->Shape()[1]));
 }
 
 TEST(CAPITests, Logging) {
@@ -1291,6 +1347,75 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
+TEST(CAPITests, EngineTerminalTokenId) {
+  auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  config->Overlay(R"({"model":{"eos_token_id":[0,2]}})");
+  auto model = OgaModel::Create(*config);
+  auto engine = OgaEngine::Create(*model);
+  auto buffer = engine->CreateEventBuffer(1);
+  const auto check_terminal = [](const OgaEngineEvent& event,
+                                 std::optional<int32_t> expected) {
+    int32_t terminal_token_id = 42;
+    OgaCheckResult(OgaEngineEventGetTerminalTokenId(&event, &terminal_token_id));
+    EXPECT_EQ(terminal_token_id, expected.value_or(-1));
+    EXPECT_EQ(event.TerminalTokenId(), expected);
+  };
+
+  for (const int32_t eos : {0, 2}) {
+    SCOPED_TRACE(::testing::Message() << "EOS " << eos);
+    auto request = engine->CreateRequest();
+    // The fixture predicts (first token + last token + prompt length) % 64.
+    const std::array<int32_t, 2> prompt =
+        eos == 0 ? std::array<int32_t, 2>{31, 31}
+                 : std::array<int32_t, 2>{0, 0};
+    request->BeginTurn(prompt);
+    ASSERT_EQ(engine->Run(*buffer), 1u);
+    const auto* event = buffer->Get(0);
+    ASSERT_NE(event, nullptr);
+    EXPECT_EQ(event->Flags(), OgaEngineEventFlag_TurnFinished);
+    EXPECT_EQ(event->FinishReason(), OgaFinishReason_Eos);
+    check_terminal(*event, eos);
+    EXPECT_EQ(event->Usage().PromptTokens(), prompt.size());
+    EXPECT_EQ(event->Usage().GeneratedTokens(), 0u);
+    request->Close();
+  }
+
+  auto request = engine->CreateRequest();
+  auto options = request->CreateTurnOptions();
+  options->SetMaxGeneratedTokens(2);
+  const std::array<int32_t, 3> prompt{2, 3, 4};
+  request->BeginTurn(prompt, options.get());
+  ASSERT_EQ(engine->Run(*buffer), 1u);
+  const auto* token_event = buffer->Get(0);
+  ASSERT_NE(token_event, nullptr);
+  EXPECT_EQ(token_event->Flags(), OgaEngineEventFlag_Token);
+  EXPECT_EQ(token_event->Token(), 9);
+  check_terminal(*token_event, std::nullopt);
+
+  ASSERT_EQ(engine->Run(*buffer), 1u);
+  const auto* limited = buffer->Get(0);
+  ASSERT_NE(limited, nullptr);
+  EXPECT_EQ(limited->Flags(),
+            OgaEngineEventFlag_Token | OgaEngineEventFlag_TurnFinished);
+  EXPECT_EQ(limited->Token(), 15);
+  EXPECT_EQ(limited->FinishReason(), OgaFinishReason_MaxGeneratedTokens);
+  check_terminal(*limited, std::nullopt);
+  EXPECT_EQ(limited->Usage().PromptTokens(), prompt.size());
+  EXPECT_EQ(limited->Usage().GeneratedTokens(), 2u);
+
+  const std::array<int32_t, 1> continuation{5};
+  const auto turn_id = request->BeginTurn(continuation);
+  ASSERT_TRUE(request->CancelTurn(turn_id));
+  ASSERT_EQ(engine->Run(*buffer), 1u);
+  const auto* cancelled = buffer->Get(0);
+  ASSERT_NE(cancelled, nullptr);
+  EXPECT_EQ(cancelled->Flags(), OgaEngineEventFlag_TurnFinished);
+  EXPECT_EQ(cancelled->FinishReason(), OgaFinishReason_Cancelled);
+  check_terminal(*cancelled, std::nullopt);
+  EXPECT_EQ(cancelled->Usage().PromptTokens(), continuation.size());
+  EXPECT_EQ(cancelled->Usage().GeneratedTokens(), 0u);
+}
+
 TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
   auto engine = OgaEngine::Create(*model);
@@ -1436,6 +1561,35 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(engine->Run(*idle_buffer), 0u);
   EXPECT_EQ(idle_buffer->Count(), 0u);
   EXPECT_EQ(idle_buffer->Get(0), nullptr);
+}
+
+TEST(CAPITests, EngineFormattedPromptAdmissionContracts) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto engine = OgaEngine::Create(*model);
+  auto request = engine->CreateRequest();
+  auto options = request->CreateTurnOptions();
+  options->SetMaxGeneratedTokens(1);
+  auto other = engine->CreateRequest();
+  auto foreign_options = other->CreateTurnOptions();
+  EXPECT_THROW(request->BeginTurn("ABC", foreign_options.get()), std::runtime_error);
+  const char invalid_utf8[]{static_cast<char>(0xff), '\0'};
+  EXPECT_THROW(request->BeginTurn(invalid_utf8, options.get()), std::runtime_error);
+  EXPECT_THROW(request->BeginTurn(nullptr, options.get()), std::runtime_error);
+  std::exception_ptr owner_error;
+  std::thread thread([&] {
+    try {
+      request->BeginTurn("ABC", options.get());
+    } catch (...) {
+      owner_error = std::current_exception();
+    }
+  });
+  thread.join();
+  ASSERT_NE(owner_error, nullptr);
+  EXPECT_THROW(std::rethrow_exception(owner_error), std::runtime_error);
+  EXPECT_EQ(request->BeginTurn("ABC", options.get()), 1u);
+  EXPECT_EQ(RunOne(*engine).turn_id, 1u);
+  request->Close();
+  other->Close();
 }
 
 TEST(CAPITests, EngineMaxRequestLengthUsesResolvedCacheCapacity) {
