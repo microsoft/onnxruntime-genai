@@ -59,8 +59,9 @@ TEST(ConfigTest, ModelProviderOverridesPrimarySessionsWithoutReplacingTheirOptio
     options.config_entries = {{"session.disable_cpu_ep_fallback", "1"}};
   }
 
-  SetModelProvider(config, "CUDAExecutionProvider");
-  SetModelProvider(config, "cuda");
+  ClearProviders(config);
+  SetProviderOption(config, "CUDAExecutionProvider", {}, {});
+  SetProviderOption(config, "cuda", {}, {});
 
   for (size_t i = 0; i < sessions.size(); ++i) {
     const auto& options = *sessions[i];
@@ -84,7 +85,8 @@ TEST(ConfigTest, ModelProviderSupportsCpuAndMissingProviderOptions) {
   Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, {}};
   config.model.vision.session_options.emplace();
   for (const auto* provider : {"WebGpuExecutionProvider", "CPUExecutionProvider", "webgpu"}) {
-    SetModelProvider(config, provider);
+    ClearProviders(config);
+    SetProviderOption(config, provider, {}, {});
     const std::string expected = std::string_view{provider} == "CPUExecutionProvider" ? "CPU" : "WebGPU";
     EXPECT_EQ(config.model.decoder.session_options.providers, (std::vector<std::string>{expected}));
     EXPECT_EQ(config.model.vision.session_options->providers, (std::vector<std::string>{expected}));
@@ -94,22 +96,53 @@ TEST(ConfigTest, ModelProviderSupportsCpuAndMissingProviderOptions) {
   EXPECT_TRUE(config.model.vision.session_options->provider_options[0].options.empty());
   EXPECT_FALSE(config.model.embedding.session_options);
   EXPECT_FALSE(config.model.speech.session_options);
-  EXPECT_THROW(SetModelProvider(config, ""), std::runtime_error);
   EXPECT_EQ(config.model.decoder.session_options.providers, (std::vector<std::string>{"WebGPU"}));
 }
 
-TEST(ConfigTest, LegacyProviderApisRemainDecoderOnly) {
+TEST(ConfigTest, ProviderOptionsApplyToComponentsWithoutChangingDraft) {
   Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, {}};
   config.model.vision.session_options.emplace();
   config.model.vision.session_options->providers = {"WebGPU"};
+  config.model.vision.session_options->provider_options = {{"cuda", {{"enable_cuda_graph", "1"}, {"device_id", "0"}}}};
   config.model.draft.emplace().session_options.providers = {"WebGPU"};
 
-  ClearProviders(config);
   SetProviderOption(config, "cuda", "enable_cuda_graph", "0");
+  SetProviderOption(config, "CUDAExecutionProvider", "enable_cuda_graph", "0");
 
-  EXPECT_EQ(config.model.vision.session_options->providers, (std::vector<std::string>{"WebGPU"}));
-  SetModelProvider(config, "cuda");
+  EXPECT_EQ(config.model.vision.session_options->providers, config.model.decoder.session_options.providers);
+  EXPECT_EQ(config.model.vision.session_options->provider_options[0].options,
+            (std::vector<Config::NamedString>{{"device_id", "0"}, {"enable_cuda_graph", "0"}}));
+  EXPECT_EQ(config.model.decoder.session_options.provider_options.back().options,
+            (std::vector<Config::NamedString>{{"enable_cuda_graph", "0"}}));
   EXPECT_EQ(config.model.draft->session_options.providers, (std::vector<std::string>{"WebGPU"}));
+}
+
+TEST(ConfigTest, ClearProvidersDoesNotReactivateStoredComponentProviders) {
+  Config config;
+  config.model.vision.session_options.emplace().provider_options = {{"nonexistent_provider", {}}};
+  ClearProviders(config);
+  const auto& configured = *config.model.vision.session_options;
+  EXPECT_TRUE(configured.providers.empty());
+  ASSERT_EQ(configured.provider_options.size(), 1u);
+  auto options = OrtSessionOptions::Create();
+  EXPECT_NO_THROW(SetProviderSessionOptions(*options, configured.providers, configured.provider_options, false, config,
+                                            false, configured.providers_explicitly_selected));
+}
+
+TEST(ConfigTest, AppendProvidersKeepsComponentPriorityInSync) {
+  Config config;
+  config.model.vision.session_options.emplace().providers = {"WebGPU"};
+  ClearProviders(config);
+  SetProviderOption(config, "CUDAExecutionProvider", {}, {});
+  config.model.embedding.session_options.emplace();
+  SetProviderOption(config, "CPUExecutionProvider", {}, {});
+  SetProviderOption(config, "cuda", {}, {});
+  EXPECT_EQ(config.model.decoder.session_options.providers, (std::vector<std::string>{"cuda", "CPU"}));
+  EXPECT_EQ(config.model.vision.session_options->providers, config.model.decoder.session_options.providers);
+  EXPECT_EQ(config.model.embedding.session_options->providers, config.model.decoder.session_options.providers);
+  ASSERT_EQ(config.model.embedding.session_options->provider_options.size(), 2u);
+  EXPECT_EQ(config.model.embedding.session_options->provider_options[0].name, "cuda");
+  EXPECT_EQ(config.model.embedding.session_options->provider_options[1].name, "CPU");
 }
 
 TEST(ConfigTest, ModelProviderSelectionIsAuthoritativeForNonPrimarySessions) {
@@ -126,7 +159,8 @@ TEST(ConfigTest, ModelProviderSelectionIsAuthoritativeForNonPrimarySessions) {
   auto legacy = std::make_unique<Config>(*config);
   EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(legacy)), std::exception);
 
-  SetModelProvider(*config, "CPU");
+  ClearProviders(*config);
+  SetProviderOption(*config, "CPU", {}, {});
   auto model = CreateModel(GetOrtEnv(), std::move(config));
   EXPECT_EQ(model->p_device_->GetType(), DeviceType::CPU);
   const auto trivial = GetTrivialModel();
@@ -145,7 +179,8 @@ TEST(ConfigTest, ModelProviderSelectionIsAuthoritativeForNonPrimarySessions) {
 TEST(ConfigTest, ModelProviderSelectionSurvivesUnrelatedEngramOverlays) {
   Config config;
   OverlayConfig(config, R"({"model":{"engram":{"session_options":{"provider_options":[{"WebGPU":{}}]}}}})");
-  SetModelProvider(config, "cuda");
+  ClearProviders(config);
+  SetProviderOption(config, "cuda", {}, {});
   OverlayConfig(config, R"({"search":{"max_length":8},"model":{"engram":{"session_options":{"intra_op_num_threads":2}}}})");
   const auto& options = *config.model.engram.session_options;
   EXPECT_EQ(options.providers, (std::vector<std::string>{"cuda"}));
@@ -161,7 +196,8 @@ TEST(ConfigTest, ModelProviderSelectionSurvivesAuxiliarySessionResolution) {
   Config config;
   config.model.decoder.session_options.provider_options = {{"WebGPU", {}}};
   config.model.qwen38_graph.head.session_options.emplace().provider_options = {{"WebGPU", {}}};
-  SetModelProvider(config, "CPU");
+  ClearProviders(config);
+  SetProviderOption(config, "CPU", {}, {});
   for (bool inherit : {false, true}) {
     for (const auto& configured : {std::optional<Config::SessionOptions>{},
                                    config.model.qwen38_graph.head.session_options}) {
@@ -226,7 +262,8 @@ TEST(ConfigTest, ModelProviderCpuLoadsEngineWithExplicitEmbeddingSessionOptions)
       config->model.embedding.session_options->provider_options = {{"WebGPU", {}}};
     }
 
-    SetModelProvider(*config, "CPU");
+    ClearProviders(*config);
+    SetProviderOption(*config, "CPU", {}, {});
     auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(CreateModel(GetOrtEnv(), std::move(config)));
     ASSERT_NE(model, nullptr);
     ASSERT_NE(model->cpu_embedding_, nullptr);

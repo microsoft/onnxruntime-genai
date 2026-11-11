@@ -802,7 +802,8 @@ TEST(Dflash2ConfigTest, ModelProviderOverridePreservesDrafterInheritanceAndGraph
       draft_options.providers = {"CPU"};
     }
 
-    SetModelProvider(config, "CUDAExecutionProvider");
+    ClearProviders(config);
+    SetProviderOption(config, "CUDAExecutionProvider", {}, {});
     SetProviderOption(config, "cuda", "enable_cuda_graph", "0");
 
     const auto projected = CreateDflash2Config(config);

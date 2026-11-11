@@ -3644,29 +3644,10 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
   }
 }
 
-void ClearProviders(Config& config) {
-  config.model.decoder.session_options.providers.clear();
-}
-
-void SetModelProvider(Config& config, std::string_view provider_name) {
-  if (provider_name.empty()) {
-    throw std::runtime_error("Model provider name must not be empty. Use CPU for CPU execution.");
-  }
-
-  const auto normalized_provider = NormalizeProviderName(provider_name);
-  const auto set_provider = [normalized_provider](Config::SessionOptions& session_options) {
-    session_options.providers = {std::string{normalized_provider}};
-    session_options.providers_explicitly_selected = true;
-    if (std::none_of(session_options.provider_options.begin(), session_options.provider_options.end(),
-                     [normalized_provider](const Config::ProviderOptions& options) {
-                       return options.name == normalized_provider;
-                     })) {
-      session_options.provider_options.push_back({std::string{normalized_provider}, {}});
-    }
-  };
-
+template <typename Fn>
+static void ForEachPrimarySessionOptions(Config& config, Fn&& fn) {
   auto& model = config.model;
-  set_provider(model.decoder.session_options);
+  fn(model.decoder.session_options);
   // Absent component options inherit the decoder. Independently configured speculative models are not changed.
   for (auto* options : {&model.encoder.session_options, &model.embedding.session_options,
                         &model.engram.session_options, &model.vision.session_options,
@@ -3677,21 +3658,28 @@ void SetModelProvider(Config& config, std::string_view provider_name) {
                         &model.qwen38_graph.prefill.dense.session_options,
                         &model.qwen38_graph.prefill.head_kv.session_options}) {
     if (*options) {
-      set_provider(**options);
+      fn(**options);
     }
   }
 
   for (auto& stage : model.decoder.pipeline) {
     if (stage.session_options) {
-      set_provider(*stage.session_options);
+      fn(*stage.session_options);
     }
   }
 
   for (auto& stage : model.vision.pipeline) {
     if (stage.session_options) {
-      set_provider(*stage.session_options);
+      fn(*stage.session_options);
     }
   }
+}
+
+void ClearProviders(Config& config) {
+  ForEachPrimarySessionOptions(config, [](Config::SessionOptions& options) {
+    options.providers.clear();
+    options.providers_explicitly_selected = true;
+  });
 }
 
 // Escape a string for safe embedding inside a JSON string literal. Prevents JSON
@@ -3754,19 +3742,6 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
     config.model.decoder.session_options.providers.push_back(std::string(normalized_provider));
   }
 
-  // Remove any existing options with the same name to avoid duplicates
-  for (auto& provider_options : config.model.decoder.session_options.provider_options) {
-    if (provider_options.name == normalized_provider && !option_name.empty()) {
-      provider_options.options.erase(
-          std::remove_if(provider_options.options.begin(),
-                         provider_options.options.end(),
-                         [&option_name](const Config::NamedString& opt) {
-                           return opt.first == option_name;
-                         }),
-          provider_options.options.end());
-    }
-  }
-
   // JSON-escape all caller-supplied string fragments before concatenating them into the
   // JSON document. Without escaping, quote/backslash characters in the provider name,
   // option_name, or option_value would let a caller inject arbitrary JSON structure
@@ -3778,8 +3753,30 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   }
   json << R"(}})";
 
-  ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options};
-  JSON::Parse(element, json.str());
+  const auto provider_json = json.str();
+  ForEachPrimarySessionOptions(config, [&](Config::SessionOptions& options) {
+    options.providers = config.model.decoder.session_options.providers;
+    options.providers_explicitly_selected = true;
+    if (&options != &config.model.decoder.session_options) {
+      for (const auto& provider : config.model.decoder.session_options.provider_options) {
+        if (contains(options.providers, provider.name) &&
+            std::none_of(options.provider_options.begin(), options.provider_options.end(),
+                         [&provider](const Config::ProviderOptions& existing) { return existing.name == provider.name; })) {
+          options.provider_options.push_back(provider);
+        }
+      }
+    }
+    for (auto& provider_options : options.provider_options) {
+      if (provider_options.name == normalized_provider && !option_name.empty()) {
+        provider_options.options.erase(
+            std::remove_if(provider_options.options.begin(), provider_options.options.end(),
+                           [&option_name](const Config::NamedString& opt) { return opt.first == option_name; }),
+            provider_options.options.end());
+      }
+    }
+    ProviderOptionsArray_Element element{options.provider_options};
+    JSON::Parse(element, provider_json);
+  });
 }
 
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {

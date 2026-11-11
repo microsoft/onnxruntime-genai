@@ -1060,7 +1060,6 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
 // custom_ops_libraries is stored as a vector, an explicit `"custom_ops_libraries": []` leaves it empty and still inherits.
 void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Config::SessionOptions& child);
 void ClearProviders(Config& config);
-void SetModelProvider(Config& config, std::string_view provider_name);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
 struct RuntimeProfileDeviceFacts {

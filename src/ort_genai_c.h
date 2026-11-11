@@ -406,34 +406,19 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetTokenizerData(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfigFromPackageEp(const char* config_path, const char* ep, OgaConfig** out);
 
 /**
- * \brief Clear the list of providers in the given config
+ * \brief Clear the active providers for the primary model and its component sessions.
+ *
+ * Stored provider options and other session settings are preserved. Independently configured
+ * speculative models are unchanged; their existing inheritance rules still apply.
  * \param[in] config The config to clear the providers from.
  * \return OgaResult containing the error message if the clearing of the providers failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config);
 
 /**
- * \brief Select a single execution provider for the primary model and its component sessions.
- *
- * Replaces the active provider lists for the decoder and explicitly configured component sessions
- * (including vision, speech, embedding, encoder, and pipeline stages). Components without session
- * options continue to inherit from the decoder. Existing per-session provider options, device
- * filtering, and non-provider session settings are preserved. Missing options for the selected
- * provider use its defaults. This does not convert provider-specific ONNX graphs.
- *
- * Independently configured draft, MTP, and DFlash/DSpark model settings are not modified; their
- * existing inheritance rules still apply. ClearProviders, AppendProvider, and SetProviderOption
- * retain their decoder-only behavior.
- *
- * \param[in] config The config to update.
- * \param[in] provider Non-empty provider name. Use "CPU" to select CPU execution.
- * \return OgaResult containing the error message on failure.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetModelProvider(OgaConfig* config, const char* provider);
-
-/**
  * \brief Add the provider at the end of the list of providers in the given config if it doesn't already exist.
- * If it already exists, do nothing.
+ * The primary model's component sessions use the same active provider list.
+ * Existing per-session options are preserved. If the provider already exists, it is not duplicated.
  * \param[in] config The config to set the provider on.
  * \param[in] provider The provider to set on the config.
  * \return OgaResult containing the error message if the setting of the provider failed.
@@ -441,7 +426,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetModelProvider(OgaConfig* config, 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAppendProvider(OgaConfig* config, const char* provider);
 
 /**
- * \brief Set a provider option
+ * \brief Set a provider option across the primary model and its component sessions.
+ *
+ * Also activates the provider consistently across those sessions. Other per-session options
+ * are preserved. Independently configured speculative models are unchanged.
  * \param[in] config The config to set the provider option on.
  * \param[in] provider The provider to set the option on.
  * \param[in] key The key of the option to set.
