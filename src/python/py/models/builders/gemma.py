@@ -137,9 +137,10 @@ class Gemma3Model(Gemma2Model):
             cos_cache_name=self.cos_cache_global_name, sin_cache_name=self.sin_cache_global_name
         )
 
-        # Create the new cos/sin caches for local attention layers with its own theta value
+        # Create the new cos/sin caches for local attention layers with its own theta value and no RoPE scaling
         self.rope_attrs["create_caches"] = True
         self.rope_attrs["theta"] = self.rope_local_theta
+        self.rope_attrs["rescale_factors"] = 1
 
         self.cos_cache_local_name, self.sin_cache_local_name = "cos_cache_local", "sin_cache_local"
         super().make_rotary_embedding_caches(
