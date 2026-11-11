@@ -48,6 +48,8 @@ examples/csharp/ModelChat/models
 !test/models/qwen2-5-vl/*
 !test/models/qwen3-5/*
 !test/models/qwen3-vl/*
+!/test/models/shared-initializers/
+!test/models/shared-initializers/*
 !test/models/whisper/*
 
 !/test/models/engine/
