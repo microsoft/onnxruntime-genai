@@ -268,7 +268,11 @@ __global__ void WhisperTimestampRules(float* logits, const int32_t* sequences,
       local_max = max(local_max, score);
   }
 
+#if CUDART_VERSION >= 12090
+  const float block_max = BlockReduce(reduce_storage).Reduce(local_max, ::cuda::maximum());
+#else
   const float block_max = BlockReduce(reduce_storage).Reduce(local_max, cub::Max());
+#endif
   if (threadIdx.x == 0)
     row_max = block_max;
   __syncthreads();
@@ -279,8 +283,13 @@ __global__ void WhisperTimestampRules(float* logits, const int32_t* sequences,
     if (isfinite(score))
       local_max_text = max(local_max_text, score);
   }
+#if CUDART_VERSION >= 12090
+  const float block_max_text =
+      BlockReduce(reduce_storage).Reduce(local_max_text, ::cuda::maximum());
+#else
   const float block_max_text =
       BlockReduce(reduce_storage).Reduce(local_max_text, cub::Max());
+#endif
   if (threadIdx.x == 0) {
     max_text_logit = block_max_text;
     if (!isfinite(row_max)) {
