@@ -53,6 +53,7 @@ This folder contains the model builder for quickly creating optimized and quanti
       - [Quantize the KV Cache](#quantize-the-kv-cache)
     - [FP32 I/O for WebGPU EP](#fp32-io-for-webgpu-ep)
     - [BF16 I/O for CUDA EP](#bf16-io-for-cuda-ep)
+    - [Bailing BF16 KDA Prefill Precision](#bailing-bf16-kda-prefill-precision)
     - [LoRA Models](#lora-models)
   - [Unit Testing Models](#unit-testing-models)
     - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
@@ -64,6 +65,7 @@ This folder contains the model builder for quickly creating optimized and quanti
 The tool currently supports the following model architectures.
 
 - AMD OLMo
+- Bailing MoE V3 (Ling-3.0-tiny; see [configuration semantics](docs/model-specific-options.md#bailing-moe-v3-ling-30-tiny))
 - ChatGLM
 - DeepSeek
 - ERNIE 4.5
@@ -89,6 +91,8 @@ The tool currently supports the following model architectures.
 - Whisper
 
 It is intended for supporting the latest, popular state-of-the-art models.
+
+Bailing exports require an ONNX Runtime build containing [ORT #33817](https://github.com/microsoft/onnxruntime/pull/33817), merged November 8, 2026 as `d93f5446f362d9c70bea81de953f32a26aa26d25`, for `MoEGroupRouter` and per-key KDA decay. The first `onnxruntime` and `onnxruntime-gpu` nightly wheels with it are `1.32.0.dev20261109001`; a CPU `onnxruntime` nightly also works with an `onnxruntime-ep-cuda12` nightly built after the merge. Older installed wheels, including the reviewed ORT 1.30.0 wheel, do not gain these operators automatically. The Linux CUDA CI workflow installs the nightly packages pinned in `test/python/cuda/ort-nightly/` and requires the CPU/CUDA routing and KDA tests to execute, not skip.
 
 Dense text LongRoPE exports using an `If` node declare an int64 scalar
 `rope_context_length` input. ONNX metadata entries
@@ -947,6 +951,20 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e cuda -c cache_dir_to_store_temp_files --extra_options use_cuda_bf16=true
+```
+
+#### Bailing BF16 KDA Prefill Precision
+
+For Bailing CUDA BF16 exports with `use_paged_attention=true`, `gated_delta_net_bf16_precision` controls internal tensor-core precision in chunked KDA prefill. Accepted values are `bf16` (the Bailing default, native BF16 tiles), `fp16` (FP16 tiles with runtime range safeguards), and `fp32` (the runtime's higher-accuracy multi-slice path). This does not change model activations, weights, or the FP32 recurrent-state interface. Explicit use on other providers, non-paged exports, or non-BF16 I/O is rejected.
+
+An explicit `-p fp16` remains FP16 even for a BF16 checkpoint. Select `-p bf16`, or `-p int4 --extra_options use_cuda_bf16=true`, to request BF16 I/O; otherwise the normal resolved precision policy applies.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m inclusionAI/Ling-3.0-tiny -o ling-bf16 -p bf16 -e cuda --extra_options hf_remote=true use_paged_attention=true gated_delta_net_bf16_precision=fp32
+
+# From source, at the repository root:
+python src/python/py/models/builder.py -m inclusionAI/Ling-3.0-tiny -o ling-bf16 -p bf16 -e cuda --extra_options hf_remote=true use_paged_attention=true gated_delta_net_bf16_precision=fp32
 ```
 
 #### LoRA Models
