@@ -272,6 +272,8 @@ void ScheduledRequests::ValidateBackendRows() const {
     if (row.prefill) {
       const auto& progress = *row.prefill;
       if (progress.prompt_tokens_processed_this_step > planned->max_prompt_tokens ||
+          progress.cached_prefix_tokens > progress.prompt_tokens_processed_this_step ||
+          progress.cached_prefix_tokens > requests_[request_row]->TokensCpu().size() ||
           (progress.prompt_tokens_processed_this_step == 0 &&
            !(planned->allow_phase_completion && progress.prompt_complete)))
         throw std::logic_error("Backend prefill progress is outside its planned prompt range.");
@@ -302,6 +304,11 @@ void ScheduledRequests::GenerateNextTokens(std::vector<RequestStepResult>& resul
       const size_t request_row = backend_request_rows_[i];
       auto& request = requests_[request_row];
       auto& result = results[request_row];
+      if (row.prefill && row.prefill->cached_prefix_tokens != 0) {
+        const size_t turn_start = request->TokensCpu().size() - request->TurnPromptTokens();
+        request->turn_cached_prompt_tokens_ =
+            row.prefill->cached_prefix_tokens > turn_start ? row.prefill->cached_prefix_tokens - turn_start : 0;
+      }
       if (row.selected_tokens) {
         const auto& block = *row.selected_tokens;
         result = request->CommitExternalTokens({block.candidates.data(), block.candidate_count});

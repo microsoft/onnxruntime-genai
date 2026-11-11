@@ -78,12 +78,42 @@ TEST_F(ExecutorResultTest, ProgressAndTokensCanShareOneRowInAMixedBatch) {
   EXPECT_EQ(batch.CommitAcks()[0].tokens_staged_for_events, 1);
 }
 
+TEST_F(ExecutorResultTest, CachedProgressIsCreditedBeforeSelectedTokensChangeHistory) {
+  auto request = ActiveRequest();
+  const auto plan = Plan(request);
+  ScheduledRequests batch{{request}, model_, nullptr, nullptr};
+  batch.BeginBackendStep({plan});
+  auto row = Tokens(plan, {4});
+  row.prefill = PrefillProgress{2, true, 2};
+  batch.StageBackendRow(0, std::move(row));
+  std::vector<RequestStepResult> results;
+  batch.GenerateNextTokens(results);
+  EXPECT_EQ(request->TurnCachedPromptTokens(), 2u);
+  EXPECT_EQ(request->TokensCpu().size(), 3u);
+}
+
+TEST_F(ExecutorResultTest, BoltRequestsDoNotRetainTheGeneratorsTerminalEos) {
+  model_->config_->model.type = "nemotron_bolt";
+  auto request = ActiveRequest();
+  const auto plan = Plan(request);
+  ScheduledRequests batch{{request}, model_, nullptr, nullptr};
+  batch.BeginBackendStep({plan});
+  batch.StageBackendRow(0, Tokens(plan, {EosToken(*model_)}));
+  std::vector<RequestStepResult> results;
+  batch.GenerateNextTokens(results);
+  EXPECT_TRUE(results.at(0).done);
+  EXPECT_EQ(request->TokensCpu().size(), 2u);
+  EXPECT_EQ(batch.CommitAcks().at(0).tokens_appended, 0u);
+  EXPECT_EQ(batch.CommitAcks().at(0).finish_reason, GenerationFinishReason::EosToken);
+}
+
 TEST_F(ExecutorResultTest, MalformedSecondRowCannotMutateFirstRequest) {
   auto first = ActiveRequest();
   auto second = ActiveRequest();
   auto a = Plan(first);
   auto b = Plan(second, 1);
-  for (int violation = 0; violation < 7; ++violation) {
+  for (int violation = 0; violation < 9; ++violation) {
+    if (violation == 8) b.max_prompt_tokens = 3;
     ScheduledRequests batch{{first, second}, model_, nullptr, nullptr};
     batch.BeginBackendStep({a, b});
     batch.StageBackendRow(0, Tokens(a, {4}));
@@ -109,6 +139,12 @@ TEST_F(ExecutorResultTest, MalformedSecondRowCannotMutateFirstRequest) {
         break;
       case 6:
         bad.prefill = PrefillProgress{0, false};
+        break;
+      case 7:
+        bad.prefill = PrefillProgress{2, true, 3};
+        break;
+      case 8:
+        bad.prefill = PrefillProgress{3, true, 3};
         break;
     }
     batch.StageBackendRow(1, std::move(bad));
