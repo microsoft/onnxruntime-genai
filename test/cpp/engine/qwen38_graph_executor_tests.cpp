@@ -1902,6 +1902,152 @@ TEST_F(Qwen38GraphEngineTest, ADrainedLookAheadCycleWithoutErrorBitsIsCheckedAnd
   EXPECT_EQ(device_->order, (std::vector<std::string>{"reset", "drain", "status", "reset", "status"}));
 }
 
+TEST_F(Qwen38GraphEngineTest, NativePrefixCacheReusesExactPromptAcrossClosedRequests) {
+  device_->prefix_caching = true;
+  auto engine = MakeEngine();
+  const auto prompt = Prompt(13);
+  auto cold = Begin(*engine, prompt, 7);
+  const auto cold_result = RunToCompletion(*engine, cold);
+  EXPECT_EQ(cold_result.usage.cached_prompt_tokens, 0u);
+  cold->Close();
+  const auto calls = device_->calls.size();
+
+  auto warm = Begin(*engine, prompt, 7);
+  const auto warm_result = RunToCompletion(*engine, warm);
+  EXPECT_EQ(warm_result.tokens, cold_result.tokens);
+  EXPECT_EQ(warm_result.usage.cached_prompt_tokens, prompt.size());
+  EXPECT_EQ(device_->CallCount("restore:13"), 1u);
+  for (size_t i = calls; i < device_->calls.size(); ++i)
+    EXPECT_NE(device_->calls[i].find("prefill:"), 0u);
+  ASSERT_TRUE(engine->PrefixCacheStats());
+  EXPECT_EQ(engine->PrefixCacheStats()->hits, 1u);
+  EXPECT_EQ(engine->PrefixCacheStats()->matched_tokens, prompt.size());
+}
+
+TEST_F(Qwen38GraphEngineTest, NativePrefixCacheRestoresLongestPrefixAndOnlyIngestsSuffix) {
+  device_->prefix_caching = true;
+  device_->dense_prefill = true;
+  device_->preferred_chunk = 4;
+  auto engine = MakeEngine();
+  auto cold = Begin(*engine, Prompt(5), 3);
+  RunToCompletion(*engine, cold);
+  cold->Close();
+  const auto prefill_calls = device_->prefill_totals.size();
+
+  auto warm = Begin(*engine, Prompt(14), 3);
+  const auto result = RunToCompletion(*engine, warm);
+  EXPECT_EQ(result.tokens, Expected(14, 3));
+  EXPECT_EQ(result.usage.cached_prompt_tokens, 5u);
+  EXPECT_EQ(device_->CallCount("restore:5"), 1u);
+  EXPECT_EQ(device_->prefill_totals.size() - prefill_calls, 3u);
+  EXPECT_EQ(device_->prefill_totals.back(), 14u);
+  EXPECT_EQ(engine->PrefixCacheStats()->matched_tokens, 5u);
+}
+
+TEST_F(Qwen38GraphEngineTest, NativePrefixCacheDoesNotRestoreDivergentOrEvictedState) {
+  device_->prefix_caching = true;
+  device_->max_prefix_snapshots = 1;
+  auto engine = MakeEngine();
+  auto first = Begin(*engine, Prompt(13), 2);
+  RunToCompletion(*engine, first);
+  first->Close();
+
+  auto different = Prompt(13);
+  different.back() += 1;
+  auto second = Begin(*engine, different, 2);
+  EXPECT_EQ(RunToCompletion(*engine, second).usage.cached_prompt_tokens, 0u);
+  second->Close();
+
+  auto shorter = Begin(*engine, Prompt(8), 2);
+  EXPECT_EQ(RunToCompletion(*engine, shorter).usage.cached_prompt_tokens, 0u);
+  EXPECT_EQ(device_->CallCount("restore:8"), 0u);
+  EXPECT_EQ(engine->PrefixCacheStats()->hits, 0u);
+}
+
+TEST_F(Qwen38GraphEngineTest, NativePrefixCacheDoesNotCreditReusedPriorTurnHistoryAsNewInput) {
+  device_->prefix_caching = true;
+  auto engine = MakeEngine();
+  auto request = Begin(*engine, Prompt(5), 3);
+  RunToCompletion(*engine, request);
+  TurnOptions options = Limit(2);
+  options.request = request;
+  request->BeginTurn(std::array<int32_t, 2>{30, 31}, options);
+  const auto result = RunToCompletion(*engine, request);
+  EXPECT_EQ(result.tokens, Expected(10, 2));
+  EXPECT_EQ(result.usage.cached_prompt_tokens, 0u);
+  EXPECT_EQ(device_->CallCount("restore:5"), 1u);
+  EXPECT_EQ(engine->PrefixCacheStats()->matched_tokens, 5u);
+}
+
+TEST_F(Qwen38GraphEngineTest, NativePrefixCacheExactHitHonorsEosAndOneTokenBudget) {
+  for (bool eos : {false, true}) {
+    device_ = std::make_shared<ScriptedQwen38Device>();
+    device_->prefix_caching = true;
+    if (eos) device_->overrides[5] = kEos;
+    auto engine = MakeEngine();
+    auto cold = Begin(*engine, Prompt(5), 1);
+    const auto expected = RunToCompletion(*engine, cold);
+    cold->Close();
+    auto warm = Begin(*engine, Prompt(5), 1);
+    const auto result = RunToCompletion(*engine, warm);
+    EXPECT_EQ(result.tokens, expected.tokens);
+    EXPECT_EQ(result.finish_reason, expected.finish_reason);
+    EXPECT_EQ(result.finished_events, 1u);
+    EXPECT_EQ(result.usage.cached_prompt_tokens, 5u);
+    EXPECT_EQ(device_->CallCount("prefill:0"), 0u);
+    EXPECT_EQ(device_->cycles_enqueued, 0u);
+  }
+}
+
+TEST_F(Qwen38GraphEngineTest, NativePrefixCacheCreditsOnlyTheNewInputInsideASharedCheckpoint) {
+  device_->prefix_caching = true;
+  auto engine = MakeEngine();
+  auto shared_prompt = Prompt(5);
+  const auto generated = Expected(5, 3);
+  shared_prompt.insert(shared_prompt.end(), generated.begin(), generated.end());
+  shared_prompt.insert(shared_prompt.end(), {30, 31, 32});
+  auto other = Begin(*engine, shared_prompt, 1);
+  RunToCompletion(*engine, other);
+  other->Close();
+
+  auto request = Begin(*engine, Prompt(5), 3);
+  RunToCompletion(*engine, request);
+  TurnOptions options = Limit(2);
+  options.request = request;
+  request->BeginTurn(std::array<int32_t, 5>{30, 31, 32, 33, 34}, options);
+  const auto result = RunToCompletion(*engine, request);
+  EXPECT_EQ(result.tokens, Expected(13, 2));
+  EXPECT_EQ(result.usage.cached_prompt_tokens, 3u);
+  EXPECT_EQ(device_->CallCount("restore:11"), 1u);
+}
+
+TEST_F(Qwen38GraphEngineTest, NativePrefixCacheAllocationFailureLeavesGenerationUsable) {
+  device_->prefix_caching = true;
+  device_->fail_capture_allocation = true;
+  auto engine = MakeEngine();
+  auto first = Begin(*engine, Prompt(5), 3);
+  EXPECT_EQ(RunToCompletion(*engine, first).tokens, Expected(5, 3));
+  first->Close();
+  auto next = Begin(*engine, Prompt(5), 3);
+  EXPECT_EQ(RunToCompletion(*engine, next).tokens, Expected(5, 3));
+  EXPECT_EQ(engine->PrefixCacheStats()->hits, 0u);
+  EXPECT_GT(engine->PrefixCacheStats()->publication_refusals, 0u);
+  EXPECT_TRUE(device_->ContextIsHealthy());
+}
+
+TEST_F(Qwen38GraphEngineTest, NativePrefixCacheTransferFailureRemainsFatal) {
+  device_->prefix_caching = true;
+  auto engine = MakeEngine();
+  auto first = Begin(*engine, Prompt(5), 3);
+  RunToCompletion(*engine, first);
+  first->Close();
+  device_->fail_restore = true;
+  auto next = Begin(*engine, Prompt(5), 3);
+  EXPECT_EQ(RunUntilFailure(*engine), EngineErrorCode::EngineExecutionFailure);
+  EXPECT_FALSE(device_->ContextIsHealthy());
+  EXPECT_EQ(engine->PrefixCacheStats()->hits, 0u);
+}
+
 TEST_F(Qwen38GraphEngineTest, CapabilitiesAreHonest) {
   auto engine = MakeEngine();
   const auto capabilities = engine->GetCapabilities();

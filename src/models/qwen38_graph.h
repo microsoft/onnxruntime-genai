@@ -596,6 +596,9 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void Drain() noexcept override;
   void MarkContextFailed() noexcept override;
   bool ContextIsHealthy() const noexcept override;
+  bool PrefixCachingEnabled() const override;
+  std::shared_ptr<const Qwen38PrefixState> CapturePrefix() override;
+  void RestorePrefix(const Qwen38PrefixState& state, std::span<const int32_t> tokens) override;
 
   // Ingests prompt tokens: by the dense chunked prefill session when prefill.enabled (FastAppend: the dense state continues
   // across chunks and is handed over to the decode state in BeginDecode), otherwise by S=2 graph steps (StepPrefill; the
@@ -631,6 +634,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   double ple_register_seconds{};
 
  private:
+  struct PrefixState;
   static constexpr int kMaxBatch = Config::Model::Qwen38Graph::kMaxBatchSize;
   // The int64 control words of one request slot in ctl_ (the `state` of the plane's prep): the slots lie this far apart for
   // the plane, for the batched fold.ctl views and for every host access.
@@ -946,6 +950,7 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<OrtSession> session_head_r2_, session_dense_, session_head_kv_;
   std::optional<int64_t> target_head_rows_;
   std::unique_ptr<Qwen38GraphEngine> engine_;
+  std::shared_ptr<PrefixSnapshotCache> prefix_snapshot_cache_;
   std::shared_ptr<const std::thread::id> engine_thread_;
 
   void RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const;

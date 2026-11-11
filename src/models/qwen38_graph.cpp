@@ -1802,6 +1802,149 @@ void Qwen38GraphEngine::MarkContextFailed() noexcept { model_.PoisonExecutionCon
 
 bool Qwen38GraphEngine::ContextIsHealthy() const noexcept { return model_.IsExecutionContextHealthy(); }
 
+struct Qwen38GraphEngine::PrefixState final : Qwen38PrefixState, PrefixSnapshotCache::Entry {
+  struct Buffer {
+    uint8_t* address{};
+    size_t bytes{};
+    std::vector<Range> ranges;
+    std::string dense_name;
+    std::vector<int64_t> shape;
+    ONNXTensorElementDataType element_type{};
+  };
+
+  explicit PrefixState(const Qwen38GraphEngine& engine)
+      : owner{&engine}, ledger{engine.ledger_}, bank_phase{engine.bank_phase_}, pending{engine.pending_}, dense_length{engine.fast_ ? engine.fast_->dense_length : 0} {}
+  bool IsResident() const override { return state == PrefixSnapshotCache::State::Resident; }
+
+  const Qwen38GraphEngine* owner;
+  Qwen38DecodeLedger ledger;
+  int bank_phase;
+  int32_t pending;
+  size_t dense_length;
+  std::optional<Qwen38DflashPromptFeatures::Chunk> draft_chunk;
+  std::vector<Buffer> buffers;
+};
+
+bool Qwen38GraphEngine::PrefixCachingEnabled() const {
+  return max_batch_ == 1 && model_.prefix_snapshot_cache_ != nullptr;
+}
+
+std::shared_ptr<const Qwen38PrefixState> Qwen38GraphEngine::CapturePrefix() {
+  if (!PrefixCachingEnabled() || decode_started_ || inflight_ || ledger_.Length() == 0) return nullptr;
+  const auto saved = dflash_ ? slot_dflash_prompt_[0].SavedChunk() : std::nullopt;
+  // Rebuild the drafter from this chunk, never from speculative state left by an earlier owner.
+  if (dflash_ && (!saved || (saved->position != 0 &&
+                             (dflash_->ContextWindow() == 0 || saved->rows < dflash_->ContextWindow())))) {
+    return nullptr;
+  }
+  auto snapshot = std::make_shared<PrefixState>(*this);
+  snapshot->type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+  snapshot->draft_chunk = saved;
+  const size_t length = ledger_.Length();
+  const auto add = [&](uint8_t* address, size_t bytes, std::vector<PrefixSnapshotCache::Entry::Range> ranges = {},
+                       std::string dense_name = {}, std::vector<int64_t> shape = {},
+                       ONNXTensorElementDataType element_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
+    if (bytes == 0) return;
+    if (ranges.empty()) ranges.push_back({0, 0, bytes});
+    size_t packed = 0;
+    for (const auto& range : ranges) {
+      if (range.bytes > std::numeric_limits<size_t>::max() - packed)
+        throw std::overflow_error("Qwen prefix snapshot size overflow.");
+      packed += range.bytes;
+    }
+    if (packed > static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
+        packed > std::numeric_limits<size_t>::max() - snapshot->bytes)
+      throw std::overflow_error("Qwen prefix snapshot size overflow.");
+    snapshot->bytes += packed;
+    snapshot->shapes.push_back({static_cast<int64_t>(packed)});
+    snapshot->buffers.push_back({address, bytes, std::move(ranges), std::move(dense_name), std::move(shape), element_type});
+  };
+  const auto add_cache = [&](const std::string& name, const DevTensor& tensor, bool index) {
+    const auto& shape = tensor.shape;
+    if (name == "past_position_ids") {
+      add(tensor.ptr, tensor.Bytes(), {{0, 0, length * sizeof(int64_t)}});
+    } else if (index || name.ends_with(".key") || name.ends_with(".value")) {
+      const size_t rows = static_cast<size_t>(shape.at(shape.size() - 2));
+      const size_t row_bytes = static_cast<size_t>(shape.back()) * Ort::SizeOf(tensor.type);
+      const size_t kept_rows = std::min(rows, index ? length / kQwen38IndexKeyRatio + 1 : length);
+      const size_t stride = rows * row_bytes;
+      std::vector<PrefixSnapshotCache::Entry::Range> ranges;
+      for (size_t offset = 0; offset < tensor.Bytes(); offset += stride)
+        ranges.push_back({ranges.size() * kept_rows * row_bytes, offset, kept_rows * row_bytes});
+      add(tensor.ptr, tensor.Bytes(), std::move(ranges));
+    } else {
+      add(tensor.ptr, tensor.Bytes());
+    }
+  };
+  for (const auto& [name, tensor] : store_) add_cache(name, *tensor, false);
+  for (const auto& [name, tensor] : shared_) add_cache(name, *tensor, true);
+  for (const auto& bank : banks_) add(bank.arena.data(), bank.arena.size());
+  add(ctx_commit_.data(), ctx_commit_.size());
+  add(d_last_hidden_.data(), d_last_hidden_.size());
+  if (keep_hidden_ && !dflash_)
+    add(d_prompt_hidden_.data(), d_prompt_hidden_.size(), {{0, 0, length * static_cast<size_t>(hidden_width_) * 2}});
+  if (saved)
+    add(d_dflash_prompt_.data(), d_dflash_prompt_.size(), {{0, 0, saved->rows * kDflashWidth * 2}});
+  if (fast_ && !fast_->unified) {
+    for (const auto& [name, value] : fast_->states) {
+      const auto info = value->GetTensorTypeAndShapeInfo();
+      const size_t bytes = info->GetElementCount() * Ort::SizeOf(info->GetElementType());
+      add(static_cast<uint8_t*>(value->GetTensorMutableRawData()), bytes, {}, name, info->GetShape(), info->GetElementType());
+    }
+  }
+  auto& cache = *model_.prefix_snapshot_cache_;
+  SyncStream();
+  try {
+    if (!cache.Allocate(snapshot, model_.p_device_, "qwen38")) return nullptr;
+    for (size_t i = 0; i < snapshot->buffers.size(); ++i) {
+      auto& buffer = snapshot->buffers[i];
+      Tensor source{OrtValue::CreateTensor(*memory_info_, buffer.address, buffer.bytes,
+                                           std::array<int64_t, 1>{static_cast<int64_t>(buffer.bytes)}, snapshot->type)};
+      source.p_device_ = model_.p_device_;
+      snapshot->Write(i, source, buffer.ranges);
+      if (!buffer.dense_name.empty()) buffer.address = nullptr;
+    }
+    snapshot->Flush();
+  } catch (const std::system_error&) {
+    cache.Discard(*snapshot);
+    return nullptr;
+  }
+  return snapshot;
+}
+
+void Qwen38GraphEngine::RestorePrefix(const Qwen38PrefixState& state, std::span<const int32_t> tokens) {
+  const auto& snapshot = dynamic_cast<const PrefixState&>(state);
+  if (snapshot.owner != this || !snapshot.IsResident() || tokens.size() != snapshot.ledger.Length() ||
+      decode_started_ || ledger_.Length() != 0)
+    throw std::logic_error("Invalid Qwen prefix restoration.");
+  for (size_t i = 0; i < snapshot.buffers.size(); ++i) {
+    const auto& buffer = snapshot.buffers[i];
+    auto* address = buffer.address;
+    if (!buffer.dense_name.empty()) {
+      auto value = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), buffer.shape, buffer.element_type);
+      address = static_cast<uint8_t*>(value->GetTensorMutableRawData());
+      fast_->states.emplace(buffer.dense_name, std::move(value));
+    }
+    Tensor destination{OrtValue::CreateTensor(*memory_info_, address, buffer.bytes,
+                                              std::array<int64_t, 1>{static_cast<int64_t>(buffer.bytes)}, snapshot.type)};
+    destination.p_device_ = model_.p_device_;
+    snapshot.Read(i, destination, buffer.ranges);
+  }
+  prompt_tokens_.assign(tokens.begin(), tokens.end());
+  std::vector<int64_t> ids(tokens.begin(), tokens.end());
+  plane_.Check(plane_.memcpy_h2d(d_tokens_.data(), ids.data(), ids.size() * sizeof(int64_t), stream_), "restore prompt ids");
+  if (suffix_lookup_mode_ > 0) suffix_drafter_.AppendSpan(tokens);
+  ledger_ = snapshot.ledger;
+  slot_ledgers_[0] = ledger_;
+  bank_phase_ = snapshot.bank_phase;
+  pending_ = slot_pending_[0] = snapshot.pending;
+  if (fast_) fast_->dense_length = snapshot.dense_length;
+  if (snapshot.draft_chunk)
+    slot_dflash_prompt_[0].ChunkDone(*snapshot.draft_chunk, true, tokens.size());
+  SyncStream();
+  model_.prefix_snapshot_cache_->Touch(snapshot);
+}
+
 void Qwen38GraphEngine::Reset() {
   SyncStream();
   if (dflash_) dflash_->ReleaseAll();
@@ -3375,6 +3518,17 @@ bool ApplyQwen38DynamicBatchingConfig(Config& config) {
 
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{PreflightQwen38GraphModelConfig(std::move(config))} {
+  const auto& batching = config_->engine.dynamic_batching;
+  if (batching && batching->prefix_caching.value_or(false) &&
+      batching->max_snapshots.value_or(1) != 0 && ResolveQwen38MaxBatchSize(*config_) == 1) {
+    const auto& limits = batching->snapshot_cache;
+    const bool resident = !limits.Configured();
+    if (resident || limits.Enabled())
+      prefix_snapshot_cache_ = std::make_shared<PrefixSnapshotCache>(
+          std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
+          batching->max_snapshots.value_or(resident ? 1 : std::numeric_limits<size_t>::max()),
+          std::filesystem::path{fs::path{limits.directory}.c_str()}, resident);
+  }
   const bool has_dynamic_batching_kv = ApplyQwen38DynamicBatchingConfig(*config_);
   const auto& q = config_->model.qwen38_graph;
   const bool separate_prefill_sessions =
@@ -3624,6 +3778,7 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   capabilities.kv_storage = BackendKvStorage::PersistentContiguous;
   capabilities.additional_state = BackendAdditionalState::PrivateBanks;
   capabilities.continuation = BackendContinuation::ReplayHistory;
+  capabilities.prefix_reuse = engine_->PrefixCachingEnabled();
   capabilities.rewind = BackendRewind::ReplayHistory;
   capabilities.supports_sampling = false;
   capabilities.supports_penalties = false;

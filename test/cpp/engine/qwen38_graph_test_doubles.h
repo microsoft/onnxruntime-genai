@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -69,6 +70,10 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   bool dense_prefill{};
   size_t preferred_chunk{};
   int draft_forward_override{-1};
+  bool prefix_caching{};
+  bool fail_capture_allocation{};
+  bool fail_restore{};
+  size_t max_prefix_snapshots{8};
 
   // Called at the end of ExpectPrefillTokens(), that is between the publication of a turn's prompt length and its first
   // PrefillChunk(): a test that drives several Engines blocks here to interleave their owner threads the worst way.
@@ -142,6 +147,43 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   int ReservedTail() const override { return reserved_tail; }
   bool MtpEnabled() const override { return mtp_; }
   size_t MaxBatchSize() const override { return max_batch_size_; }
+  bool PrefixCachingEnabled() const override { return prefix_caching && max_batch_size_ == 1; }
+
+  struct PrefixState final : Qwen38PrefixState {
+    explicit PrefixState(const ScriptedQwen38Device& device)
+        : ledger{device.ledger_}, tokens{device.ingested}, pending{device.pending_} {}
+    bool IsResident() const override { return resident; }
+    Qwen38DecodeLedger ledger;
+    std::vector<int32_t> tokens;
+    int32_t pending;
+    bool resident{true};
+  };
+
+  std::shared_ptr<const Qwen38PrefixState> CapturePrefix() override {
+    if (max_prefix_snapshots == 0) return nullptr;
+    if (fail_capture_allocation) throw std::bad_alloc{};
+    std::erase_if(prefix_snapshots_, [](const auto& state) { return state.expired(); });
+    while (prefix_snapshots_.size() >= max_prefix_snapshots) {
+      if (auto state = prefix_snapshots_.front().lock()) state->resident = false;
+      prefix_snapshots_.erase(prefix_snapshots_.begin());
+    }
+    auto state = std::make_shared<PrefixState>(*this);
+    prefix_snapshots_.push_back(state);
+    return state;
+  }
+
+  void RestorePrefix(const Qwen38PrefixState& state, std::span<const int32_t> tokens) override {
+    if (fail_restore) throw std::runtime_error("prefix transfer failed");
+    const auto& prefix = dynamic_cast<const PrefixState&>(state);
+    if (decoding_ || ledger_.Length() != 0 || !prefix.resident ||
+        !std::equal(tokens.begin(), tokens.end(), prefix.tokens.begin(), prefix.tokens.end()))
+      throw std::logic_error("invalid prefix restoration");
+    ledger_ = prefix.ledger;
+    ingested = prefix.tokens;
+    pending_ = prefix.pending;
+    restored_prefix_ = true;
+    calls.push_back("restore:" + std::to_string(tokens.size()));
+  }
 
   void Reset() override {
     calls.push_back("reset");
@@ -154,6 +196,7 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
     pending_ = -1;
     cycle_ = 0;
     expected_prefill_ = 0;
+    restored_prefix_ = false;
     error_bits_ = 0;  // ...then clears the device state, error bits included
     for (size_t s = 0; s < max_batch_size_; ++s) {
       slot_error_bits_[s] = 0;
@@ -194,7 +237,9 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
 
   void ExpectPrefillTokens(size_t total_tokens) override {
     calls.push_back("expect:" + std::to_string(total_tokens));
-    if (decoding_ || ledger_.Length() != 0) throw std::logic_error("the prompt length was announced after its ingestion started");
+    if (decoding_ || (ledger_.Length() != 0 && !restored_prefix_))
+      throw std::logic_error("the prompt length was announced after its ingestion started");
+    restored_prefix_ = false;
     expected_prefill_ = total_tokens;
     if (on_expect_prefill) on_expect_prefill(total_tokens);
   }
@@ -388,6 +433,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   }
 
  private:
+  bool restored_prefix_{};
+  std::vector<std::weak_ptr<PrefixState>> prefix_snapshots_;
   // The bank ring of the fold keeps one bank more than the rows of a verify; a verify of more than 4 rows ping-pongs
   // between two banks (the compact replay).
   void ConfigureLedger(Qwen38DecodeLedger& ledger) const {

@@ -2438,6 +2438,16 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
 `CreateEngineBackend` (`src/engine/backend_factory.h`) and `CreateQwen38GraphDependencies`
 (`src/engine/qwen38_graph_executor.h`) assemble it:
 
+- Single-slot native prefix reuse is opt-in: set `engine.dynamic_batching.prefix_caching` to `true`.
+  It restores committed prompt checkpoints across turns and separate Requests, including after `Close()`;
+  it does not restore speculative decode state. Exact hits reuse the saved next-token prediction without an empty
+  prefill. Partial hits ingest only the remaining suffix. `cached_prompt_tokens` counts reused tokens from the current
+  turn's input, not retained earlier-turn history.
+  The existing `max_snapshots` and `snapshot_cache` VRAM/RAM/disk limits bound checkpoint storage; without explicit
+  tier budgets or a count, at most one device-resident checkpoint is retained. `max_snapshots: 0` disables publication.
+  DFlash checkpoints must retain enough target features to reconstruct its complete context window (or start at
+  position zero). A short final prefill chunk can therefore reuse an earlier eligible checkpoint instead of the
+  entire prompt. Several-slot configurations retain replay-only behavior.
 - MoE offload requires an explicit `session.moe.offload.mode` of `required`, `auto`, `1` or `on` (case-insensitive).
   A budget alone does not enable offload, matching ORT's disabled default; `disabled`, `0` and `off` preserve that behavior.
   Only enabled offload changes target-graph selection, synthetic warmup options or session budgets.

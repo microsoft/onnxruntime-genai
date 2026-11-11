@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -16,6 +17,11 @@
 #include "span.h"
 
 namespace Generators {
+
+struct Qwen38PrefixState {
+  virtual ~Qwen38PrefixState() = default;
+  virtual bool IsResident() const = 0;
+};
 
 // Graph I/O of the fold model's com.microsoft::SpeculativePrefixCommit node (rc4 contract, ORT PR #33474). The op reads the
 // persistent control state (fold.ctl, fold.ctx_commit) and always writes the updated state to two required outputs. The
@@ -117,6 +123,11 @@ class Qwen38DecodeDevice {
   // Fatal execution invalidates mutable state across Engine leases; reset does not recover it.
   virtual void MarkContextFailed() noexcept {}
   virtual bool ContextIsHealthy() const noexcept { return true; }
+  virtual bool PrefixCachingEnabled() const { return false; }
+  virtual std::shared_ptr<const Qwen38PrefixState> CapturePrefix() { return nullptr; }
+  virtual void RestorePrefix(const Qwen38PrefixState&, std::span<const int32_t>) {
+    throw std::logic_error("This Qwen device does not support prefix restoration.");
+  }
 
   // Largest sequence (prompt + generated) the fixed KV store holds is MaxSequenceLength() = Capacity() - ReservedTail().
   virtual int Capacity() const = 0;

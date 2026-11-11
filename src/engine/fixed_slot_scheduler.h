@@ -18,6 +18,7 @@ struct FixedSlotSession {
   // Quiesce all work referencing a slot and inspect pending status before returning it for reuse.
   virtual void ReleaseSlot(size_t slot) = 0;
   virtual void ReleaseSlotForTeardown(size_t slot) noexcept = 0;
+  virtual const PrefixCacheMetrics* PrefixMetrics() const { return nullptr; }
 };
 
 // Static-cache contract for 1..MaxBatchSize() slots backed by a FixedSlotSession.
@@ -40,6 +41,7 @@ struct FixedSlotCacheManager final : CacheManager {
   bool IsResident(const std::shared_ptr<Request>& request) const override;
   size_t ResidentRequestCount() const override;
   size_t SlotOf(const std::shared_ptr<Request>& request) const;
+  const PrefixCacheMetrics* PrefixMetrics() const override { return session_->PrefixMetrics(); }
 
  private:
   std::shared_ptr<FixedSlotSession> session_;
