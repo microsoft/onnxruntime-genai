@@ -47,6 +47,29 @@ class Standard:
         )
         self.make_value(kwargs["present_conv_state"], self.io_dtype, ["batch_size", channels, state_size])
 
+    def make_clipped_swiglu(self, name, gate, up, limit, shape):
+        # SiLU(gate) -> [Cast(FP32)] -> Clip -> [Cast(I/O)] --+
+        # up         -> [Cast(FP32)] -> Clip -> [Cast(I/O)] -> Mul
+        clip_dtype = ir.DataType.FLOAT if self.io_dtype == ir.DataType.BFLOAT16 else self.io_dtype
+        maximum = f"/model/constants/{self.to_str_dtype(clip_dtype)}/{float(limit)}"
+        minimum = f"/model/constants/{self.to_str_dtype(clip_dtype)}/{-float(limit)}"
+        self.make_sigmoid(f"{name}/Sigmoid", gate, self.io_dtype, shape)
+        self.make_mul(f"{name}/SiLU", [gate, f"{name}/Sigmoid/output_0"], self.io_dtype, shape)
+        branches = [f"{name}/SiLU/output_0", up]
+        for index, branch in enumerate(("gate", "up")):
+            if clip_dtype != self.io_dtype:
+                self.make_cast(f"{name}/Cast_{branch}", branches[index], clip_dtype, shape)
+                branches[index] = f"{name}/Cast_{branch}/output_0"
+            self.make_clip(
+                f"{name}/Clip_{branch}", [branches[index], minimum if index else "", maximum], clip_dtype, shape
+            )
+            branches[index] = f"{name}/Clip_{branch}/output_0"
+            if clip_dtype != self.io_dtype:
+                self.make_cast(f"{name}/CastBack_{branch}", branches[index], self.io_dtype, shape)
+                branches[index] = f"{name}/CastBack_{branch}/output_0"
+        self.make_mul(name, branches, self.io_dtype, shape)
+        return f"{name}/output_0"
+
     def make_gated_add(self, name, root_input, scaled_input, gate, shape):
         # scaled_input * gate -> Add(root_input)
         mul_name = f"{name}/Mul"
@@ -64,9 +87,11 @@ class Standard:
         self.make_node("Sigmoid", [b], [f"{name}/output_1"], name=f"{name}/Sigmoid")
         self.make_value(f"{name}/output_1", self.io_dtype, shape)
 
-    def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
+    def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5, activation=None):
+        if activation not in {None, "silu", "sigmoid"}:
+            raise ValueError(f"Unsupported GatedRMSNorm activation: {activation}")
         # root_input -> Reshape(heads) -> RMSNorm -> Flatten -> Cast(FP32) --+
-        # gate -> Cast(FP32) -> SiLU ------------------------------------+-> Mul -> Cast
+        # gate -> Cast(FP32) -> SiLU/Sigmoid -----------------------------+-> Mul -> Cast
         head_size = int(self.values[scale].shape[0])
         grouped_shape = [*shape[:-1], shape[-1] // head_size, head_size]
         # An inferred -1 is ambiguous when batch or sequence length is zero.
@@ -91,8 +116,11 @@ class Standard:
         self.make_cast(f"{name}/gate/Cast", gate, ir.DataType.FLOAT, shape)
         gate = f"{name}/gate/Cast/output_0"
         self.make_sigmoid(f"{name}/Sigmoid", gate, ir.DataType.FLOAT, shape)
-        self.make_mul(f"{name}/SiLU", [gate, f"{name}/Sigmoid/output_0"], ir.DataType.FLOAT, shape)
-        self.make_mul(f"{name}/Mul", [f"{name}/norm/Cast/output_0", f"{name}/SiLU/output_0"], ir.DataType.FLOAT, shape)
+        activated_gate = f"{name}/Sigmoid/output_0"
+        if activation != "sigmoid":
+            self.make_mul(f"{name}/SiLU", [gate, activated_gate], ir.DataType.FLOAT, shape)
+            activated_gate = f"{name}/SiLU/output_0"
+        self.make_mul(f"{name}/Mul", [f"{name}/norm/Cast/output_0", activated_gate], ir.DataType.FLOAT, shape)
         self.make_cast(name, f"{name}/Mul/output_0", self.io_dtype, shape)
 
     def make_mrotary_embedding(self, name, root_input, output, **kwargs):
@@ -253,11 +281,67 @@ class Standard:
             positions.append(f"{name}/positions_{dim}/output_0")
         return positions
 
+    def make_packed_mrope(self, name, root_input, num_heads, rotary_dim, owners):
+        caches = self.make_rotary_embedding_caches()
+        dtype = ir.DataType.FLOAT if self.rope_attrs["cast"]["use_fp32"] else self.io_dtype
+        leading = ["num_tokens"]
+        cache_name = "/model/rotary/packed"
+        cos = f"{cache_name}/cos/Unsqueeze/output_0"
+        sin = f"{cache_name}/sin/Unsqueeze/output_0"
+        if cos not in self.values:
+            position_ids = self.input_names["position_ids"]
+            start = self.rope_attrs.get("position_start", 0)
+            if start:
+                self.make_sub(
+                    f"{cache_name}/Offset",
+                    [position_ids, f"/model/constants/INT64/{start}"],
+                    ir.DataType.INT64,
+                    [3, *leading],
+                )
+                position_ids = f"{cache_name}/Offset/output_0"
+            positions = Standard.make_mrope_positions(self, cache_name, position_ids, leading)
+            for kind, cache in zip(("cos", "sin"), caches, strict=True):
+                Standard.make_mrope_cache(
+                    self,
+                    cache_name,
+                    kind,
+                    cache,
+                    positions,
+                    owners,
+                    "/model/constants/INT64/[1]",
+                    dtype,
+                    leading,
+                )
+        shape = [*leading, num_heads, rotary_dim]
+        if dtype != self.io_dtype:
+            self.make_cast(f"{name}/Cast_in", root_input, dtype, self.values[root_input].shape)
+            root_input = f"{name}/Cast_in/output_0"
+        self.make_reshape(
+            f"{name}/Reshape",
+            [root_input, f"/model/constants/INT64/[0, {num_heads}, {rotary_dim}]"],
+            dtype,
+            shape,
+        )
+        rotated = Standard.make_mrope_rotation(self, name, f"{name}/Reshape/output_0", cos, sin, dtype, shape)
+        output = f"{name}/Flatten"
+        self.make_reshape(
+            output,
+            [rotated, f"/model/constants/INT64/[0, {num_heads * rotary_dim}]"],
+            dtype,
+            [*leading, num_heads * rotary_dim],
+        )
+        result = f"{output}/output_0"
+        if dtype != self.io_dtype:
+            self.make_cast(f"{name}/Cast_out", result, self.io_dtype, [*leading, num_heads * rotary_dim])
+            result = f"{name}/Cast_out/output_0"
+        return result
+
     def make_mrope_cache(self, name, kind, cache, positions, owners, axes, dtype, leading):
         cache_shape = [*leading, len(owners)]
         streams = []
         for dim, position in enumerate(positions):
             self.make_gather(f"{name}/{kind}_{dim}", [cache, position], dtype, cache_shape, axis=0)
+            self.exclude_node_from_quantization(f"{name}/{kind}_{dim}")
             streams.append(f"{name}/{kind}_{dim}/output_0")
         selected = streams[0]
         for dim in (1, 2):

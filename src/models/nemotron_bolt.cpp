@@ -70,7 +70,7 @@ struct BoltSearch : GreedySearch_Cpu {
 
 void ValidateNemotronBoltSearch(const GeneratorParams& params) {
   const auto& s = params.search;
-  Require(!s.do_sample && s.batch_size == 1 && s.num_beams == 1 &&
+  Require(params.IsGreedySampling() && s.batch_size == 1 && s.num_beams == 1 &&
               s.num_return_sequences == 1,
           "only batch-one greedy decoding without beams is supported");
   Require(s.min_length == 0 && s.repetition_penalty == 1.0f &&
