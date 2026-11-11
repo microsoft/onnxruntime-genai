@@ -12,27 +12,6 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
   session_info_.Add(*session_decoder_);
   auto metadata = session_decoder_->GetModelMetadata();
   const auto keys = metadata->GetCustomMetadataMapKeysAllocated();
-  if (config_->model.type == "bailing_moe_v3_vl" && !config_->model.vision.filename.empty()) {
-    constexpr auto range_key = "com.microsoft.genai.vision_position_range";
-    const auto incompatible = [] {
-      throw std::runtime_error(
-          "Ling image decoder requires signed vision position range metadata covering the configured context. "
-          "Rebuild the complete model with the current Model Builder.");
-    };
-    if (std::find(keys.begin(), keys.end(), range_key) == keys.end()) incompatible();
-    const auto range = metadata->LookupCustomMetadataMap(range_key);
-    const auto separator = range.find(':');
-    if (separator == std::string::npos) incompatible();
-    int64_t lower{}, upper{};
-    const auto* begin = range.data();
-    const auto* end = begin + range.size();
-    const auto [lower_end, lower_error] = std::from_chars(begin, begin + separator, lower);
-    const auto [upper_end, upper_error] = std::from_chars(begin + separator + 1, end, upper);
-    const auto context = static_cast<int64_t>(config_->model.context_length);
-    if (lower_error != std::errc{} || upper_error != std::errc{} ||
-        lower_end != begin + separator || upper_end != end || lower > -context || upper < context)
-      incompatible();
-  }
   if (std::find(keys.begin(), keys.end(), "com.microsoft.genai.rope_context_length_input") != keys.end()) {
     if (std::find(keys.begin(), keys.end(), "com.microsoft.genai.original_context_length") == keys.end())
       throw std::runtime_error("LongRoPE metadata requires an original context length");
@@ -79,11 +58,10 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
         session_info_.GetInputDataType(inputs.position_ids) != Ort::TypeToTensorType<int64_t>) {
       throw std::runtime_error("Packed vision requires three-axis int64 decoder position IDs.");
     }
-    if (config_->model.type == "qwen4_exp" &&
-        (!session_info_.HasInput(inputs.rotary_position_ids) ||
-         session_info_.GetInputShape(inputs.rotary_position_ids) != std::vector<int64_t>{3, -1, -1} ||
+    if (session_info_.HasInput(inputs.rotary_position_ids) &&
+        (session_info_.GetInputShape(inputs.rotary_position_ids) != std::vector<int64_t>{3, -1, -1} ||
          session_info_.GetInputDataType(inputs.rotary_position_ids) != Ort::TypeToTensorType<int64_t>)) {
-      throw std::runtime_error("Packed Qwen4-Exp vision requires three-axis int64 sparse-indexer rotary history.");
+      throw std::runtime_error("Packed vision rotary history must use three-axis int64 positions.");
     }
     vision_ = std::make_unique<PackedVision>();
     vision_->session_options = OrtSessionOptions::Create();

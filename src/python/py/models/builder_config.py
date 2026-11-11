@@ -1615,13 +1615,6 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
                     protected_options = GRAPH_DERIVED_PROVIDER_OPTIONS.get(normalized_name, set())
                     tunable_options = RUNTIME_TUNABLE_PROVIDER_OPTIONS.get(normalized_name, set())
                     generated_options = generated_by_name[normalized_name]
-                    if (
-                        generated_config["model"].get("type") in {"bailing_hybrid", "bailing_moe_v3_vl"}
-                        and component_name == "decoder"
-                        and normalized_name == "cuda"
-                        and runtime_options.get("use_tf32", "0") != "0"
-                    ):
-                        raise ValueError("Bailing FP32 routing requires the CUDA provider option use_tf32=0")
                     changed_protected = [
                         option_name
                         for option_name in protected_options & runtime_options.keys()

@@ -14,7 +14,6 @@
 #include <charconv>
 #include <condition_variable>
 #include <cmath>
-#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>

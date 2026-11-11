@@ -97,6 +97,12 @@ struct Processor {
 
   virtual void ConfigureTokenizer(Tokenizer&) const {}
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;
+  virtual std::vector<int32_t> ExpandImagePrompt(const Tokenizer&, const std::string&, std::span<const int64_t>) const {
+    throw std::runtime_error("This processor does not support packed image prompts.");
+  }
+  virtual ImagePositionLayout GetImagePositionLayout(const std::array<int64_t, 3>&) const {
+    throw std::runtime_error("This processor does not support packed image positions.");
+  }
 
  protected:
   ThreadPool* thread_pool_{};

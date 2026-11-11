@@ -349,12 +349,17 @@ def test_text_only_export_rejects_images_without_consuming_the_turn(vision_packa
 
 def test_vision_export_requires_multimodal_position_bindings(vision_package):
     directory, manifest = vision_package
-    bindings = [("position_ids", "three-axis int64 decoder position IDs")]
-    if manifest["model"]["type"] == "qwen4_exp":
-        bindings.append(("rotary_position_ids", "three-axis int64 sparse-indexer rotary history"))
-    for binding, diagnostic in bindings:
+    bindings = [
+        ("position_ids", "missing_position_input", "three-axis int64 decoder position IDs"),
+        (
+            "rotary_position_ids",
+            manifest["model"]["decoder"]["inputs"]["position_ids"],
+            "rotary history must use three-axis int64 positions",
+        ),
+    ]
+    for binding, input_name, diagnostic in bindings:
         config = og.Config(directory)
-        config.overlay(json.dumps({"model": {"decoder": {"inputs": {binding: "missing_position_input"}}}}))
+        config.overlay(json.dumps({"model": {"decoder": {"inputs": {binding: input_name}}}}))
         config.set_provider_option("cuda", "enable_cuda_graph", "0")
         with pytest.raises(RuntimeError, match=diagnostic):
             og.Model(config)

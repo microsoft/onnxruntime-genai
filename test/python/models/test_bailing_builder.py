@@ -33,6 +33,7 @@ from builder_config import COMPONENT_EXPORTER_OWNED_FILES
 from builders import bailing
 from builders.bailing import BailingMoeV3Model
 from builders.bailing_vl import BailingVLModel, BailingVLTextModel, BailingVLVisualModel
+from builders.expansions.standard import Standard
 from builders.qwen3_8.vision import save_image_processor
 from loaders import bailing as bailing_loader
 from loaders.bailing import BailingModel
@@ -466,12 +467,11 @@ def test_ling_context_limits_preserve_supported_exports(tmp_path, text_only, con
             "mrope_section": [8, 12, 12],
         },
     )
-    metadata = model.model.metadata_props
     if text_only:
-        assert "com.microsoft.genai.vision_position_range" not in metadata
+        assert model.rope_attrs["op_type"] == "RotaryEmbedding"
     else:
-        lower, upper = map(int, metadata["com.microsoft.genai.vision_position_range"].split(":"))
-        assert lower <= -context_length and upper >= context_length
+        assert model.rope_attrs["position_start"] == -128
+        assert model.rope_attrs["cache_length"] == 128 + context_length
 
 
 def test_ling_raw_configuration_and_image_processor_assets(tmp_path):
@@ -507,7 +507,8 @@ def test_ling_raw_configuration_and_image_processor_assets(tmp_path):
 
 
 @pytest.mark.parametrize("text_only", [False, True])
-def test_ling_composite_config_preserves_component_and_position_contracts(tmp_path, text_only):
+@pytest.mark.parametrize("capture", [None, False, True])
+def test_ling_composite_config_preserves_component_and_position_contracts(tmp_path, text_only, capture):
     (tmp_path / "generation_config.json").write_text(json.dumps({"eos_token_id": 2, "pad_token_id": 0}))
     config = PretrainedConfig(
         _name_or_path=str(tmp_path),
@@ -519,13 +520,16 @@ def test_ling_composite_config_preserves_component_and_position_contracts(tmp_pa
     )
     markers = {"<tool_call>": 24, "</tool_call>": 25, "<think>": 26, "</think>": 27}
     builder.add_special_token_ids(config, SimpleNamespace(get_vocab=lambda: markers))
+    options = {"use_paged_attention": True, "exclude_embeds": not text_only, "text_only": text_only}
+    if capture is not None:
+        options["enable_cuda_graph"] = capture
     model = BailingVLModel(
         config,
         ir.DataType.BFLOAT16,
         ir.DataType.BFLOAT16,
         "cuda",
         str(tmp_path),
-        {"use_paged_attention": True, "exclude_embeds": not text_only, "text_only": text_only},
+        options,
     )
     model.decoder.make_inputs_and_outputs()
     model.make_genai_config(config, {}, str(tmp_path))
@@ -539,16 +543,16 @@ def test_ling_composite_config_preserves_component_and_position_contracts(tmp_pa
         assert saved[name] == markers[token]
     assert saved["type"] == ("bailing_hybrid" if text_only else "bailing_moe_v3_vl")
     assert saved["decoder"]["session_options"]["provider_options"][0]["cuda"]["use_tf32"] == "0"
-    with pytest.raises(ValueError, match="FP32 routing"):
-        builder.apply_runtime_config(
-            {"model": saved},
-            {"model": {"decoder": {"session_options": {"provider_options": [{"cuda": {"use_tf32": "1"}}]}}}},
-        )
+    assert saved["decoder"]["session_options"]["provider_options"][0]["cuda"]["enable_cuda_graph"] == (
+        "1" if (text_only if capture is None else capture) else "0"
+    )
+    assert ("session.use_device_allocator_for_initializers" in saved["decoder"]["session_options"]) == (not text_only)
     assert model.decoder.input_shapes["position_ids"] == (["num_tokens"] if text_only else [3, "num_tokens"])
     if text_only:
         assert "vision" not in saved
         assert "embedding" not in saved
     else:
+        assert saved["decoder"]["session_options"]["session.use_device_allocator_for_initializers"] == "1"
         assert saved["image_token_id"] == 29
         assert saved["vision"]["patch_size"] == 16
         assert saved["vision"]["outputs"] == {"image_features": "image_features"}
@@ -944,9 +948,7 @@ def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(
         expected.append(torch.from_numpy(rotated).to(target_dtype).float().numpy().reshape(3, -1))
     model.save_model(str(tmp_path))
     serialized = onnx.load(tmp_path / model.filename, load_external_data=False)
-    metadata = {entry.key: entry.value for entry in serialized.metadata_props}
     if not text_only:
-        assert metadata["com.microsoft.genai.vision_position_range"] == "-128:128"
         initializers = {tensor.name: tensor for tensor in serialized.graph.initializer}
         assert initializers["cos_cache"].data_type == onnx.TensorProto.FLOAT
         assert initializers["sin_cache"].data_type == onnx.TensorProto.FLOAT
@@ -994,6 +996,49 @@ def test_shared_expert_post_silu_limit_does_not_leak_between_layers(tmp_path):
     np.testing.assert_allclose(clipped, expected_clipped.numpy(), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(unbounded, expected_unbounded.numpy(), rtol=1e-6, atol=1e-6)
     assert clipped[0, 0, 0] == 8
+
+
+@pytest.mark.parametrize(
+    ("dtype", "provider"),
+    [
+        (ir.DataType.BFLOAT16, "CUDAExecutionProvider"),
+        (ir.DataType.FLOAT16, "CUDAExecutionProvider"),
+        (ir.DataType.FLOAT16, "CPUExecutionProvider"),
+        (ir.DataType.FLOAT, "CUDAExecutionProvider"),
+        (ir.DataType.FLOAT, "CPUExecutionProvider"),
+    ],
+)
+def test_shared_clamps_execute_without_changing_activation_precision(tmp_path, dtype, provider):
+    model = _model(tmp_path, dtype=dtype)
+    torch_dtype = {
+        ir.DataType.BFLOAT16: torch.bfloat16,
+        ir.DataType.FLOAT16: torch.float16,
+        ir.DataType.FLOAT: torch.float32,
+    }[dtype]
+    values = torch.tensor([-12, -4.03125, -4, -3.984375, 0, 3.984375, 4, 4.03125, 12], dtype=torch_dtype)
+    gate = values.repeat_interleave(len(values)).contiguous()
+    up = values.repeat(len(values)).contiguous()
+    shape = list(gate.shape)
+    for name in ("gate", "up"):
+        model.graph.inputs.append(model.make_value(name, model.io_dtype, shape))
+    result = Standard.make_clipped_swiglu(model, "/clipped", "gate", "up", 4, shape)
+    model.graph.outputs.append(model.values[result])
+    model.save_model(str(tmp_path))
+    session = kernel_session(model, provider)
+    inputs = session.io_binding()
+    inputs.bind_input("gate", "cpu", 0, int(dtype), shape, gate.data_ptr())
+    inputs.bind_input("up", "cpu", 0, int(dtype), shape, up.data_ptr())
+    output = torch.empty_like(gate)
+    inputs.bind_output(result, "cpu", 0, int(dtype), shape, output.data_ptr())
+    session.run_with_iobinding(inputs)
+    expected = torch.nn.functional.silu(gate).clamp(max=4) * up.clamp(-4, 4)
+    torch.testing.assert_close(output, expected)
+    clips = [node for node in model.graph if node.op_type == "Clip"]
+    assert len(clips) == 2
+    clip_dtype = ir.DataType.FLOAT if dtype == ir.DataType.BFLOAT16 else dtype
+    assert all(node.inputs[0].dtype == node.outputs[0].dtype == clip_dtype for node in clips)
+    if dtype != ir.DataType.BFLOAT16:
+        assert not any(node.op_type == "Cast" for node in model.graph)
 
 
 @pytest.mark.parametrize(
@@ -1340,15 +1385,16 @@ def prepare_cuda_provider():
     register_cuda_plugin_ep()
 
 
-def kernel_session(model, provider, required_op):
+def kernel_session(model, provider, required_op=None):
     def unavailable(reason):
         if os.environ.get("ORTGENAI_REQUIRE_BAILING_KERNELS") == "1":
             pytest.fail(reason)
         pytest.skip(reason)
 
     schemas = {schema.name: schema for schema in get_all_operator_schema() if schema.domain == "com.microsoft"}
-    if required_op not in schemas or (
-        required_op == "GatedDeltaNet" and "gate_lower_bound" not in schemas[required_op].attributes
+    if required_op is not None and (
+        required_op not in schemas
+        or (required_op == "GatedDeltaNet" and "gate_lower_bound" not in schemas[required_op].attributes)
     ):
         unavailable(f"Requires an ONNX Runtime build with {required_op} from ORT PR #33817")
     if required_op in {"MoE", "QMoE"} and "swiglu_limit_after_activation" not in schemas[required_op].attributes:

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <tuple>
@@ -21,6 +22,45 @@
 #include "engine_test_doubles.h"
 
 namespace Generators::test {
+
+TEST(BFloat16ConversionTest, NearestEvenPreservesSpecialValuesAndRoundsTies) {
+  for (const auto& [bits, expected] : std::array<std::pair<uint32_t, uint16_t>, 19>{
+           {{0x00000000, 0x0000}, {0x80000000, 0x8000}, {0x3f807fff, 0x3f80}, {0x3f808000, 0x3f80}, {0x3f808001, 0x3f81}, {0x3f818000, 0x3f82}, {0xbf808000, 0xbf80}, {0xbf818000, 0xbf82}, {0x00008000, 0x0000}, {0x00008001, 0x0001}, {0x00018000, 0x0002}, {0x007fffff, 0x0080}, {0x7f7fffff, 0x7f80}, {0xff7fffff, 0xff80}, {0x7f800000, 0x7f80}, {0xff800000, 0xff80}, {0x7f800001, 0x7fc0}, {0x7fc12345, 0x7fc1}, {0xff800001, 0xffc0}}}) {
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    EXPECT_EQ(Float32ToBFloat16RoundNearestEven(value), expected) << bits;
+  }
+}
+
+TEST(MediaInputsTest, PromptPlanningPreservesProcessorSpecificWhitespace) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "qwen3-5");
+  const Tokenizer tokenizer{*config};
+  const std::string marker = "<|vision_start|><|image_pad|><|vision_end|>";
+  const std::string expanded = "<|vision_start|><|image_pad|><|image_pad|><|vision_end|>";
+  const std::array<int64_t, 6> grids{1, 2, 4, 1, 2, 4};
+  for (const auto& [type, separator] : {std::pair{"qwen3_5", ""}, {"qwen4_exp", ""}, {"bailing_moe_v3_vl", "\n"}}) {
+    config->model.type = type;
+    const MultiModalProcessor processor{*config, {}, nullptr, nullptr};
+    for (const std::string suffix : {"", " ", "\n\n  code", "\tcode"}) {
+      const auto prompt = "before " + marker + marker + suffix;
+      EXPECT_EQ(processor.processor_->ExpandImagePrompt(tokenizer, prompt, grids),
+                tokenizer.Encode(("before " + expanded + separator + expanded + separator + suffix).c_str()));
+    }
+  }
+}
+
+TEST(MediaInputsTest, QwenImagePromptPreservesLegacyWrapperFormatting) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "qwen3-5");
+  const QwenImageProcessor processor{*config, {}};
+  const Tokenizer tokenizer{*config};
+  const std::string expanded = "<|vision_start|><|image_pad|><|image_pad|><|vision_end|>";
+  const std::array<int64_t, 6> grids{1, 2, 4, 1, 2, 4};
+  EXPECT_EQ(processor.ExpandImagePrompt(tokenizer, "", grids),
+            tokenizer.Encode((expanded + " " + expanded).c_str()));
+  EXPECT_EQ(processor.ExpandImagePrompt(tokenizer, "before <|vision_start|> <|vision_end|> after",
+                                        std::span<const int64_t>{grids}.first(3)),
+            tokenizer.Encode(("before " + expanded + " after").c_str()));
+}
 
 TEST(MediaInputsTest, RetainsPngAndJpegDimensionsWithoutPreprocessing) {
   for (const auto& [filename, width, height] :
@@ -46,35 +86,43 @@ TEST(MediaInputsTest, RetainsPngAndJpegDimensionsWithoutPreprocessing) {
 }
 
 TEST(MediaInputsTest, LingImageExpansionRetokenizesOrderedImagesAndWhitespace) {
-  const auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "qwen3-5");
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "qwen3-5");
+  const LingImageProcessor processor{*config, {}};
   const Tokenizer tokenizer{*config};
   const std::string marker = "<|vision_start|><|image_pad|><|vision_end|>";
   const std::string expanded = "<|vision_start|><|image_pad|><|image_pad|><|vision_end|>\n";
   const std::array<int64_t, 3> grid{1, 2, 4};
   const std::array<int64_t, 6> two_grids{1, 2, 4, 1, 2, 4};
   for (const std::string suffix : {"", " ", "\n", "\n\n  code", "\tcode"}) {
-    EXPECT_EQ(TokenizeLingImagePrompt(tokenizer, marker + suffix, grid, 2),
+    EXPECT_EQ(processor.ExpandImagePrompt(tokenizer, marker + suffix, grid),
               tokenizer.Encode((expanded + suffix).c_str()));
-    EXPECT_EQ(TokenizeLingImagePrompt(tokenizer, "code " + marker + marker + suffix, two_grids, 2),
+    EXPECT_EQ(processor.ExpandImagePrompt(tokenizer, "code " + marker + marker + suffix, two_grids),
               tokenizer.Encode(("code " + expanded + expanded + suffix).c_str()));
   }
-  EXPECT_EQ(TokenizeLingImagePrompt(tokenizer, "text only\n", {}, 2), tokenizer.Encode("text only\n"));
+  EXPECT_EQ(processor.ExpandImagePrompt(tokenizer, "text only\n", {}), tokenizer.Encode("text only\n"));
+  const auto processed = processor.Process(tokenizer, Payload{"text only\n", {}, nullptr, nullptr});
+  const auto ids = processed->at(std::string{Config::Defaults::InputIdsName});
+  EXPECT_EQ((std::vector<int32_t>{ids->GetData<int32_t>(), ids->GetData<int32_t>() + ids->GetElementCount()}),
+            tokenizer.Encode("text only\n"));
 }
 
 TEST(MediaInputsTest, LingImageExpansionRejectsInvalidMarkersAndGrids) {
-  const auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "qwen3-5");
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "qwen3-5");
+  const LingImageProcessor processor{*config, {}};
   const Tokenizer tokenizer{*config};
   const std::string marker = "<|vision_start|><|image_pad|><|vision_end|>";
   const std::array<int64_t, 3> grid{1, 2, 4};
-  EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, "", grid, 2), std::invalid_argument);
-  EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, marker + marker, grid, 2), std::invalid_argument);
-  EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, marker, grid, 0), std::invalid_argument);
+  EXPECT_THROW(processor.ExpandImagePrompt(tokenizer, "", grid), std::invalid_argument);
+  EXPECT_THROW(processor.ExpandImagePrompt(tokenizer, marker + marker, grid), std::invalid_argument);
+  config->model.vision.spatial_merge_size = 0;
+  const LingImageProcessor invalid_processor{*config, {}};
+  EXPECT_THROW(invalid_processor.ExpandImagePrompt(tokenizer, marker, grid), std::invalid_argument);
   for (const std::array<int64_t, 3> invalid : {std::array<int64_t, 3>{2, 2, 4}, {1, 3, 4}, {1, 0, 4}})
-    EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, marker, invalid, 2), std::invalid_argument);
+    EXPECT_THROW(processor.ExpandImagePrompt(tokenizer, marker, invalid), std::invalid_argument);
   const std::array<int64_t, 2> incomplete{1, 2};
-  EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, marker, incomplete, 2), std::invalid_argument);
+  EXPECT_THROW(processor.ExpandImagePrompt(tokenizer, marker, incomplete), std::invalid_argument);
   const std::array<int64_t, 3> overflowing{1, INT64_MAX - 1, INT64_MAX - 1};
-  EXPECT_THROW(TokenizeLingImagePrompt(tokenizer, marker, overflowing, 2), std::overflow_error);
+  EXPECT_THROW(processor.ExpandImagePrompt(tokenizer, marker, overflowing), std::overflow_error);
 }
 
 TEST(MediaInputsTest, LingAdmissionRejectsExactCapacityBeforePixelDecoding) {
@@ -202,7 +250,7 @@ TEST(MediaInputsTest, TextOnlyModelTypesRejectVisionComponents) {
 }
 
 TEST(MediaInputsTest, VisionModelTypeWithoutEncoderDoesNotEnableVision) {
-  for (const char* type : {"bailing_moe_v3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp"}) {
+  for (const char* type : {"bailing_moe_v3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "phi3v", "gemma3"}) {
     auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
     config->model.type = type;
     config->engine.dynamic_batching.emplace();
@@ -211,22 +259,6 @@ TEST(MediaInputsTest, VisionModelTypeWithoutEncoderDoesNotEnableVision) {
       FAIL() << type << " accepted an incomplete vision package";
     } catch (const std::runtime_error& error) {
       EXPECT_NE(std::string{error.what()}.find("exported vision encoder"), std::string::npos);
-    }
-  }
-}
-
-TEST(MediaInputsTest, LingVisionRequiresTargetOnlyDynamicBatching) {
-  for (int invalid = 0; invalid < 3; ++invalid) {
-    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
-    config->model.type = "bailing_moe_v3_vl";
-    if (invalid > 0) config->engine.dynamic_batching.emplace();
-    if (invalid == 1) config->model.mtp.filename = "mtp.onnx";
-    if (invalid == 2) config->model.dflash2.filename = "dflash2.onnx";
-    try {
-      CreateModel(GetOrtEnv(), std::move(config));
-      FAIL() << "Ling vision accepted a non-target-only dynamic-batching package";
-    } catch (const std::runtime_error& error) {
-      EXPECT_NE(std::string{error.what()}.find("target-only dynamic-batching Engine"), std::string::npos);
     }
   }
 }
@@ -322,17 +354,16 @@ TEST(MediaInputsTest, PositionRangesPreserveImageBoundariesAndLaterTextOffsets) 
 }
 
 TEST(MediaInputsTest, LingPositionsCenterEvenAndOddGridsAndContinueFromTime) {
-  Config::Model config;
-  config.type = "bailing_moe_v3_vl";
-  config.vision.spatial_merge_size = 2;
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "qwen3-5");
+  const LingImageProcessor processor{*config, {}};
   auto first = std::make_shared<MediaItem>();
   first->grid = {1, 4, 4};
   first->rows = 4;
-  first->positions = GetImagePositionLayout(config, first->grid);
+  first->positions = processor.GetImagePositionLayout(first->grid);
   auto second = std::make_shared<MediaItem>();
   second->grid = {1, 6, 10};
   second->rows = 15;
-  second->positions = GetImagePositionLayout(config, second->grid);
+  second->positions = processor.GetImagePositionLayout(second->grid);
   const std::array<MediaSpan, 2> media{{{1, first}, {7, second}}};
   const std::array<std::array<int64_t, 24>, 3> expected{{
       {0, 1, 1, 1, 1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 6},
@@ -348,7 +379,7 @@ TEST(MediaInputsTest, LingPositionsCenterEvenAndOddGridsAndContinueFromTime) {
         EXPECT_TRUE(std::equal(actual[plane].begin(), actual[plane].end(), expected[plane].begin() + start));
     }
   }
-  second->positions = GetImagePositionLayout(config, {1, 6, 10});
+  second->positions = processor.GetImagePositionLayout({1, 6, 10});
   const std::array<MediaSpan, 1> early{{{1, second}}};
   EXPECT_EQ(MediaPosition(early, 1), (std::array<int64_t, 3>{1, 0, -1}));
   EXPECT_EQ(MediaPosition(early, 16), (std::array<int64_t, 3>{2, 2, 2}));

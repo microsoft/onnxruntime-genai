@@ -33,6 +33,40 @@ std::string SelectionError(const std::vector<std::string>& ids, const std::optio
 }  // namespace
 
 #if USE_CUDA
+class CudaBridgeProbeTest : public testing::Test {
+ protected:
+  const OrtApi* saved_api{};
+  OrtApi test_api{};
+  inline static bool available{};
+
+  static OrtStatus* ORT_API_CALL Update(OrtCUDAProviderOptionsV2*, const char* const* keys,
+                                        const char* const* values, size_t count) noexcept {
+    EXPECT_EQ(count, 1u);
+    if (count != 1) return nullptr;  // Empty updates cannot establish provider availability.
+    EXPECT_STREQ(keys[0], "device_id");
+    EXPECT_STREQ(values[0], "0");
+    return available ? nullptr : Ort::api->CreateStatus(ORT_FAIL, "Provider bridge unavailable");
+  }
+
+  void SetUp() override {
+    saved_api = Ort::api;
+    test_api = *saved_api;
+    test_api.UpdateCUDAProviderOptions = Update;
+    Ort::api = &test_api;
+  }
+  void TearDown() override { Ort::api = saved_api; }
+};
+
+TEST_F(CudaBridgeProbeTest, LoadableBridgeIsAvailable) {
+  available = true;
+  EXPECT_TRUE(CUDAExecutionProvider::IsProviderBridgeAvailable());
+}
+
+TEST_F(CudaBridgeProbeTest, MissingBridgeAllowsPluginFallback) {
+  available = false;
+  EXPECT_FALSE(CUDAExecutionProvider::IsProviderBridgeAvailable());
+}
+
 TEST(CudaProviderRegistrationTest, AvailableBridgeDoesNotAutoRegisterAPlugin) {
   if (!GetEnv("ORT_CUDA_PLUGIN_EP_PATH").empty()) {
     GTEST_SKIP() << "The caller explicitly requested plugin registration";
@@ -40,12 +74,8 @@ TEST(CudaProviderRegistrationTest, AvailableBridgeDoesNotAutoRegisterAPlugin) {
   if (!FindRegisteredEpDevices("CUDAExecutionProvider").empty()) {
     GTEST_SKIP() << "CUDA is already registered as a plugin";
   }
-  try {
-    auto options = OrtCUDAProviderOptionsV2::Create();
-    options->Update(nullptr, nullptr, 0);
-  } catch (const Ort::Exception& error) {
-    GTEST_SKIP() << "A CUDA provider bridge is unavailable: " << error.what();
-  }
+  if (!CUDAExecutionProvider::IsProviderBridgeAvailable())
+    GTEST_SKIP() << "A CUDA provider bridge is unavailable";
 
   auto session_options = OrtSessionOptions::Create();
   session_options->AddConfigEntry("ep.cuda.gated_delta_net_bf16_precision", "bf16");

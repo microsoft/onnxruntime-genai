@@ -55,6 +55,7 @@ Model = base_module.Model
 
 def _new_model():
     model = Model.__new__(Model)
+    model.context_length = 1024
     model.context_length_attrs = {
         "state_window": 0,
         "state_window_dims": [],

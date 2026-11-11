@@ -7,7 +7,6 @@
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/multi_modal_processor.h"
 #include "models/preprocessing/processor.h"
-#include "models/preprocessing/qwen2_5_vl_image_processor.h"
 
 #include <cmath>
 #include <sstream>
@@ -189,7 +188,7 @@ void MediaStore::ValidateTextTokens(std::span<const int32_t> tokens) const {
 PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const int32_t> raw_tokens,
                                       const Images* images, size_t first_row, size_t remaining_rows) {
   const auto& config = model_->config_->model;
-  const bool ling = config.type == "bailing_moe_v3_vl";
+  const auto& processor = *model_->vision_->processor->processor_;
   const size_t count = images ? images->num_images_ : 0;
   size_t markers = 0;
   for (size_t index = 0; index < raw_tokens.size(); ++index) {
@@ -204,7 +203,7 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
     }
   }
   if (markers != count) throw std::invalid_argument("Image marker count does not match the ordered image inputs.");
-  if (raw_tokens.empty() || ((!ling || count == 0) && raw_tokens.size() > remaining_rows))
+  if (raw_tokens.empty() || (count == 0 && raw_tokens.size() > remaining_rows))
     throw std::invalid_argument("The formatted turn does not fit the remaining session rows.");
   if (count == 0) return {std::vector<int32_t>{raw_tokens.begin(), raw_tokens.end()}, {}};
   if (images->info_.size() != count) throw std::invalid_argument("Image header metadata is unavailable.");
@@ -215,18 +214,16 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
   const size_t patch_bytes = MultiplyBytes(static_cast<size_t>(pixel_shape[1]),
                                            2 * sizeof(float) + Ort::SizeOf(model_->cpu_embedding_->type_));
   std::vector<int64_t> expected_grids;
-  if (ling) {
-    if (MultiplyBytes(count, 3 * sizeof(int64_t)) > host_limit_)
-      throw std::invalid_argument("Image grid metadata exceeds the configured media host budget.");
-    expected_grids.reserve(MultiplyBytes(count, 3));
-  }
+  if (MultiplyBytes(count, 3 * sizeof(int64_t)) > host_limit_)
+    throw std::invalid_argument("Image grid metadata exceeds the configured media host budget.");
+  expected_grids.reserve(MultiplyBytes(count, 3));
   size_t estimate = 0, maximum_patches = 0, expected_rows = raw_tokens.size();
   for (const auto& info : images->info_) {
     if (info.width == 0 || info.height == 0)
       throw std::invalid_argument("Packed vision requires PNG or JPEG dimensions before preprocessing.");
     const size_t source_pixels = MultiplyBytes(info.width, info.height);
     const auto grid = MediaImageGrid(info.width, info.height, patch, merge, min_pixels_, max_pixels_);
-    if (ling) expected_grids.insert(expected_grids.end(), grid.begin(), grid.end());
+    expected_grids.insert(expected_grids.end(), grid.begin(), grid.end());
     const size_t height = MultiplyBytes(static_cast<size_t>(grid[1]), patch);
     const size_t width = MultiplyBytes(static_cast<size_t>(grid[2]), patch);
     const size_t patches = MultiplyBytes(static_cast<size_t>(grid[1]), static_cast<size_t>(grid[2]));
@@ -238,31 +235,22 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
       throw std::invalid_argument("An image cannot fit the configured device media budget.");
     estimate = AddBytes(estimate, AddBytes(MultiplyBytes(source_pixels, 16), MultiplyBytes(MultiplyBytes(height, width), 64)));
   }
-  if (!ling && expected_rows > remaining_rows) throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
   estimate = AddBytes(estimate, MultiplyBytes(MultiplyBytes(count, maximum_patches), patch_bytes));
-  estimate = AddBytes(estimate, MultiplyBytes(AddBytes(expected_rows, ling ? count : 0), 128));
-  if (ling) {
-    estimate = AddBytes(estimate, MultiplyBytes(prompt.size(), 16));
-    estimate = AddBytes(estimate, MultiplyBytes(expected_grids.size(), sizeof(int64_t)));
-  }
+  estimate = AddBytes(estimate, MultiplyBytes(AddBytes(expected_rows, count), 128));
+  estimate = AddBytes(estimate, MultiplyBytes(prompt.size(), 16));
+  estimate = AddBytes(estimate, MultiplyBytes(expected_grids.size(), sizeof(int64_t)));
   MakeHostRoom(estimate);
   accounting_->host_bytes += estimate;
   HostReservation reservation{accounting_, estimate};
-  std::vector<int32_t> expected_tokens;
-  if (ling) {
-    // Added newlines can merge with adjacent whitespace, so admission uses exact final tokens.
-    expected_tokens = TokenizeLingImagePrompt(*model_->vision_->processor->tokenizer_, prompt, expected_grids, static_cast<int64_t>(merge));
-    expected_rows = expected_tokens.size();
-    if (expected_rows > remaining_rows)
-      throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
-  }
+  const auto expected_tokens = processor.ExpandImagePrompt(*model_->vision_->processor->tokenizer_, prompt, expected_grids);
+  if (expected_tokens.size() > remaining_rows)
+    throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
   auto processed = model_->vision_->processor->Process(prompt, images, nullptr);
   const auto ids = processed->at(std::string{Config::Defaults::InputIdsName});
   PreparedMediaTurn result;
   result.tokens.assign(ids->GetData<int32_t>(), ids->GetData<int32_t>() + ids->GetElementCount());
-  if (result.tokens.size() != expected_rows) throw std::runtime_error("Image preprocessing violated its expanded-row estimate.");
-  if (ling && result.tokens != expected_tokens)
-    throw std::runtime_error("Ling image preprocessing disagreed with admission tokenization.");
+  if (result.tokens != expected_tokens)
+    throw std::runtime_error("Image preprocessing disagreed with admission tokenization.");
   const auto grids = processed->at(std::string{Config::Defaults::ImageGridThwName});
   const auto pixels = processed->at(std::string{Config::Defaults::PixelValuesName});
   const auto shape = pixels->GetShape();
@@ -270,8 +258,8 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
       pixels->GetType() != model_->cpu_embedding_->type_ || (shape.size() != 2 && shape.size() != 3) ||
       shape.back() != pixel_shape[1] || (shape.size() == 3 && shape[0] != static_cast<int64_t>(count)))
     throw std::runtime_error("Image preprocessing returned an unsupported patch/grid layout.");
-  if (ling && !std::equal(expected_grids.begin(), expected_grids.end(), grids->GetData<int64_t>()))
-    throw std::runtime_error("Ling image preprocessing disagreed with admission grids.");
+  if (!std::equal(expected_grids.begin(), expected_grids.end(), grids->GetData<int64_t>()))
+    throw std::runtime_error("Image preprocessing disagreed with admission grids.");
   const size_t physical_patches = pixels->GetElementCount() / static_cast<size_t>(shape.back());
   size_t logical_patches = 0;
   for (size_t image = 0; image < count; ++image) {
@@ -324,7 +312,7 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
         throw std::overflow_error("Engine media prefix identity space is exhausted.");
       item = std::make_shared<MediaItem>();
       item->grid = {grid[0], grid[1], grid[2]};
-      item->positions = GetImagePositionLayout(config, item->grid);
+      item->positions = processor.GetImagePositionLayout(item->grid);
       item->rows = rows;
       item->prefix_base = static_cast<int32_t>(next_prefix_row_);
       next_prefix_row_ += rows;

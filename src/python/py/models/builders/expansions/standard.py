@@ -48,13 +48,26 @@ class Standard:
         self.make_value(kwargs["present_conv_state"], self.io_dtype, ["batch_size", channels, state_size])
 
     def make_clipped_swiglu(self, name, gate, up, limit, shape):
-        maximum = f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{float(limit)}"
-        minimum = f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{-float(limit)}"
+        # SiLU(gate) -> [Cast(FP32)] -> Clip -> [Cast(I/O)] --+
+        # up         -> [Cast(FP32)] -> Clip -> [Cast(I/O)] -> Mul
+        clip_dtype = ir.DataType.FLOAT if self.io_dtype == ir.DataType.BFLOAT16 else self.io_dtype
+        maximum = f"/model/constants/{self.to_str_dtype(clip_dtype)}/{float(limit)}"
+        minimum = f"/model/constants/{self.to_str_dtype(clip_dtype)}/{-float(limit)}"
         self.make_sigmoid(f"{name}/Sigmoid", gate, self.io_dtype, shape)
         self.make_mul(f"{name}/SiLU", [gate, f"{name}/Sigmoid/output_0"], self.io_dtype, shape)
-        self.make_clip(f"{name}/Clip_gate", [f"{name}/SiLU/output_0", "", maximum], self.io_dtype, shape)
-        self.make_clip(f"{name}/Clip_up", [up, minimum, maximum], self.io_dtype, shape)
-        self.make_mul(name, [f"{name}/Clip_gate/output_0", f"{name}/Clip_up/output_0"], self.io_dtype, shape)
+        branches = [f"{name}/SiLU/output_0", up]
+        for index, branch in enumerate(("gate", "up")):
+            if clip_dtype != self.io_dtype:
+                self.make_cast(f"{name}/Cast_{branch}", branches[index], clip_dtype, shape)
+                branches[index] = f"{name}/Cast_{branch}/output_0"
+            self.make_clip(
+                f"{name}/Clip_{branch}", [branches[index], minimum if index else "", maximum], clip_dtype, shape
+            )
+            branches[index] = f"{name}/Clip_{branch}/output_0"
+            if clip_dtype != self.io_dtype:
+                self.make_cast(f"{name}/CastBack_{branch}", branches[index], self.io_dtype, shape)
+                branches[index] = f"{name}/CastBack_{branch}/output_0"
+        self.make_mul(name, branches, self.io_dtype, shape)
         return f"{name}/output_0"
 
     def make_gated_add(self, name, root_input, scaled_input, gate, shape):

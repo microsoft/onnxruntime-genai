@@ -1624,6 +1624,8 @@ class Model:
             self.context_length_attrs["window_kv_cache"]
             and not self.use_paged_attention
             and self.ep in {"cpu", "cuda", "trt-rtx"}
+            and self.window_size is not None
+            and 0 < self.window_size < self.context_length
         )
 
     def make_decoder_state_groups(self, inputs, outputs):

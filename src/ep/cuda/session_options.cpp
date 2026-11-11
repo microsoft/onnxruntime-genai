@@ -54,6 +54,19 @@ Config::ProviderOptions ResolveStreamBindingOptions(const Config::ProviderOption
   return resolved;
 }
 
+bool IsProviderBridgeAvailable() {
+  try {
+    // Updating a real option forces provider loading; creating options alone does not.
+    auto options = OrtCUDAProviderOptionsV2::Create();
+    const char* keys[] = {"device_id"};
+    const char* values[] = {"0"};
+    options->Update(keys, values, 1);
+    return true;
+  } catch (const Ort::Exception&) {
+    return false;
+  }
+}
+
 namespace {
 
 void EnsureCudaPluginEpRegistered(bool require_plugin) {
@@ -62,16 +75,8 @@ void EnsureCudaPluginEpRegistered(bool require_plugin) {
   }
   std::error_code ec;
   std::filesystem::path ep_path = GetEnv("ORT_CUDA_PLUGIN_EP_PATH");
-  if (ep_path.empty() && !require_plugin) {
-    try {
-      // Prefer the bridge when available; session-only CUDA settings need not
-      // also be accepted as plugin provider options.
-      auto options = OrtCUDAProviderOptionsV2::Create();
-      options->Update(nullptr, nullptr, 0);
-      return;
-    } catch (const Ort::Exception&) {
-    }
-  }
+  if (ep_path.empty() && !require_plugin && IsProviderBridgeAvailable())
+    return;
 #if !defined(_WIN32)
   if (ep_path.empty()) {
     Dl_info info{};

@@ -65,7 +65,10 @@ class BailingVLModel(Model):
         for name in ("bot_token_id", "eot_token_id", "bor_token_id", "eor_token_id"):
             if hasattr(config, name):
                 setattr(text_config, name, getattr(config, name))
-        self.decoder = BailingVLTextModel(text_config, io_dtype, onnx_dtype, ep, cache_dir, deepcopy(extra_options))
+        decoder_options = deepcopy(extra_options)
+        if not self.text_only:
+            decoder_options.setdefault("enable_cuda_graph", False)
+        self.decoder = BailingVLTextModel(text_config, io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
         if not self.text_only and self.decoder.filename in {"embedding.onnx", "vision.onnx"}:
             raise ValueError("Ling decoder filename conflicts with an emitted companion graph")
         self.decoder.model_type = "bailing_hybrid" if self.text_only else "bailing_moe_v3_vl"
@@ -114,6 +117,7 @@ class BailingVLModel(Model):
         with open(config_path, encoding="utf-8") as handle:
             genai_config = json.load(handle)
         model_config = genai_config["model"]
+        model_config["decoder"]["session_options"].setdefault("session.use_device_allocator_for_initializers", "1")
         model_config["image_token_id"] = config.image_token_id
         model_config["vision_start_token_id"] = config.vision_start_token_id
         vision_config = self.config.vision_config
@@ -158,9 +162,6 @@ class BailingVLTextModel(BailingMoeV3Model):
             self.rope_attrs["position_start"] = -self.original_context_length
             self.rope_attrs["cache_length"] = self.original_context_length + self.context_length
             self.rope_attrs["cast"]["use_fp32"] = True
-            self.model.metadata_props["com.microsoft.genai.vision_position_range"] = (
-                f"{self.rope_attrs['position_start']}:{self.context_length}"
-            )
         self.get_mrope_owners(self.mla_attrs["qk_rope_head_dim"])
 
     def get_mrope_owners(self, rotary_dim):

@@ -1101,11 +1101,6 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
         "Text-only model type '" + config->model.type +
         "' cannot configure a vision encoder. Export the complete vision-language model instead.");
   }
-  const bool ling_vision = config->model.type == "bailing_moe_v3_vl";
-  if (ling_vision && (!config->engine.dynamic_batching || config->model.draft ||
-                      !config->model.mtp.filename.empty() || !config->model.dflash2.filename.empty())) {
-    throw std::runtime_error("Ling vision requires the target-only dynamic-batching Engine.");
-  }
   if (config->model.type == "nemotron_bolt")
     return std::make_shared<NemotronBoltModel>(std::move(config), ort_env);
   if (config->model.draft)
@@ -1125,8 +1120,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Qwen38GraphModel>(std::move(config), ort_env);
   if (text_only)
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
-  if ((ling_vision || config->model.type == "qwen3_5" || config->model.type == "qwen3_5_moe" || config->model.type == "qwen4_exp") &&
-      config->engine.dynamic_batching) {
+  if (ModelType::IsVLM(config->model.type) && config->engine.dynamic_batching) {
     if (config->model.vision.filename.empty()) {
       throw std::runtime_error("Packed vision requires an exported vision encoder.");
     }
