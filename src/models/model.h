@@ -24,6 +24,7 @@ class ThreadPool;
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
 void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config);
+void ApplyRunOption(OrtRunOptions& run_options, const char* key, const char* value);
 void ApplySessionOptionsFromConfig(
     const Config& config,
     const Config::SessionOptions& config_session_options,
@@ -171,6 +172,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::shared_ptr<MultiModalProcessor> CreateMultiModalProcessor() const;
 
   virtual std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
+  virtual OrtSession* GetVisionSession() const { return nullptr; }
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 

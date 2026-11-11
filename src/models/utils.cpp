@@ -120,6 +120,16 @@ uint16_t Float32ToBFloat16(float v) {
   return static_cast<uint16_t>(bits >> 16);
 }
 
+uint16_t Float32ToBFloat16RoundNearestEven(float v) {
+  uint32_t bits;
+  std::memcpy(&bits, &v, sizeof(bits));
+  if ((bits & 0x7fffffffu) > 0x7f800000u)
+    bits |= 0x00400000u;
+  else
+    bits += 0x7fffu + ((bits >> 16) & 1u);
+  return static_cast<uint16_t>(bits >> 16);
+}
+
 // C++17 compatible version of bit_cast for the code below
 template <typename TTo, typename TFrom>
 TTo bit_cast(TFrom x) {

@@ -2,6 +2,36 @@
 
 These options and workflows apply to particular model families and speculative drafters. See the [Model Builder README](../README.md) for shared configuration, quantization, and export options, and [Qwen3.8 design](qwen3_8.md) for component ownership.
 
+## Bailing MoE V3 (Ling-3.0-tiny)
+
+Use an ONNX Runtime build at `d93f5446f362d9c70bea81de953f32a26aa26d25` or a later revision containing [ORT #33817](https://github.com/microsoft/onnxruntime/pull/33817), merged November 8, 2026. Nightly packages work: the `onnxruntime` and `onnxruntime-gpu` wheels `1.32.0.dev20261109001` are the first to include it, and a CPU `onnxruntime` nightly can instead be paired with an `onnxruntime-ep-cuda12` nightly built after the merge (all are published on the [ORT-Nightly feed](https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/)). A version label alone is not sufficient: the build must register `MoEGroupRouter` and the `gate_lower_bound` attribute on `GatedDeltaNet` for per-key KDA. Older wheels such as the reviewed ORT 1.30.0 build lack this support.
+
+Ling Flash-VL clipped experts additionally require [ORT #33954](https://github.com/microsoft/onnxruntime/pull/33954)
+(`d65da43ffd021b9392ee799f96c0666c1afc29b4`): both `MoE` and `QMoE` must register
+`swiglu_limit_after_activation`. The CUDA CI pin `1.32.0.dev20261110001` includes
+this capability as well as routing/KDA; the older `20261109001` baseline is not
+sufficient for clipped layers. CI executes the builder-emitted clipped experts,
+not only schema/attribute checks.
+
+Full BF16 Ling Flash-VL also needs the CUDA BF16 `Less` registration from
+[ORT #34005](https://github.com/microsoft/onnxruntime/pull/34005), because shared
+experts emit ONNX `Clip` that decomposes into `Less` and `Where`. The pinned
+`1.32.0.dev20261110001` wheel covers routing/KDA and routed clipping, but not this
+additional registration. Until a published build includes the repair, full
+BF16 execution requires a matching patched ORT core and CUDA provider.
+Ling image exports reject context extension beyond
+`original_max_position_embeddings`; this does not enable YaRN context extension.
+
+The builder reads Bailing configuration fields rather than assuming the Ling-3.0-tiny values. `layer_group_size` must be a positive integer (default `1`); per-layer lists are explicitly unsupported. Full attention ends each complete group and covers every layer in an incomplete final group, matching the Hugging Face checkpoint's decoder scheduling. Limiting the exported layer count preserves the original checkpoint's layer types.
+
+`norm_topk_prob` controls routed-expert normalization (default `false`), and `routed_scaling_factor` scales only the routed experts (default `1.0`). Because `MoEGroupRouter` emits selected log-scores and MoE/QMoE applies softmax, unnormalized routing additionally restores the selected sigmoid-score sum before adding the shared expert. `group_topk` is configurable, defaults to `2` for `noaux_tc`, must be a positive integer, and is clamped to the number of experts per group by the runtime operator.
+
+KDA uses the bounded sigmoid decay only when `kda_safe_gate=true`, which requires an explicit finite negative `kda_lower_bound`. Otherwise it uses the unbounded negative softplus decay and ignores `kda_lower_bound`, including `null`. MLA retains the checkpoint's projection weights and selects the ONNX RoPE layout through `rope_interleave` (default `true`), avoiding weight, scale, or bias permutations.
+
+The builder consumes normalized layers from `loaders/bailing.py`; source unpacking and FP8 scale validation stay in the loader. MLA graph settings live in `mla_attrs`, KDA decay/prefill settings in `kda_attrs`, and dense/shared/routed MLP settings in `moe_attrs`. Explicit FP16/BF16 requests are not changed based on checkpoint dtype. See [Bailing BF16 KDA prefill precision](../README.md#bailing-bf16-kda-prefill-precision) for the CUDA BF16 paged-only `gated_delta_net_bf16_precision` option, its values, default, and examples.
+
+Small offline scheduling, loader, precision, routing, KDA and RoPE regressions live in `test/python/models/test_bailing_builder.py`. Run them from the repository root with `python -m pytest -q test/python/models/test_bailing_builder.py` using a compatible ONNX Runtime build; CUDA cases also work when CUDA comes from the standalone `onnxruntime-ep-cuda12` plugin wheel, which the tests register themselves. Linux CUDA CI installs the nightly packages pinned in `test/python/cuda/ort-nightly/` and runs `ORTGENAI_REQUIRE_BAILING_KERNELS=1 python -m pytest -q --noconftest test/python/models/test_bailing_builder.py`; missing schemas or CPU/CUDA providers fail this lane rather than skip. Older developer environments retain skips without this environment variable. These tests do not establish full-checkpoint CUDA generation accuracy or H200 performance.
+
 ## Build a DFlash 2 Block Drafter
 
 Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx` block drafter beside a Qwen3.5 or Qwen3.8 target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DFlash checkpoint. The drafter reuses the target's embedding and LM-head initializers, so both checkpoints must use compatible tensors.

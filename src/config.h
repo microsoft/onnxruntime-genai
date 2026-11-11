@@ -786,7 +786,7 @@ struct Config {
 
       int kv_capacity{33028};
 
-      bool warmup{true};  // Run the graph warm-up (captures every CUDA graph) when the model is created
+      bool warmup{true};  // Capture graphs at model creation and before use on a new Engine thread
 
       // Concurrent request slots of the Engine-hosted decode device, in [1, kMaxBatchSize]. Values above 1 need the fold
       // stack with unified fast prefill (see ValidateQwen38MultiSlotConfig).
@@ -954,6 +954,8 @@ struct Config {
       std::optional<float> gpu_utilization_factor;           // Fraction of free GPU memory to use for key-value cache.
       std::optional<uint64_t> device_memory_budget_bytes;    // GPU sizing allowance for one CUDA Model/Engine.
       std::optional<uint64_t> device_memory_headroom_bytes;  // Additional profiled GPU memory reserved when budgeting.
+      size_t media_host_bytes{512 * 1024 * 1024};            // Retained canonical inputs and preprocessing reservation.
+      size_t media_device_bytes{128 * 1024 * 1024};          // Reclaimable projected image features.
       size_t max_batch_size{16};                             // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};                     // Maximum tokens in one dynamically batched model run.
       std::optional<bool> prefix_caching;
@@ -1008,6 +1010,8 @@ struct Config {
       struct DynamicBatching {
         std::optional<size_t> num_blocks;
         std::optional<uint64_t> device_memory_headroom_bytes;
+        std::optional<size_t> media_host_bytes;
+        std::optional<size_t> media_device_bytes;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
         std::optional<bool> prefix_caching;

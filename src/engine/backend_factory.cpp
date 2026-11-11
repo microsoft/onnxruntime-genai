@@ -228,6 +228,15 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
     }
     graph_buffer_reserved_bytes += sampler_bytes;
   }
+  if (const auto packed = std::dynamic_pointer_cast<DecoderOnly_Model>(model);
+      packed && packed->vision_ && model->config_->engine.dynamic_batching &&
+      !model->config_->engine.dynamic_batching->num_blocks.has_value() &&
+      packed->vision_->device == model->p_device_kvcache_) {
+    const auto media_bytes = model->config_->engine.dynamic_batching->media_device_bytes;
+    if (media_bytes > std::numeric_limits<size_t>::max() - graph_buffer_reserved_bytes)
+      throw std::overflow_error("Engine media reservation overflows size_t.");
+    graph_buffer_reserved_bytes += media_bytes;
+  }
   if (graph_buffer_reserved_bytes >
       std::numeric_limits<size_t>::max() - dflash2_reserved_memory_bytes) {
     throw std::runtime_error("Engine reserved memory bytes overflow size_t.");

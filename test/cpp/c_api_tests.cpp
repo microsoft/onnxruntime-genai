@@ -1093,6 +1093,35 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
   generator->SetModelInput("test_input", *tensor);
 }
 
+TEST(CAPITests, SetInputsRejectsImagesAfterFirstPrompt) {
+  auto model = OgaModel::Create(MODEL_PATH "lfm2-vl");
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  const std::string image_path = std::string(MODEL_PATH) + "../images/cars.jpg";
+  const std::array<const char*, 1> image_paths{image_path.c_str()};
+  auto images = OgaImages::Load(image_paths);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 2048);
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetInputs(*processor->ProcessImages("<image>Describe this image.", images.get()));
+  generator->GenerateNextToken();
+  const size_t length = generator->GetSequenceCount(0);
+
+  auto later_image = processor->ProcessImages("<image>And this one?", images.get());
+  try {
+    generator->SetInputs(*later_image);
+    FAIL() << "SetInputs accepted an image after the first prompt";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("Only a generator's first inputs can carry images or audio"),
+              std::string::npos)
+        << e.what();
+  }
+  EXPECT_EQ(generator->GetSequenceCount(0), length);
+
+  auto later_text = processor->ProcessImages("And now?");
+  generator->SetInputs(*later_text);
+  EXPECT_EQ(generator->GetSequenceCount(0), length + static_cast<size_t>(later_text->Get("input_ids")->Shape()[1]));
+}
+
 TEST(CAPITests, Logging) {
   // Trivial test to ensure the API builds properly
   Oga::SetLogBool("enabled", true);
@@ -1318,6 +1347,75 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
+TEST(CAPITests, EngineTerminalTokenId) {
+  auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  config->Overlay(R"({"model":{"eos_token_id":[0,2]}})");
+  auto model = OgaModel::Create(*config);
+  auto engine = OgaEngine::Create(*model);
+  auto buffer = engine->CreateEventBuffer(1);
+  const auto check_terminal = [](const OgaEngineEvent& event,
+                                 std::optional<int32_t> expected) {
+    int32_t terminal_token_id = 42;
+    OgaCheckResult(OgaEngineEventGetTerminalTokenId(&event, &terminal_token_id));
+    EXPECT_EQ(terminal_token_id, expected.value_or(-1));
+    EXPECT_EQ(event.TerminalTokenId(), expected);
+  };
+
+  for (const int32_t eos : {0, 2}) {
+    SCOPED_TRACE(::testing::Message() << "EOS " << eos);
+    auto request = engine->CreateRequest();
+    // The fixture predicts (first token + last token + prompt length) % 64.
+    const std::array<int32_t, 2> prompt =
+        eos == 0 ? std::array<int32_t, 2>{31, 31}
+                 : std::array<int32_t, 2>{0, 0};
+    request->BeginTurn(prompt);
+    ASSERT_EQ(engine->Run(*buffer), 1u);
+    const auto* event = buffer->Get(0);
+    ASSERT_NE(event, nullptr);
+    EXPECT_EQ(event->Flags(), OgaEngineEventFlag_TurnFinished);
+    EXPECT_EQ(event->FinishReason(), OgaFinishReason_Eos);
+    check_terminal(*event, eos);
+    EXPECT_EQ(event->Usage().PromptTokens(), prompt.size());
+    EXPECT_EQ(event->Usage().GeneratedTokens(), 0u);
+    request->Close();
+  }
+
+  auto request = engine->CreateRequest();
+  auto options = request->CreateTurnOptions();
+  options->SetMaxGeneratedTokens(2);
+  const std::array<int32_t, 3> prompt{2, 3, 4};
+  request->BeginTurn(prompt, options.get());
+  ASSERT_EQ(engine->Run(*buffer), 1u);
+  const auto* token_event = buffer->Get(0);
+  ASSERT_NE(token_event, nullptr);
+  EXPECT_EQ(token_event->Flags(), OgaEngineEventFlag_Token);
+  EXPECT_EQ(token_event->Token(), 9);
+  check_terminal(*token_event, std::nullopt);
+
+  ASSERT_EQ(engine->Run(*buffer), 1u);
+  const auto* limited = buffer->Get(0);
+  ASSERT_NE(limited, nullptr);
+  EXPECT_EQ(limited->Flags(),
+            OgaEngineEventFlag_Token | OgaEngineEventFlag_TurnFinished);
+  EXPECT_EQ(limited->Token(), 15);
+  EXPECT_EQ(limited->FinishReason(), OgaFinishReason_MaxGeneratedTokens);
+  check_terminal(*limited, std::nullopt);
+  EXPECT_EQ(limited->Usage().PromptTokens(), prompt.size());
+  EXPECT_EQ(limited->Usage().GeneratedTokens(), 2u);
+
+  const std::array<int32_t, 1> continuation{5};
+  const auto turn_id = request->BeginTurn(continuation);
+  ASSERT_TRUE(request->CancelTurn(turn_id));
+  ASSERT_EQ(engine->Run(*buffer), 1u);
+  const auto* cancelled = buffer->Get(0);
+  ASSERT_NE(cancelled, nullptr);
+  EXPECT_EQ(cancelled->Flags(), OgaEngineEventFlag_TurnFinished);
+  EXPECT_EQ(cancelled->FinishReason(), OgaFinishReason_Cancelled);
+  check_terminal(*cancelled, std::nullopt);
+  EXPECT_EQ(cancelled->Usage().PromptTokens(), continuation.size());
+  EXPECT_EQ(cancelled->Usage().GeneratedTokens(), 0u);
+}
+
 TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
   auto engine = OgaEngine::Create(*model);
@@ -1463,6 +1561,35 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(engine->Run(*idle_buffer), 0u);
   EXPECT_EQ(idle_buffer->Count(), 0u);
   EXPECT_EQ(idle_buffer->Get(0), nullptr);
+}
+
+TEST(CAPITests, EngineFormattedPromptAdmissionContracts) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto engine = OgaEngine::Create(*model);
+  auto request = engine->CreateRequest();
+  auto options = request->CreateTurnOptions();
+  options->SetMaxGeneratedTokens(1);
+  auto other = engine->CreateRequest();
+  auto foreign_options = other->CreateTurnOptions();
+  EXPECT_THROW(request->BeginTurn("ABC", foreign_options.get()), std::runtime_error);
+  const char invalid_utf8[]{static_cast<char>(0xff), '\0'};
+  EXPECT_THROW(request->BeginTurn(invalid_utf8, options.get()), std::runtime_error);
+  EXPECT_THROW(request->BeginTurn(nullptr, options.get()), std::runtime_error);
+  std::exception_ptr owner_error;
+  std::thread thread([&] {
+    try {
+      request->BeginTurn("ABC", options.get());
+    } catch (...) {
+      owner_error = std::current_exception();
+    }
+  });
+  thread.join();
+  ASSERT_NE(owner_error, nullptr);
+  EXPECT_THROW(std::rethrow_exception(owner_error), std::runtime_error);
+  EXPECT_EQ(request->BeginTurn("ABC", options.get()), 1u);
+  EXPECT_EQ(RunOne(*engine).turn_id, 1u);
+  request->Close();
+  other->Close();
 }
 
 TEST(CAPITests, EngineMaxRequestLengthUsesResolvedCacheCapacity) {

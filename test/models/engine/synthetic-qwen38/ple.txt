@@ -1,0 +1,10 @@
+qwen38_ple_table 1
+n_heads 1
+head_dim 1
+heads_per_ngram 1
+eos 127
+scale 1
+mult 0 0 0 0
+vocab 1
+offset 0
+shard ple.data 0 1
