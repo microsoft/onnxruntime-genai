@@ -16,14 +16,26 @@ void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float
 struct QwenImageProcessor : Processor {
   QwenImageProcessor(Config& config, const SessionInfo& session_info);
 
-  virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
+  std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
+  std::vector<int32_t> ExpandImagePrompt(const Tokenizer& tokenizer, const std::string& prompt,
+                                         std::span<const int64_t> grids) const override;
+  ImagePositionLayout GetImagePositionLayout(const std::array<int64_t, 3>& grid) const override;
+
+ protected:
+  int64_t spatial_merge_size_;
 
  private:
   ort_extensions::OrtxObjectPtr<OrtxProcessor> processor_;
 
   ONNXTensorElementDataType pixel_values_type_;
-  int64_t spatial_merge_size_;
   int64_t patch_size_{14};  // Qwen2.5-VL uses 14, Qwen3-VL uses 16
+};
+
+struct LingImageProcessor : QwenImageProcessor {
+  using QwenImageProcessor::QwenImageProcessor;
+  std::vector<int32_t> ExpandImagePrompt(const Tokenizer& tokenizer, const std::string& prompt,
+                                         std::span<const int64_t> grids) const override;
+  ImagePositionLayout GetImagePositionLayout(const std::array<int64_t, 3>& grid) const override;
 };
 
 }  // namespace Generators

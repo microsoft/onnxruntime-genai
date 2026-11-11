@@ -201,9 +201,11 @@ TEST(VarlenDecoderIOTest, RotaryHistoryBoundsMediaCoordinatesAndOverwritesUnused
   auto engine = MakeDoublesEngine(model, 2, EosToken(*model)).engine;
   auto first = std::make_shared<MediaItem>();
   first->grid = {1, 4, 6};
+  first->positions = {{0, 0, 0}, 3, 3};
   first->rows = 6;
   auto second = std::make_shared<MediaItem>();
   second->grid = {1, 4, 4};
+  second->positions = {{0, 0, 0}, 2, 2};
   second->rows = 4;
   const std::array<MediaSpan, 2> media{{{1, first}, {8, second}}};
   const std::array<std::array<int64_t, 11>, 3> expected{{

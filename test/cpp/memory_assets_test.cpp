@@ -100,6 +100,18 @@ TEST_F(MemoryAssetsTest, ConfigOwnsParsedValues) {
   EXPECT_NE(OgaModel::Create(*config), nullptr);
 }
 
+TEST_F(MemoryAssetsTest, CpuModelLoadsDiskSharedInitializers) {
+  ScopedAssetDirectory assets;
+  assets.Write("past.onnx", graph_);
+  assets.Write("weights.data", weights_);
+  assets.Write("genai_config.json", config_json_);
+  auto config = OgaConfig::Create(assets.path.string().c_str());
+  config->ClearProviders();
+  const auto overlay = R"({"model":{"decoder":{)" + std::string(kSharedInitializers) + "}}}";
+  config->Overlay(overlay.c_str());
+  EXPECT_NE(OgaModel::Create(*config), nullptr);
+}
+
 TEST_F(MemoryAssetsTest, InvalidConfigArgumentsClearOutput) {
   auto config = CreateConfig();
   OgaConfig* output = config.get();

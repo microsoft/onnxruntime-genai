@@ -590,7 +590,10 @@ void Model::AddSharedInitializers() {
     const uint64_t offset = initializer.offset.empty() ? 0 : std::stoull(initializer.offset);
     const size_t length = static_cast<size_t>(std::stoull(initializer.length));
     const auto data_type = static_cast<ONNXTensorElementDataType>(initializer.data_type);
-    auto memory_info = p_device_->GetMemoryInfo();
+    // Generic CPU-backed providers need not expose device-only memory metadata.
+    auto memory_info = p_device_->GetType() == DeviceType::CPU
+                           ? OrtMemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)
+                           : p_device_->GetMemoryInfo();
 
     std::ostringstream key;
     key << SharedInitializerFileIdentity(data_path) << ':' << offset << ':' << length << ':'
@@ -1120,10 +1123,9 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Qwen38GraphModel>(std::move(config), ort_env);
   if (text_only)
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
-  if ((config->model.type == "qwen3_5" || config->model.type == "qwen3_5_moe" || config->model.type == "qwen4_exp") &&
-      config->engine.dynamic_batching) {
+  if (ModelType::IsVLM(config->model.type) && config->engine.dynamic_batching) {
     if (config->model.vision.filename.empty()) {
-      throw std::runtime_error("Packed Qwen vision requires an exported vision encoder.");
+      throw std::runtime_error("Packed vision requires an exported vision encoder.");
     }
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   }

@@ -5,6 +5,7 @@
 # --------------------------------------------------------------------------
 import glob
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -131,20 +132,49 @@ class Gemma3Model(Gemma2Model):
         self.attention_attrs["k_norm"] = True
         super().make_attention_init(config)
 
+    def make_rope_init(self, config):
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if isinstance(rope_parameters, dict) and "full_attention" in rope_parameters:
+            # Transformers 5.x stores Gemma 3's RoPE per layer type
+            # ({"full_attention": {...}, "sliding_attention": {...}}) and drops the flat
+            # rope_theta / rope_local_base_freq. The global (full-attention) entry drives the
+            # base initializer; the local entry only supplies the sliding layers' theta.
+            local_rope_parameters = rope_parameters["sliding_attention"]
+            if local_rope_parameters.get("rope_type", "default") != "default":
+                raise NotImplementedError(
+                    f"The {local_rope_parameters['rope_type']} RoPE style is not currently supported "
+                    "for Gemma 3 sliding-attention layers."
+                )
+            config.rope_local_base_freq = local_rope_parameters["rope_theta"]
+            self.rope_attrs["theta"] = rope_parameters["full_attention"]["rope_theta"]
+            config = SimpleNamespace(rope_parameters=rope_parameters["full_attention"])
+        super().make_rope_init(config)
+
     def make_rotary_embedding_multi_cache(self):
         self.cos_cache_global_name, self.sin_cache_global_name = "cos_cache_global", "sin_cache_global"
         super().make_rotary_embedding_caches(
             cos_cache_name=self.cos_cache_global_name, sin_cache_name=self.sin_cache_global_name
         )
 
-        # Create the new cos/sin caches for local attention layers with its own theta value
-        self.rope_attrs["create_caches"] = True
-        self.rope_attrs["theta"] = self.rope_local_theta
+        # Create the new cos/sin caches for local attention layers with their own theta value.
+        # Transformers uses default (unscaled) RoPE on the local layers, so drop the global
+        # layers' scaling (e.g. the linear factor 8 of Gemma 3 4B/12B/27B).
+        global_rope_attrs = self.rope_attrs
+        self.rope_attrs = {
+            **global_rope_attrs,
+            "create_caches": True,
+            "theta": self.rope_local_theta,
+            "rescale_factors": 1,
+            "mscale": 1,
+            "mscale_policy": "",
+        }
+        self.rope_attrs.pop("rescale_inv_freq", None)
 
         self.cos_cache_local_name, self.sin_cache_local_name = "cos_cache_local", "sin_cache_local"
         super().make_rotary_embedding_caches(
             cos_cache_name=self.cos_cache_local_name, sin_cache_name=self.sin_cache_local_name
         )
+        self.rope_attrs = global_rope_attrs
 
     def make_rotary_embedding_caches(self, **kwargs):
         cos_cache_name = kwargs.get(
