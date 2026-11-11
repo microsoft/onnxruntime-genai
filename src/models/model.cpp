@@ -1228,11 +1228,32 @@ static bool HasSharedKeyValueCacheShape(const Model& model) {
          compatible_ports(decoder.inputs.past_value_names, decoder.outputs.present_value_names);
 }
 
+static void SetDefaultWebGpuGraphCapture(Config& config) {
+  const auto& decoder = config.model.decoder;
+  const auto& options = decoder.session_options;
+  // Default only the shared, single-beam decoder path. Other layouts keep their
+  // existing policy, and an explicit provider option always takes precedence.
+  if (!ModelType::IsLLM(config.model.type) || !config.search.past_present_share_buffer || config.search.num_beams != 1 ||
+      options.providers.empty() || options.providers.front() != "WebGPU" ||
+      !decoder.pipeline.empty() || decoder.sliding_window || decoder.state_groups || decoder.conv_cache_size != 0 ||
+      config.engine.dynamic_batching || config.model.draft || !config.model.mtp.filename.empty() ||
+      !std::all_of(decoder.layer_types.begin(), decoder.layer_types.end(),
+                   [](const auto& type) { return type == "full_attention"; })) return;
+  for (const auto& provider : options.provider_options) {
+    if (provider.name != "WebGPU") continue;
+    for (const auto& [key, value] : provider.options) {
+      if (key == "enableGraphCapture") return;
+    }
+  }
+  SetProviderOption(config, "WebGPU", "enableGraphCapture", "1");
+}
+
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  SetDefaultWebGpuGraphCapture(*config);
   const auto& options = config->model.decoder.session_options;
   const bool webgpu_capture = config->search.past_present_share_buffer && config->search.num_beams == 1 &&
                               IsGraphCaptureEnabled(options) &&
-                              std::find(options.providers.begin(), options.providers.end(), "WebGPU") != options.providers.end();
+                              !options.providers.empty() && options.providers.front() == "WebGPU";
   // Keep the original load inputs (including in-memory assets, custom ops and
   // shared initializers). Cloning options after EP registration would retain
   // the capture-enabled EP factory and could not disable session-level capture.

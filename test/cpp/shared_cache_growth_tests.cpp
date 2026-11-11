@@ -156,8 +156,13 @@ std::unique_ptr<Config> FallbackConfig(const char* filename, bool capture, int m
 }
 
 void CheckFallbackGeneration(const char* filename, bool memory_model = false, int max_length = 1024,
-                             bool cross_growth = false, bool expected_capture = false) {
+                             bool cross_growth = false, bool expected_capture = false, bool omit_capture = false) {
   auto config = FallbackConfig(filename, true, max_length);
+  if (omit_capture) {
+    for (auto& provider : config->model.decoder.session_options.provider_options) {
+      std::erase_if(provider.options, [](const auto& option) { return option.first == "enableGraphCapture"; });
+    }
+  }
   std::vector<std::byte> bytes;
   if (memory_model) {
     std::ifstream input((config->config_path / fs::path{filename}).string(), std::ios::binary | std::ios::ate);
@@ -187,6 +192,7 @@ void CheckFallbackGeneration(const char* filename, bool memory_model = false, in
   auto generator = CreateGenerator(*model, *params);
   EXPECT_EQ(generator->model_.get(), model.get());
   auto reference = CreateModel(GetOrtEnv(), FallbackConfig(filename, false, max_length));
+  EXPECT_FALSE(IsGraphCaptureEnabled(reference->config_->model.decoder.session_options));
   auto reference_params = CreateGeneratorParams(*reference);
   auto eager = CreateGenerator(*reference, *reference_params);
   std::vector<int32_t> prompt(cross_growth ? 510 : 2, 1);
@@ -241,6 +247,34 @@ TEST(WebGpuCaptureFallback, SharedStaticPreservesDeclaredCapacity) {
 
 TEST(WebGpuCaptureFallback, CompatibleSharedDynamicKeepsCaptureThroughGrowth) {
   CheckFallbackGeneration("shared.onnx", false, 1024, true, true);
+}
+
+TEST(WebGpuCaptureFallback, MissingCaptureOptionDefaultsOnWithEagerFallback) {
+  CheckFallbackGeneration("shared.onnx", false, 1024, true, true, true);
+  CheckFallbackGeneration("control-flow.onnx", false, 1024, true, false, true);
+  CheckFallbackGeneration("fixed-control-flow.onnx", false, 8, false, false, true);
+  auto config = FallbackConfig("shared.onnx", false);
+  config->model.decoder.session_options.provider_options.front().options.clear();
+  config->search.past_present_share_buffer = false;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  EXPECT_FALSE(IsGraphCaptureEnabled(model->config_->model.decoder.session_options));
+  EXPECT_FALSE(model->config_->search.past_present_share_buffer);
+  config = FallbackConfig("shared.onnx", false);
+  config->model.decoder.session_options.provider_options.front().options.clear();
+  config->search.num_beams = 2;
+  model = CreateModel(GetOrtEnv(), std::move(config));
+  EXPECT_FALSE(IsGraphCaptureEnabled(model->config_->model.decoder.session_options));
+  config = FallbackConfig("shared.onnx", false);
+  config->model.decoder.session_options.provider_options.clear();
+  model = CreateModel(GetOrtEnv(), std::move(config));
+  EXPECT_TRUE(IsGraphCaptureEnabled(model->config_->model.decoder.session_options));
+  config = FallbackConfig("shared.onnx", false);
+  ClearProviders(*config);
+  SetProviderOption(*config, "CPU", {}, {});
+  // Stale WebGPU options must not change the selected CPU provider's behavior.
+  model = CreateModel(GetOrtEnv(), std::move(config));
+  EXPECT_EQ(model->p_device_->GetType(), DeviceType::CPU);
+  EXPECT_FALSE(IsGraphCaptureEnabled(model->config_->model.decoder.session_options));
 }
 
 TEST(WebGpuCaptureFallback, RepeatedGeneratorsUseOneEagerModel) {

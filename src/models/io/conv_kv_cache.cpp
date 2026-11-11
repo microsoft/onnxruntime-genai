@@ -72,7 +72,7 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
     if (g_log.enabled && g_log.warning && state_.params_->search.past_present_share_buffer && !kv_share_buffer_) {
       Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
     } else if (g_log.enabled && !state_.params_->search.past_present_share_buffer && kv_share_buffer_) {
-      Log("info", "ConvKeyValueCache: shared past/present buffers selected from the model graph.");
+      Log("info", "ConvKeyValueCache: past_present_share_buffer was forced on due to a fixed kv-cache shape in the model graph.");
     }
     if (state_.params_->use_graph_capture && !kv_share_buffer_) {
       throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");

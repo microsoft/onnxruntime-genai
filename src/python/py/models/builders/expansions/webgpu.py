@@ -10,6 +10,30 @@ class WebGPU:
     """
     WebGPU specific subgraph expansions
     """
+    def make_ep_expansions_init(self, config):
+        # New standard GQA exports can request capture without an extra option.
+        # Keep explicit choices and other cache/execution layouts unchanged.
+        if (
+            config is not None
+            and "enable_webgpu_graph" not in self.extra_options
+            and self.is_gqa_supported()
+            and not self.use_paged_attention
+            and "config_only" not in self.extra_options
+            and not self.extra_options.get("exclude_embeds", False)
+            and getattr(config, "num_beams", 1) == 1
+            and (self.window_size is None or self.window_size <= 0)
+            and self.layer_types
+            and all(layer == "full_attention" for layer in self.layer_types)
+        ):
+            self.extra_options["enable_webgpu_graph"] = True
+            # Let GenAI apply its runtime default instead of pinning it in the package.
+            del self.ep_attrs["webgpu"]["enableGraphCapture"]
+            self.ep_attrs["webgpu"]["validationMode"] = "disabled"
+        if self.extra_options.get("enable_webgpu_graph", False):
+            self.make_attention_mask_reformatting_for_gqa = (
+                WebGPU.make_attention_mask_graph_capture_reformatting_for_gqa.__get__(self, self.__class__)
+            )
+
     def make_attention_mask_graph_capture_reformatting_for_gqa(self):
         # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in GroupQueryAttention

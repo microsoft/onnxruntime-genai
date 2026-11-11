@@ -561,7 +561,9 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 #### Enable WebGPU Graph Capture
 
-This scenario is for when you want to enable WebGPU graph capture for your ONNX model.
+New WebGPU exports use shared KV and capture-ready graphs by default for single-beam GQA decoders with only full-attention layers. Their configs omit `enableGraphCapture`, letting GenAI request capture at load time. Windowed, hybrid, paged, embedding-input and `config_only` exports retain their existing defaults. Set `enable_webgpu_graph=false` to write an explicit opt-out, or `true` to request capture explicitly for another supported layout.
+
+When loading an existing shared-KV, single-beam WebGPU decoder, a missing `enableGraphCapture` option also requests capture for the standard decoder layout. An explicit `"0"` remains off. Recognized initialization refusals fall back to eager; errors during generation still propagate. Existing models keep their sharing configuration.
 
 ```bash
 # From wheel:
