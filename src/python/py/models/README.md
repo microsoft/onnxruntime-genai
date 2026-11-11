@@ -863,6 +863,20 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 The Python `OnnxSourceModel` builder accepts validated flat ONNX sources when the original checkpoint is unavailable or its architecture has no checkpoint loader. It preserves existing nodes, tensor encodings, packed-weight layouts, metadata, and activation precision, and emits a new graph through `Model`'s graph, initializer, scale, and serialization APIs. It does not requantize the weights or modify the source graph. Local functions and nested graphs are rejected. The supported cache policies for this importer are `none` and static `int8_per_channel`; other checkpoint builders retain their existing wider scheme support.
 
+The source-only boolean `int8_prefill_shadow` option defaults to `False`. `True` adds CPU `int64[3]` input `prefill_cache_control` to global causal INT8 per-channel attention nodes with constant scales. A supporting GenAI Engine supplies a unique prefill-episode epoch, capacity, and final-chunk flag; ORT can dequantize each prefix entry once and release the temporary BF16 shadow after prefill. The current CUDA specialization requires eager single-request H128, eight KV heads, and GQA6; other shapes and decode retain the stateless path. This trades temporary prefill memory for less repeated conversion and does not change KV quantization, attention masks, or draft cache precision. Old runtimes without the optional-input contract cannot load the opted-in graph. Sources without eligible global INT8 nodes are rejected.
+
+From a supporting wheel, for an already quantized target:
+
+```bash
+python -c 'from onnxruntime_genai.models.builders.onnx_source import OnnxSourceModel; OnnxSourceModel.from_pretrained("int8_target/model.onnx", extra_options={"int8_prefill_shadow": True}).save_model("int8_target_shadow")'
+```
+
+From source, at the repository root:
+
+```bash
+PYTHONPATH=src/python/py:src/python/py/models python -c 'from models.builders.onnx_source import OnnxSourceModel; OnnxSourceModel.from_pretrained("int8_target/model.onnx", extra_options={"int8_prefill_shadow": True}).save_model("int8_target_shadow")'
+```
+
 Calibrate the original target first:
 
 ```bash

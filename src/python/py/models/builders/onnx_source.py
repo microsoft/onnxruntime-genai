@@ -13,12 +13,14 @@ from .base import Model
 class OnnxSourceModel(Model):
     def __init__(self, source, decoder_config=None, extra_options=None):
         options = extra_options or {}
-        unsupported = set(options) - {"filename", "kv_cache_quant_scheme", "kv_cache_scale_file"}
+        unsupported = set(options) - {"filename", "kv_cache_quant_scheme", "kv_cache_scale_file", "int8_prefill_shadow"}
         if unsupported:
             raise ValueError(f"ONNX source export does not support options {sorted(unsupported)}.")
         scheme = options.get("kv_cache_quant_scheme", "none")
         if scheme not in {"none", "int8_per_channel"}:
             raise ValueError("ONNX source export supports only none or int8_per_channel KV caches.")
+        if not isinstance(options.get("int8_prefill_shadow", False), bool):
+            raise ValueError("int8_prefill_shadow must be a boolean.")
         if source.functions or any(
             attribute.type in {ir.AttributeType.GRAPH, ir.AttributeType.GRAPHS}
             for node in source.graph
@@ -44,6 +46,7 @@ class OnnxSourceModel(Model):
             "quant_scheme": scheme,
             "quant_mode": "PER_CHANNEL",
             "scales_path": options.get("kv_cache_scale_file", ""),
+            "prefill_shadow": options.get("int8_prefill_shadow", False),
         }
         cache_names = set()
         layer_by_key = {}
@@ -90,6 +93,12 @@ class OnnxSourceModel(Model):
                     raise ValueError("ONNX source already contains KV scale initializers.")
             self.make_kv_cache_scale_initializers()
         self.graph.inputs.extend(self.make_source_value(value, cache_names) for value in source.graph.inputs)
+        emitted_inputs = {value.name: value for value in self.graph.inputs}
+        shadow_layers = 0
+        if self.kv_cache_attrs["prefill_shadow"] and (
+            "prefill_cache_control" in emitted_inputs or "prefill_cache_control" in self.graph.initializers
+        ):
+            raise ValueError("ONNX source already declares prefill_cache_control.")
         quantized_layers = set()
         for index, node in enumerate(source.graph):
             for value in node.outputs:
@@ -106,6 +115,26 @@ class OnnxSourceModel(Model):
                 inputs[14], inputs[15] = self.get_kv_cache_scale_inputs(layer_id=layer_id)
                 attributes.update(k_quant_type="PER_CHANNEL", v_quant_type="PER_CHANNEL")
                 quantized_layers.add(layer_id)
+            if (
+                self.kv_cache_attrs["prefill_shadow"]
+                and node.domain == "com.microsoft"
+                and node.op_type == "PagedAttention"
+            ):
+                cache = emitted_inputs.get(inputs[3])
+                if (
+                    cache is not None
+                    and cache.dtype == ir.DataType.INT8
+                    and attributes.get("k_quant_type") == attributes.get("v_quant_type") == "PER_CHANNEL"
+                    and attributes.get("is_causal", 1) == 1
+                    and attributes.get("local_window_size", -1) <= 0
+                    and len(inputs) >= 16
+                    and all(inputs[index] in self.graph.initializers for index in (14, 15))
+                ):
+                    if shadow_layers == 0:
+                        self.graph.inputs.append(self.make_value("prefill_cache_control", ir.DataType.INT64, [3]))
+                    inputs.extend([""] * max(0, 18 - len(inputs)))
+                    inputs[17] = "prefill_cache_control"
+                    shadow_layers += 1
             self.make_node(
                 node.op_type,
                 inputs=inputs,
@@ -117,8 +146,11 @@ class OnnxSourceModel(Model):
             )
         if scheme != "none" and quantized_layers != set(range(self.num_layers)):
             raise ValueError("Every configured cache layer must have a PagedAttention node.")
+        if self.kv_cache_attrs["prefill_shadow"] and shadow_layers == 0:
+            raise ValueError("int8_prefill_shadow requires global causal INT8 per-channel caches with constant scales.")
         self.graph.outputs.extend(self.make_source_value(value, cache_names) for value in source.graph.outputs)
-        self.model.metadata_props["onnxruntime_genai.kv_cache_quant_scheme"] = scheme
+        if scheme != "none" or "onnxruntime_genai.kv_cache_quant_scheme" not in self.model.metadata_props:
+            self.model.metadata_props["onnxruntime_genai.kv_cache_quant_scheme"] = scheme
 
     @classmethod
     def from_pretrained(cls, model_path, decoder_config=None, extra_options=None):

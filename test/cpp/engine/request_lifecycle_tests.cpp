@@ -390,6 +390,41 @@ TEST_F(RequestLifecycleTest, NewRequestIsUnassignedUntilBeginTurn) {
   EXPECT_FALSE(engine_.engine->HasPendingRequests());
 }
 
+TEST_F(RequestLifecycleTest, PrefillCacheEpochIsStableAndDistinctAcrossRequestsAndTurns) {
+  auto request = NewRequest();
+  auto other = NewRequest();
+  const auto other_epoch = other->PrefillCacheEpoch();
+  const auto turn_id = request->BeginTurn(Prompt());
+  const auto epoch = request->PrefillCacheEpoch();
+  EXPECT_GT(epoch, 0);
+  EXPECT_NE(epoch, other_epoch);
+  EXPECT_EQ(request->PrefillCacheEpoch(), epoch);
+  EXPECT_TRUE(request->Cancel(turn_id));
+  EXPECT_EQ(RunOne(*engine_.engine).request, request);
+  request->BeginTurn(std::vector<int32_t>{5});
+  const auto next_epoch = request->PrefillCacheEpoch();
+  EXPECT_NE(next_epoch, epoch);
+  EXPECT_NE(next_epoch, other_epoch);
+  EXPECT_EQ(request->PrefillCacheEpoch(), next_epoch);
+  other->BeginTurn(Prompt());
+  EXPECT_NE(other->PrefillCacheEpoch(), other_epoch);
+  EXPECT_NE(other->PrefillCacheEpoch(), next_epoch);
+}
+
+TEST_F(RequestLifecycleTest, PrefillCacheEpochInvalidatesRetryAndRetainsCommittedProgress) {
+  auto request = NewRequest();
+  request->BeginTurn(Prompt());
+  request->BindScheduledTokenCount(2);
+  const auto epoch = request->PrefillCacheEpoch(10);
+  EXPECT_EQ(request->PrefillCacheEpoch(10), epoch);
+  const auto retry_epoch = request->PrefillCacheEpoch(11);
+  EXPECT_NE(retry_epoch, epoch);
+  EXPECT_EQ(request->PrefillCacheEpoch(11), retry_epoch);
+  request->AdvanceChunk();
+  request->BindScheduledTokenCount(1);
+  EXPECT_EQ(request->PrefillCacheEpoch(12), retry_epoch);
+}
+
 TEST_F(RequestLifecycleTest, CancelRejectsRequestsWithoutAnActiveTurn) {
   auto request = NewRequest();
   EXPECT_THROW(request->Cancel(0), std::runtime_error);

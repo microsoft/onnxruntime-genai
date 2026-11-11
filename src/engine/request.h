@@ -244,6 +244,7 @@ struct Request : std::enable_shared_from_this<Request>,
    * bounds, and the MaxSessionTokens finish reason all use it.
    */
   size_t MaxSessionTokens() const noexcept { return max_session_tokens_; }
+  int64_t PrefillCacheEpoch(uint64_t transaction_id = 0);
 
   /**
    * @brief The generation policy the currently admitted turn resolved to.
@@ -674,6 +675,10 @@ struct Request : std::enable_shared_from_this<Request>,
   size_t turn_generated_tokens_{};
   const size_t max_session_tokens_;
   uint64_t current_turn_id_{};
+  int64_t prefill_cache_epoch_{};
+  uint64_t prefill_cache_turn_id_{};
+  uint64_t prefill_cache_transaction_id_{};
+  int64_t prefill_cache_next_position_{-1};
   uint64_t next_turn_id_{1};
   bool has_current_turn_{};
   bool turn_id_exhausted_{};

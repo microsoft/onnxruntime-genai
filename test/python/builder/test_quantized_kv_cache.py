@@ -105,17 +105,23 @@ def paged_onnx_source(tmp_path):
     return source_path, decoder
 
 
-@pytest.mark.parametrize("quantized", [False, True])
-def test_onnx_source_preserves_weights_and_applies_cache_policy(tmp_path, paged_onnx_source, quantized):
+@pytest.mark.parametrize(("quantized", "shadow"), [(False, False), (True, False), (True, True)])
+def test_onnx_source_preserves_weights_and_applies_cache_policy(tmp_path, paged_onnx_source, quantized, shadow):
     source_path, decoder = paged_onnx_source
     options = {}
     if quantized:
         scale_path = tmp_path / "scales.json"
-        scale_path.write_text(json.dumps({
-            "scales": {"k_scales": [[0.125] * 128], "v_scales": [[0.25] * 128]},
-            "qmax": 128, "layer_ids": [0],
-        }))
+        scale_path.write_text(
+            json.dumps(
+                {
+                    "scales": {"k_scales": [[0.125] * 128], "v_scales": [[0.25] * 128]},
+                    "qmax": 128,
+                    "layer_ids": [0],
+                }
+            )
+        )
         options = {"kv_cache_quant_scheme": "int8_per_channel", "kv_cache_scale_file": str(scale_path)}
+    options["int8_prefill_shadow"] = shadow
     source_bytes = source_path.read_bytes()
     source_data = source_path.with_suffix(".onnx.data").read_bytes()
     model = OnnxSourceModel.from_pretrained(source_path, decoder, options)
@@ -124,15 +130,25 @@ def test_onnx_source_preserves_weights_and_applies_cache_policy(tmp_path, paged_
     assert exported.metadata_props["source_record"] == "preserved"
     assert source_path.read_bytes() == source_bytes
     assert source_path.with_suffix(".onnx.data").read_bytes() == source_data
-    np.testing.assert_array_equal(exported.graph.initializers["packed_weight"].const_value.numpy(), np.arange(512, dtype=np.int32).astype(np.uint8))
+    np.testing.assert_array_equal(
+        exported.graph.initializers["packed_weight"].const_value.numpy(),
+        np.arange(512, dtype=np.int32).astype(np.uint8),
+    )
     cache_dtype = ir.DataType.INT8 if quantized else ir.DataType.BFLOAT16
-    assert {value.dtype for value in exported.graph.inputs if value.name.startswith(("past_keys_", "past_values_"))} == {cache_dtype}
+    assert {
+        value.dtype for value in exported.graph.inputs if value.name.startswith(("past_keys_", "past_values_"))
+    } == {cache_dtype}
     assert {value.dtype for value in exported.graph.outputs if value.name.startswith("present_")} == {cache_dtype}
     assert exported.graph.inputs[0].dtype == ir.DataType.BFLOAT16
     attention = next(node for node in exported.graph if node.op_type == "PagedAttention")
     assert attention.attributes["num_heads"].as_int() == 6
     assert attention.attributes["kv_num_heads"].as_int() == 1
     assert len(exported.graph) == 1
+    controls = [value for value in exported.graph.inputs if value.name == "prefill_cache_control"]
+    assert len(controls) == int(shadow)
+    if shadow:
+        assert controls[0].dtype == ir.DataType.INT64 and list(controls[0].shape) == [3]
+        assert attention.inputs[17] is controls[0]
     if quantized:
         assert attention.attributes["k_quant_type"].as_string() == "PER_CHANNEL"
         for index, expected in ((14, 0.125), (15, 0.25)):
@@ -142,6 +158,44 @@ def test_onnx_source_preserves_weights_and_applies_cache_policy(tmp_path, paged_
     else:
         assert "k_quant_type" not in attention.attributes
     assert all(value.const_value.location == "model.onnx.data" for value in exported.graph.initializers.values())
+
+
+def test_onnx_source_adds_shadow_to_existing_int8_target(tmp_path, paged_onnx_source):
+    source_path, decoder = paged_onnx_source
+    scales = tmp_path / "scales.json"
+    scales.write_text(
+        json.dumps(
+            {
+                "scales": {"k_scales": [[0.125] * 128], "v_scales": [[0.25] * 128]},
+                "qmax": 128,
+                "layer_ids": [0],
+            }
+        )
+    )
+    quantized = OnnxSourceModel.from_pretrained(
+        source_path,
+        decoder,
+        {
+            "kv_cache_quant_scheme": "int8_per_channel",
+            "kv_cache_scale_file": str(scales),
+        },
+    ).save_model(tmp_path / "quantized")
+    shadow = OnnxSourceModel.from_pretrained(quantized, extra_options={"int8_prefill_shadow": True})
+    exported = ir.load(shadow.save_model(tmp_path / "shadow"))
+    assert exported.metadata_props["onnxruntime_genai.kv_cache_quant_scheme"] == "int8_per_channel"
+    attention = next(node for node in exported.graph if node.op_type == "PagedAttention")
+    assert attention.inputs[3].dtype == attention.inputs[4].dtype == ir.DataType.INT8
+    assert attention.inputs[17].name == "prefill_cache_control"
+    np.testing.assert_array_equal(
+        attention.inputs[14].const_value.numpy(), np.full((1, 1, 128), 0.125, dtype=np.float32)
+    )
+
+
+@pytest.mark.parametrize("option", [True, "true"])
+def test_onnx_source_rejects_unsupported_shadow_policy(paged_onnx_source, option):
+    source_path, decoder = paged_onnx_source
+    with pytest.raises(ValueError, match="boolean|global causal INT8"):
+        OnnxSourceModel.from_pretrained(source_path, decoder, {"int8_prefill_shadow": option})
 
 
 @pytest.mark.parametrize("scheme", ["int4_per_channel", "int8_per_token"])
@@ -159,8 +213,12 @@ def test_onnx_source_validates_ort_normalization_without_registry_leaks(tmp_path
     source.graph.inputs.append(source.make_value("input", ir.DataType.FLOAT, [1, 4]))
     source.make_initializer(np.ones(4, dtype=np.float32), "scale")
     source.make_node(
-        "SimplifiedLayerNormalization", inputs=["input", "scale"], outputs=["output"],
-        name="normalization", epsilon=1e-5, **({"invalid_attribute": 1} if invalid_attribute else {}),
+        "SimplifiedLayerNormalization",
+        inputs=["input", "scale"],
+        outputs=["output"],
+        name="normalization",
+        epsilon=1e-5,
+        **({"invalid_attribute": 1} if invalid_attribute else {}),
     )
     source.graph.outputs.append(source.make_value("output", ir.DataType.FLOAT, [1, 4]))
     source_path = tmp_path / "normalization.onnx"

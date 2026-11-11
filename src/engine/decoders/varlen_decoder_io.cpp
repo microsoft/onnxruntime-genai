@@ -551,6 +551,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
   PreparePositionIds(model, scheduled_requests);
   PrepareRotaryPositionIds(model, scheduled_requests);
   PrepareAttentionMetadata(model, scheduled_requests);
+  PreparePrefillCacheControl(model, scheduled_requests);
   PrepareHiddenStatesInput(model, scheduled_requests);
   PrepareLogitsIndices(model, scheduled_requests);
   PrepareLogits(model, scheduled_requests);
@@ -969,6 +970,33 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
   input_names_.push_back(metadata_name.c_str());
   inputs_.push_back(metadata_tensor->GetOrtTensor());
   owned_inputs_.push_back(std::move(metadata_tensor));
+}
+
+void VarlenDecoderIO::PreparePrefillCacheControl(
+    std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+  constexpr const char* name = "prefill_cache_control";
+  if (!model->session_info_.HasInput(name)) {
+    return;
+  }
+  const auto shape = model->session_info_.GetInputShape(name);
+  if (model->session_info_.GetInputDataType(name) != Ort::TypeToTensorType<int64_t> ||
+      shape.size() != 1 || shape[0] != 3) {
+    throw std::runtime_error("prefill_cache_control must be CPU int64[3].");
+  }
+  std::array<int64_t, 3> control{};
+  if (graph_buffers_ == nullptr && plan_ != nullptr && plan_->transaction_id != 0 &&
+      scheduled_requests.size() == 1 && scheduled_requests[0]->IsPrefill()) {
+    const auto& request = scheduled_requests[0];
+    control = {request->PrefillCacheEpoch(plan_->transaction_id), static_cast<int64_t>(request->MaxSessionTokens()),
+               request->IsChunkComplete() ? 1 : 0};
+  }
+  auto tensor = std::make_unique<Tensor>(GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<int64_t>);
+  tensor->CreateTensor(std::array<int64_t, 1>{3});
+  auto values = tensor->GetDeviceSpan<int64_t>().CpuSpan();
+  std::copy(control.begin(), control.end(), values.begin());
+  input_names_.push_back(name);
+  inputs_.push_back(tensor->GetOrtTensor());
+  owned_inputs_.push_back(std::move(tensor));
 }
 
 size_t VarlenDecoderIO::TokenCount(ScheduledRequests& scheduled_requests) const {

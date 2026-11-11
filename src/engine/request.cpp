@@ -75,6 +75,31 @@ std::shared_ptr<GeneratorParams> Request::CreateRequestParams(
   return params;
 }
 
+int64_t Request::PrefillCacheEpoch(uint64_t transaction_id) {
+  const bool next_transaction = transaction_id != 0 && transaction_id != prefill_cache_transaction_id_;
+  const int64_t position = ProcessedSequenceLength();
+  if (prefill_cache_epoch_ == 0 || prefill_cache_turn_id_ != current_turn_id_ ||
+      (next_transaction && prefill_cache_next_position_ != position)) {
+    static std::atomic<int64_t> next_epoch{1};
+    int64_t epoch = next_epoch.load(std::memory_order_relaxed);
+    for (;;) {
+      if (epoch == std::numeric_limits<int64_t>::max()) {
+        throw std::runtime_error("Prefill cache epoch identifiers exhausted.");
+      }
+      if (next_epoch.compare_exchange_weak(epoch, epoch + 1, std::memory_order_relaxed)) {
+        break;
+      }
+    }
+    prefill_cache_epoch_ = epoch;
+    prefill_cache_turn_id_ = current_turn_id_;
+  }
+  if (next_transaction) {
+    prefill_cache_transaction_id_ = transaction_id;
+    prefill_cache_next_position_ = position + static_cast<int64_t>(ScheduledTokenCount());
+  }
+  return prefill_cache_epoch_;
+}
+
 DeviceSpan<int32_t> Request::AllocateOnDevice(
     GeneratorParams& params,
     std::span<const int32_t> input_ids) {
