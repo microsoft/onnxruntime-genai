@@ -202,7 +202,9 @@ class LFM3AudioModel(LFM2VLModel):
 
         # Never quantized. CUDA has no fp32 GroupQueryAttention, and on WebGPU an fp16 encoder drifts from fp32.
         speech_dtype = ir.DataType.FLOAT16 if ep == "cuda" else ir.DataType.FLOAT
-        options = {key: extra_options[key] for key in ("hf_token", "hf_remote", "base_revision") if key in extra_options}
+        options = {
+            key: extra_options[key] for key in ("hf_token", "hf_remote", "base_revision") if key in extra_options
+        }
         self.speech = LFM3AudioEncoder(config, speech_dtype, speech_dtype, ep, cache_dir, options)
         if self.decoder.filename == self.speech.filename:
             raise ValueError(f"The decoder cannot be named {self.decoder.filename}: the speech encoder has that name")

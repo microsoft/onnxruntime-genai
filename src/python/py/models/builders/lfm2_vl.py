@@ -590,7 +590,9 @@ class LFM2VLModel:
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # The remaining options configure the decoder
-        options = {key: extra_options[key] for key in ("hf_token", "hf_remote", "base_revision") if key in extra_options}
+        options = {
+            key: extra_options[key] for key in ("hf_token", "hf_remote", "base_revision") if key in extra_options
+        }
         # Without the checkpoint's quantization_config, Model loads them through transformers, not QuantModel
         unquantized_config = copy.deepcopy(config)
         if hasattr(unquantized_config, "quantization_config"):
