@@ -100,12 +100,23 @@ merged as `d65da43ffd021b9392ee799f96c0666c1afc29b4`, for the
 nightly `1.32.0.dev20261110001` includes both capabilities. Earlier routing/KDA
 nightlies alone are insufficient for clipped expert layers.
 
+Full BF16 Ling Flash-VL execution additionally requires the CUDA BF16 `Less`
+registration in [ORT #34005](https://github.com/microsoft/onnxruntime/pull/34005).
+The shared experts emit standard ONNX `Clip`, whose decomposition uses `Less`;
+support for routed-expert clipping alone does not cover this path. The pinned
+`1.32.0.dev20261110001` nightly does not include that registration. Until a
+published build includes it, use a matching ORT core/CUDA provider built with
+the repair; the routing/clipping nightly alone is not a full BF16 model runtime.
+
 Ling image exports declare their signed rotary-cache domain in decoder ONNX
 metadata `com.microsoft.genai.vision_position_range` as `lower:upper` (upper
 exclusive). Current runtimes require it to cover the configured context in both
 directions. Re-export older Ling image packages; the runtime rejects them rather
 than using incompatible nonnegative rotary caches. Text-only and Qwen packages
 do not require this metadata.
+
+Context extension beyond `original_max_position_embeddings` is unsupported for
+Ling image exports and is rejected before graph export.
 
 Dense text LongRoPE exports using an `If` node declare an int64 scalar
 `rope_context_length` input. ONNX metadata entries

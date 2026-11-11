@@ -13,6 +13,15 @@ this capability as well as routing/KDA; the older `20261109001` baseline is not
 sufficient for clipped layers. CI executes the builder-emitted clipped experts,
 not only schema/attribute checks.
 
+Full BF16 Ling Flash-VL also needs the CUDA BF16 `Less` registration from
+[ORT #34005](https://github.com/microsoft/onnxruntime/pull/34005), because shared
+experts emit ONNX `Clip` that decomposes into `Less` and `Where`. The pinned
+`1.32.0.dev20261110001` wheel covers routing/KDA and routed clipping, but not this
+additional registration. Until a published build includes the repair, full
+BF16 execution requires a matching patched ORT core and CUDA provider.
+Ling image exports reject context extension beyond
+`original_max_position_embeddings`; this does not enable YaRN context extension.
+
 The builder reads Bailing configuration fields rather than assuming the Ling-3.0-tiny values. `layer_group_size` must be a positive integer (default `1`); per-layer lists are explicitly unsupported. Full attention ends each complete group and covers every layer in an incomplete final group, matching the Hugging Face checkpoint's decoder scheduling. Limiting the exported layer count preserves the original checkpoint's layer types.
 
 `norm_topk_prob` controls routed-expert normalization (default `false`), and `routed_scaling_factor` scales only the routed experts (default `1.0`). Because `MoEGroupRouter` emits selected log-scores and MoE/QMoE applies softmax, unnormalized routing additionally restores the selected sigmoid-score sum before adding the shared expert. `group_topk` is configurable, defaults to `2` for `noaux_tc`, must be a positive integer, and is clamped to the number of experts per group by the runtime operator.

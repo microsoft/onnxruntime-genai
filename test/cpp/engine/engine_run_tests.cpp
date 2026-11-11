@@ -193,6 +193,12 @@ class ScopedFailingCheckpointDevice final : public DeviceInterface {
 
 class NativeTensorReference {
  public:
+  static NativeTensorReference Calibration(const std::filesystem::path& path, bool compare) {
+    auto calibration_path = path;
+    calibration_path += ".calibration";
+    return NativeTensorReference{calibration_path, compare};
+  }
+
   NativeTensorReference(const std::filesystem::path& path, bool compare)
       : compare_{compare} {
     if (compare) {
@@ -413,7 +419,8 @@ TEST(EngineNativeCaptureTest, PackedImageContinuationCalibrationTrace) {
   ASSERT_EQ(std::find(model->config_->model.eos_token_id.begin(),
                       model->config_->model.eos_token_id.end(), teacher[0]),
             model->config_->model.eos_token_id.end());
-  NativeTensorReference reference{reference_path, false};
+  const char* compare = std::getenv("GENAI_NATIVE_CAPTURE_COMPARE");
+  auto reference = NativeTensorReference::Calibration(reference_path, compare && std::string_view{compare} == "1");
   auto dependencies = Engine::CreateDependencies(model);
   ASSERT_FALSE(dependencies.mtp_model_executor);
   dependencies.model_executor = std::make_unique<PackedStepCaptureExecutor>(
@@ -520,6 +527,43 @@ TEST(EngineNativeCaptureTest, StreamedBytesDetectMismatch) {
     EXPECT_THROW(reference.Record("tensor", changed), std::runtime_error);
   }
   std::filesystem::remove(path);
+}
+
+TEST(EngineNativeCaptureTest, CalibrationReferencePreservesLifecycleAndComparison) {
+  const auto path = std::filesystem::temp_directory_path() /
+                    ("genai-native-reference-" + std::to_string(std::random_device{}()) + ".bin");
+  auto calibration_path = path;
+  calibration_path += ".calibration";
+  const std::array<uint8_t, 3> lifecycle{1, 2, 3};
+  const std::array<uint8_t, 3> calibration{4, 5, 6};
+  {
+    NativeTensorReference reference{path, false};
+    reference.Record("tensor", lifecycle);
+    reference.Finish();
+  }
+  EXPECT_THROW(NativeTensorReference::Calibration(path, true), std::runtime_error);
+  EXPECT_FALSE(std::filesystem::exists(calibration_path));
+  {
+    auto reference = NativeTensorReference::Calibration(path, false);
+    reference.Record("tensor", calibration);
+    reference.Finish();
+  }
+  {
+    NativeTensorReference reference{path, true};
+    EXPECT_NO_THROW(reference.Record("tensor", lifecycle));
+    EXPECT_NO_THROW(reference.Finish());
+  }
+  {
+    auto reference = NativeTensorReference::Calibration(path, true);
+    EXPECT_NO_THROW(reference.Record("tensor", calibration));
+    EXPECT_NO_THROW(reference.Finish());
+  }
+  {
+    auto reference = NativeTensorReference::Calibration(path, true);
+    EXPECT_THROW(reference.Record("tensor", lifecycle), std::runtime_error);
+  }
+  std::filesystem::remove(path);
+  std::filesystem::remove(calibration_path);
 }
 
 size_t NativeCaptureCount(const char* value, size_t fallback) {

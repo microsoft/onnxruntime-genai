@@ -704,7 +704,11 @@ class BailingMoeV3Model(Qwen35TextModel):
             outputs=[f"{matmul_name}/output_0"],
             name=matmul_name,
         )
-        self.make_value(f"{matmul_name}/output_0", ir.DataType.FLOAT, shape=logits_shape)
+        self.make_value(
+            f"{matmul_name}/output_0",
+            ir.DataType.FLOAT,
+            shape=self.make_hidden_state_shape(last_dim=self.moe_attrs["num_experts"]),
+        )
         self.exclude_node_from_quantization(matmul_name)
         expert_bias_name = f"model.layers.{layer_id}.moe.expert_bias"
         self.make_initializer(moe.expert_bias, expert_bias_name, to=ir.DataType.FLOAT)
@@ -830,7 +834,8 @@ class BailingMoeV3Model(Qwen35TextModel):
         limits = getattr(self.config, "share_expert_swiglu_limit_list", None)
         limit = limits[layer_id] if limits else 0
         if layer_id < self.moe_attrs["first_k_dense_replace"] or limit <= 0:
-            return super().make_mlp_proj(layer_id, mlp, root_input)
+            super().make_mlp_proj(layer_id, mlp, root_input)
+            return
         basename = f"/model/layers.{layer_id}/mlp"
         names = []
         inputs = []

@@ -2,5 +2,7 @@
 # The 2026-11-10 wheel registers swiglu_limit_after_activation on both MoE and QMoE. It bundles CPU and CUDA 13 providers
 # from one revision; install cuda13-runtime.txt next to it. The CUDA 12 plugin EP (onnxruntime-ep-cuda12 with a CPU
 # onnxruntime nightly) can replace both once a build made after the merge is published.
+# Full BF16 Ling shared-expert Clip also requires the CUDA BF16 Less registration in ORT #34005,
+# which this pin does not contain; use a matching patched core/provider for complete-model execution.
 -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
 onnxruntime-gpu==1.32.0.dev20261110001

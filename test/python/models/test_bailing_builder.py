@@ -29,6 +29,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "models"))
 
 import builder
+from builder_config import COMPONENT_EXPORTER_OWNED_FILES
 from builders import bailing
 from builders.bailing import BailingMoeV3Model
 from builders.bailing_vl import BailingVLModel, BailingVLTextModel, BailingVLVisualModel
@@ -117,6 +118,39 @@ def test_ling_composite_normalizes_decoder_without_losing_native_fp8_metadata(tm
     assert decoder.model_type == ("bailing_hybrid" if text_only else "bailing_moe_v3_vl")
     assert "mrope_section" not in config.text_config
     assert model.config.vision_config.out_hidden_size == 4096
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+def test_ling_composite_component_loading_preserves_decoder_authentication(tmp_path, monkeypatch, text_only):
+    config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "exclude_embeds": not text_only, "text_only": text_only, "hf_token": False},
+    )
+    model.decoder.make_model = Mock()
+    model.decoder.save_processing = Mock()
+    load_visual = Mock()
+    save_processor = Mock()
+    monkeypatch.setattr("builders.bailing_vl.load_bailing_visual", load_visual)
+    monkeypatch.setattr("builders.bailing_vl.BailingVLVisualModel", Mock())
+    monkeypatch.setattr("builders.bailing_vl.save_image_processor", save_processor)
+
+    model.make_model(str(tmp_path))
+    model.save_processing(str(tmp_path), {}, str(tmp_path))
+
+    model.decoder.make_model.assert_called_once_with(str(tmp_path))
+    model.decoder.save_processing.assert_called_once_with(str(tmp_path), {}, str(tmp_path))
+    if text_only:
+        load_visual.assert_not_called()
+        save_processor.assert_not_called()
+    else:
+        load_visual.assert_called_once()
+        assert load_visual.call_args.kwargs["token"] is False
+        save_processor.assert_called_once_with(str(tmp_path), {}, str(tmp_path), False)
 
 
 @pytest.mark.parametrize(
@@ -213,8 +247,17 @@ def test_ling_component_destinations_reject_symlinks_before_writing(tmp_path, fi
     assert original.read_bytes() == b"existing vision weights"
 
 
-@pytest.mark.parametrize("filename", ["model.onnx", "./decoder.onnx", "nested/decoder.onnx"])
-def test_ling_distinct_component_destinations_preserve_save_order(tmp_path, filename):
+@pytest.mark.parametrize("text_only", [False, True])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        *sorted(COMPONENT_EXPORTER_OWNED_FILES),
+        "./genai_config.json",
+        "nested/../tokenizer.json",
+        "processor_config.json/model",
+    ],
+)
+def test_ling_component_destinations_preserve_exporter_owned_files(tmp_path, filename, text_only):
     config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
     model = BailingVLModel(
         config,
@@ -222,18 +265,59 @@ def test_ling_distinct_component_destinations_preserve_save_order(tmp_path, file
         ir.DataType.BFLOAT16,
         "cuda",
         str(tmp_path),
-        {"use_paged_attention": True, "exclude_embeds": True, "filename": filename},
+        {
+            "use_paged_attention": True,
+            "exclude_embeds": not text_only,
+            "text_only": text_only,
+            "filename": filename,
+        },
+    )
+    (tmp_path / "nested").mkdir()
+    existing = {name: name.encode() for name in COMPONENT_EXPORTER_OWNED_FILES}
+    for name, content in existing.items():
+        (tmp_path / name).write_bytes(content)
+    model.decoder.save_model = Mock()
+    if not text_only:
+        model.vision = Mock()
+
+    with pytest.raises(ValueError, match="conflicts|not a directory"):
+        model.save_model(tmp_path)
+
+    model.decoder.save_model.assert_not_called()
+    if model.vision is not None:
+        model.vision.save_model.assert_not_called()
+    assert {name: (tmp_path / name).read_bytes() for name in existing} == existing
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+@pytest.mark.parametrize("filename", ["model.onnx", "./decoder.onnx", "nested/decoder.onnx"])
+def test_ling_distinct_component_destinations_preserve_save_order(tmp_path, filename, text_only):
+    config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {
+            "use_paged_attention": True,
+            "exclude_embeds": not text_only,
+            "text_only": text_only,
+            "filename": filename,
+        },
     )
     (tmp_path / "nested").mkdir()
     saves = Mock()
     model.decoder.save_model = saves.decoder
-    model.vision = SimpleNamespace(save_model=saves.vision)
+    if not text_only:
+        model.vision = SimpleNamespace(save_model=saves.vision)
 
     model.save_model(tmp_path)
 
-    assert [call[0] for call in saves.mock_calls] == ["decoder", "vision"]
+    assert [call[0] for call in saves.mock_calls] == (["decoder"] if text_only else ["decoder", "vision"])
     saves.decoder.assert_called_once_with(tmp_path)
-    saves.vision.assert_called_once_with(tmp_path)
+    if not text_only:
+        saves.vision.assert_called_once_with(tmp_path)
 
 
 @pytest.mark.parametrize("moe_quant_type", [None, "int4", "int8"])
@@ -314,6 +398,80 @@ def test_ling_raw_configuration_preserves_source_activation_default(tmp_path, te
         {"use_paged_attention": True, "exclude_embeds": not text_only, "text_only": text_only},
     )
     assert model.decoder.config.hidden_act == "silu"
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+def test_ling_raw_configuration_preserves_nested_untied_embeddings(tmp_path, monkeypatch, text_only):
+    config = {
+        "architectures": ["BailingMoeV3VLForConditionalGeneration"],
+        "model_type": "bailing_moe_v3_vl",
+        "text_config": _config(tie_word_embeddings=False).to_dict(),
+        "vision_config": {"out_hidden_size": 4096},
+        "mrope_section": [8, 12, 12],
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr(builder.AutoTokenizer, "from_pretrained", Mock(return_value=Mock(get_vocab=dict)))
+    options = builder.parse_extra_options(
+        str(tmp_path),
+        "",
+        str(tmp_path / "output"),
+        "bf16",
+        "cuda",
+        str(tmp_path / "cache"),
+        ["use_paged_attention=true", f"exclude_embeds={not text_only}", f"text_only={text_only}"],
+    )
+    model = BailingVLModel(
+        options["hf_details"]["hf_config"],
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path / "cache"),
+        options,
+    )
+    assert not options["shared_embeddings"]
+    assert not model.decoder.config.tie_word_embeddings
+    assert not model.decoder.tied_unquantized_embeddings
+
+
+def test_ling_vision_rejects_unsupported_context_extension(tmp_path):
+    with pytest.raises(ValueError, match="Ling vision context extension"):
+        _model(
+            tmp_path,
+            model_class=BailingVLTextModel,
+            dtype=ir.DataType.BFLOAT16,
+            ep="cuda",
+            use_paged_attention=True,
+            paged_block_size=16,
+            config_overrides={
+                "max_position_embeddings": 256,
+                "original_max_position_embeddings": 128,
+                "mrope_section": [8, 12, 12],
+            },
+        )
+
+
+@pytest.mark.parametrize(("text_only", "context_length"), [(False, 64), (False, 128), (True, 256)])
+def test_ling_context_limits_preserve_supported_exports(tmp_path, text_only, context_length):
+    model = _model(
+        tmp_path,
+        model_class=BailingVLTextModel,
+        dtype=ir.DataType.BFLOAT16,
+        ep="cuda",
+        use_paged_attention=True,
+        paged_block_size=16,
+        text_only=text_only,
+        config_overrides={
+            "max_position_embeddings": context_length,
+            "original_max_position_embeddings": 128,
+            "mrope_section": [8, 12, 12],
+        },
+    )
+    metadata = model.model.metadata_props
+    if text_only:
+        assert "com.microsoft.genai.vision_position_range" not in metadata
+    else:
+        lower, upper = map(int, metadata["com.microsoft.genai.vision_position_range"].split(":"))
+        assert lower <= -context_length and upper >= context_length
 
 
 def test_ling_raw_configuration_and_image_processor_assets(tmp_path):
@@ -1018,10 +1176,21 @@ def test_block_fp8_metadata_and_partial_blocks_survive_concatenation(tmp_path):
     np.testing.assert_array_equal(node.inputs[2].const_value.numpy(), np.concatenate([normalized, normalized]))
 
 
-@pytest.mark.parametrize("dtype", [ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+@pytest.mark.parametrize(
+    ("dtype", "packed"),
+    [
+        (ir.DataType.FLOAT, False),
+        (ir.DataType.FLOAT16, False),
+        (ir.DataType.BFLOAT16, False),
+        (ir.DataType.FLOAT16, True),
+        (ir.DataType.BFLOAT16, True),
+    ],
+)
 @pytest.mark.parametrize("precision", [ir.DataType.INT4, ir.DataType.INT8, ir.DataType.BFLOAT16])
-def test_group_router_keeps_projection_and_selection_in_fp32(tmp_path, dtype, precision):
-    model = _model(tmp_path, dtype=dtype, precision=precision)
+def test_group_router_keeps_projection_and_selection_in_fp32(tmp_path, dtype, precision, packed):
+    model = _model(
+        tmp_path, dtype=dtype, precision=precision, ep="cuda" if packed else "cpu", use_paged_attention=packed
+    )
     model.moe_attrs["num_experts"] = 512
     model.model.graph.inputs.append(model.make_value("hidden", dtype, model.make_hidden_state_shape()))
     gate = TensorModule(weight=torch.linspace(-1, 1, 512 * 128).reshape(512, 128).to(torch.bfloat16))
@@ -1040,6 +1209,8 @@ def test_group_router_keeps_projection_and_selection_in_fp32(tmp_path, dtype, pr
     assert model.values[scores].dtype == dtype
     if dtype != ir.DataType.FLOAT:
         assert model.values[scores].producer().inputs[0] is router.outputs[0]
+    model.graph.outputs.append(model.values[scores])
+    onnx.shape_inference.infer_shapes(ir.serde.serialize_model(model.model), strict_mode=True)
 
 
 @pytest.mark.parametrize("activation", [None, "silu", "sigmoid"])

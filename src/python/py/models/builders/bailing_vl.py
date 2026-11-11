@@ -8,7 +8,12 @@ from pathlib import Path
 
 import numpy as np
 import onnx_ir as ir
-from builder_config import paths_collide, serialize_genai_config, validate_destination_path
+from builder_config import (
+    COMPONENT_EXPORTER_OWNED_FILES,
+    paths_collide,
+    serialize_genai_config,
+    validate_destination_path,
+)
 from loaders.vision import load_bailing_visual
 from transformers import PretrainedConfig
 
@@ -65,12 +70,6 @@ class BailingVLModel(Model):
             raise ValueError("Ling decoder filename conflicts with an emitted companion graph")
         self.decoder.model_type = "bailing_hybrid" if self.text_only else "bailing_moe_v3_vl"
         self.vision = None
-        self.vocab_size = self.decoder.vocab_size
-        self.exclude_embeds = self.decoder.exclude_embeds
-        self.hf_token = self.decoder.hf_token
-        self.hf_remote = self.decoder.hf_remote
-        self.context_length = self.decoder.context_length
-        self.model_type = self.decoder.model_type
 
     def make_model(self, input_path):
         self.decoder.make_model(input_path)
@@ -81,7 +80,7 @@ class BailingVLModel(Model):
                 self.decoder.hidden_size,
                 input_path if os.path.isdir(input_path) else self.decoder.model_name_or_path,
                 cache_dir=self.decoder.cache_dir,
-                token=self.hf_token,
+                token=self.decoder.hf_token,
                 revision=self.decoder.revision,
             )
             self.vision = BailingVLVisualModel(vision_config, visual, self.decoder.hidden_size, self.decoder.io_dtype)
@@ -89,18 +88,20 @@ class BailingVLModel(Model):
     def save_model(self, output_dir):
         if not self.text_only and self.vision is None:
             raise RuntimeError("make_model must construct Ling vision before save_model")
-        if not self.text_only:
-            output_root = Path(output_dir).resolve()
-            destinations = []
-            for filename in (self.decoder.filename, "embedding.onnx", "vision.onnx"):
-                for suffix in ("", ".data", ".saving", ".data.saving", ".bak", ".data.bak"):
-                    destination = output_root / f"{filename}{suffix}"
-                    validate_destination_path(output_root, destination, "Ling")
-                    destination = destination.resolve()
-                    validate_destination_path(output_root, destination, "Ling")
-                    if any(paths_collide(destination, other) for other in destinations):
-                        raise ValueError("Ling decoder filename conflicts with an emitted companion graph or data file")
-                    destinations.append(destination)
+        output_root = Path(output_dir).resolve()
+        destinations = [output_root / name for name in COMPONENT_EXPORTER_OWNED_FILES]
+        filenames = (
+            (self.decoder.filename,) if self.text_only else (self.decoder.filename, "embedding.onnx", "vision.onnx")
+        )
+        for filename in filenames:
+            for suffix in ("", ".data", ".saving", ".data.saving", ".bak", ".data.bak"):
+                destination = output_root / f"{filename}{suffix}"
+                validate_destination_path(output_root, destination, "Ling")
+                destination = destination.resolve()
+                validate_destination_path(output_root, destination, "Ling")
+                if any(paths_collide(destination, other) for other in destinations):
+                    raise ValueError("Ling decoder filename conflicts with an exporter-owned file or companion graph")
+                destinations.append(destination)
         self.decoder.save_model(output_dir)
         if self.vision is not None:
             self.vision.save_model(output_dir)
@@ -138,7 +139,7 @@ class BailingVLModel(Model):
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
         if not self.text_only:
-            save_image_processor(model_name_or_path, extra_kwargs, out_dir, self.hf_token)
+            save_image_processor(model_name_or_path, extra_kwargs, out_dir, self.decoder.hf_token)
 
 
 class BailingVLTextModel(BailingMoeV3Model):
@@ -150,6 +151,10 @@ class BailingVLTextModel(BailingMoeV3Model):
         self.rope_attrs["op_type"] = "RotaryEmbedding" if extra_options.get("text_only", False) else "MRotaryEmbedding"
         self.rope_attrs["interleaved"] = 1
         if self.rope_attrs["op_type"] == "MRotaryEmbedding":
+            if self.context_length > self.original_context_length:
+                raise ValueError(
+                    "Ling vision context extension beyond original_max_position_embeddings is not supported"
+                )
             self.rope_attrs["position_start"] = -self.original_context_length
             self.rope_attrs["cache_length"] = self.original_context_length + self.context_length
             self.rope_attrs["cast"]["use_fp32"] = True
