@@ -25,7 +25,7 @@ struct ModelType {
 
   inline static bool IsVLM(const std::string& model_type) {
     // Vision-language model (VLM)
-    static constexpr std::array<std::string_view, 12> VLM = {"fara", "gemma3", "lfm2_vl", "mistral3", "nemotron_parse", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "videochat_flash_qwen"};
+    static constexpr std::array<std::string_view, 13> VLM = {"bailing_moe_v3_vl", "fara", "gemma3", "lfm2_vl", "mistral3", "nemotron_parse", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "videochat_flash_qwen"};
     return std::find(VLM.begin(), VLM.end(), model_type) != VLM.end();
   }
 
@@ -76,8 +76,8 @@ struct ModelType {
   }
 
   inline static bool IsQwenVLFamily(const std::string& model_type) {
-    // Qwen-VL family: models requiring 3D mRoPE position IDs
-    static constexpr std::array<std::string_view, 12> QwenVL = {"fara", "qwen2_5_vl_text", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_text", "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5_text", "qwen4_exp", "qwen4_exp_text", "videochat_flash_qwen"};
+    // Models using Qwen-style three-axis mRoPE positions.
+    static constexpr std::array<std::string_view, 13> QwenVL = {"bailing_moe_v3_vl", "fara", "qwen2_5_vl_text", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_text", "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5_text", "qwen4_exp", "qwen4_exp_text", "videochat_flash_qwen"};
     return std::find(QwenVL.begin(), QwenVL.end(), model_type) != QwenVL.end();
   }
 

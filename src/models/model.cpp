@@ -1123,10 +1123,9 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Qwen38GraphModel>(std::move(config), ort_env);
   if (text_only)
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
-  if ((config->model.type == "qwen3_5" || config->model.type == "qwen3_5_moe" || config->model.type == "qwen4_exp") &&
-      config->engine.dynamic_batching) {
+  if (ModelType::IsVLM(config->model.type) && config->engine.dynamic_batching) {
     if (config->model.vision.filename.empty()) {
-      throw std::runtime_error("Packed Qwen vision requires an exported vision encoder.");
+      throw std::runtime_error("Packed vision requires an exported vision encoder.");
     }
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   }

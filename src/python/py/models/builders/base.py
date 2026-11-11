@@ -354,6 +354,7 @@ class Model:
             "create_caches": True,                           # Create cos/sin caches for rotary embeddings
             "save_caches": True,                             # Auto-save cos/sin caches for rotary embeddings after creation
             "cache_length": self.context_length,             # Cache length to use when creating cos/sin caches for rotary embeddings
+            "position_start": 0,  # First signed coordinate represented by the rotary cache
             "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
             "interleaved": 0,                                # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
@@ -3593,7 +3594,8 @@ class Model:
             weight_name = "model.embed_tokens.weight_Q8"
             scales_name = "model.embed_tokens.weight_scales"
             self.make_initializer(quantized_weight, weight_name)
-            self.make_initializer(scales, scales_name, to=self.io_dtype)
+            lookup_dtype = ir.DataType.FLOAT if self.io_dtype == ir.DataType.BFLOAT16 else self.io_dtype
+            self.make_initializer(scales, scales_name, to=lookup_dtype)
 
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
@@ -3613,6 +3615,11 @@ class Model:
                 gather_axis=0,
                 quantize_axis=1,
             )
+            if lookup_dtype != self.io_dtype:
+                self.make_value(gather_output, lookup_dtype, shape=self.make_hidden_state_shape())
+                cast_name = f"{gather_name}/Cast"
+                self.make_cast(cast_name, gather_output, self.io_dtype, shape=self.make_hidden_state_shape())
+                gather_output = f"{cast_name}/output_0"
 
         else:
             weight = "model.embed_tokens.weight"
@@ -3935,9 +3942,8 @@ class Model:
             inv_freq = self.make_inv_freq_rescaled(inv_freq)
 
         position_scale = self.rope_attrs["position_scale"] if self.context_length == self.original_context_length else 1
-        t = (torch.arange(self.rope_attrs["cache_length"], dtype=self.rope_attrs["t_dtype"]) * position_scale).type_as(
-            inv_freq
-        )
+        t = torch.arange(self.rope_attrs["cache_length"], dtype=self.rope_attrs["t_dtype"])
+        t = ((t + self.rope_attrs.get("position_start", 0)) * position_scale).type_as(inv_freq)
 
         freqs = torch.outer(t, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
@@ -5997,7 +6003,7 @@ class Model:
             names[f"{key}_bias"] = f"{prefix}.bias"
         return names
 
-    def make_interleaved_swiglu_moe_preprocessing(self, layer_id, moe):
+    def make_interleaved_swiglu_moe_preprocessing(self, layer_id, moe, intermediate_size):
         """Emit the expert initializers for a bias-free SwiGLU MoE layer with fused gate/up experts.
 
         Hugging Face stores ``[gate | up]`` concatenated along the output axis of ``gate_up_proj``
@@ -6019,9 +6025,7 @@ class Model:
 
         names = self.make_moe_expert_names(layer_id)
         num_experts = self.moe_attrs["num_experts"]
-        self.make_initializer(
-            torch.zeros(num_experts, 2 * self.moe_intermediate_size), names["gate_up_bias"], to=self.io_dtype
-        )
+        self.make_initializer(torch.zeros(num_experts, 2 * intermediate_size), names["gate_up_bias"], to=self.io_dtype)
         self.make_initializer(torch.zeros(num_experts, self.hidden_size), names["down_bias"], to=self.io_dtype)
 
     def make_moe_expert_initializers(self, layer_id, experts, gate_up_weight=None, down_weight=None):
@@ -6134,9 +6138,10 @@ class Model:
         ]
         output = f"{name}/output_0"
 
-        extra_kwargs = (
-            {"swiglu_limit": self.moe_attrs["swiglu_limit"]} if self.moe_attrs["swiglu_limit"] is not None else {}
-        )
+        limit = kwargs.get("swiglu_limit", self.moe_attrs["swiglu_limit"])
+        extra_kwargs = {"swiglu_limit": limit} if limit is not None else {}
+        if "swiglu_limit_after_activation" in kwargs:
+            extra_kwargs["swiglu_limit_after_activation"] = kwargs["swiglu_limit_after_activation"]
         self.make_node(
             "MoE",
             inputs=inputs,
@@ -6244,9 +6249,10 @@ class Model:
 
         output = f"{name}/output_0"
 
-        extra_kwargs = (
-            {"swiglu_limit": self.moe_attrs["swiglu_limit"]} if self.moe_attrs["swiglu_limit"] is not None else {}
-        )
+        limit = kwargs.get("swiglu_limit", self.moe_attrs["swiglu_limit"])
+        extra_kwargs = {"swiglu_limit": limit} if limit is not None else {}
+        if "swiglu_limit_after_activation" in kwargs:
+            extra_kwargs["swiglu_limit_after_activation"] = kwargs["swiglu_limit_after_activation"]
 
         # Only include block_size attribute if it was set
         if "block_size" in self.moe_attrs:

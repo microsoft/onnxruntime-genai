@@ -635,7 +635,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
         return layer.mlp
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
-        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
+        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe, self.moe_intermediate_size)
 
     def make_moe_router(self, layer_id, moe, root_input):
         basename = f"/model/layers.{layer_id}/moe"
