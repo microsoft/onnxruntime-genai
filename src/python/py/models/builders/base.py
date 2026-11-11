@@ -1606,12 +1606,17 @@ class Model:
 
         Configs such as Mistral and Phi-3 only carry `sliding_window`, which Hugging Face
         applies to every layer. `use_sliding_window=False` (Qwen) or a missing/non-positive window
-        means full attention.
+        means full attention. So does a window that is at least the context length (for example
+        Phi-4-mini's 262144 with a 131072 context): it never masks anything, and the windowed KV
+        cache on CUDA would require a cache at least that large.
         """
         sliding_window = getattr(config, "sliding_window", None)
-        if getattr(config, "use_sliding_window", True) and isinstance(sliding_window, int) and sliding_window > 0:
-            return "sliding_attention"
-        return "full_attention"
+        if not (getattr(config, "use_sliding_window", True) and isinstance(sliding_window, int) and sliding_window > 0):
+            return "full_attention"
+        context_length = getattr(self, "context_length", None)
+        if isinstance(context_length, int) and sliding_window >= context_length:
+            return "full_attention"
+        return "sliding_attention"
 
     def is_local(self, layer_id):
         """Return whether Hugging Face marks this layer as sliding-window attention."""
