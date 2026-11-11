@@ -184,7 +184,7 @@ struct PlaneHostBuffer {
 
 // The encoding of the shards of a PLE table, which the `format` line of its description names (fp8, int8, iq4_nl, q8_0). A
 // description without that line is FP8 when its scale is positive and INT8 when it is negative, as every table was before the
-// line existed (but for the scales -8 and -20, see ParseQwen38PleDescription).
+// line existed: only the line selects a GGUF format.
 enum class Qwen38PleFormat {
   kFp8,    // FP8 E4M3 codes times the scale, which is positive
   kInt8,   // int8 values times |scale|: the scale line holds the negative of the dequantization scale
@@ -211,15 +211,14 @@ struct Qwen38PleDescription {
 // heads_per_ngram, eos, scale, mult (4 values), vocab and offset (n_heads values each, after n_heads), shard (path, byte
 // offset and row count of one shard, in row order) and format.
 // The optional `format` line (at most one: fp8, int8, iq4_nl or q8_0) decides the encoding of the shards. Without it the sign
-// of the scale does, as before the line existed: positive for FP8 shards, negative for INT8 shards, whose scale line holds the
-// negative of the dequantization scale. A scale of exactly -8 or -20 without a format line is refused, since the GGUF tables
-// that predate the line marked Q8_0 and IQ4_NL shards with them. FP8 and INT8 tables need a finite scale line of that sign
-// (a format line has to agree with it). The GGUF formats keep an fp16 scale in every block: their scale line is optional and
-// its value is ignored, and their head_dim has to be a multiple of 32, the values of a block.
+// of the scale does, whatever its value, as before the line existed: positive for FP8 shards, negative for INT8 shards, whose
+// scale line holds the negative of the dequantization scale. A GGUF table therefore has to carry its format line. FP8 and INT8
+// tables need a finite scale line of that sign (a format line has to agree with it). The GGUF formats keep an fp16 scale in
+// every block: their scale line is optional and its value is ignored, and their head_dim has to be a multiple of 32, the
+// values of a block.
 // Throws std::runtime_error on a wrong header, a malformed table, a format line that is unknown, repeated or contradicts the
-// scale, a missing, zero or non-finite scale of an FP8 or INT8 table, a scale of -8 or -20 without a format line, or a shard
-// path that is absolute or contains "..": shards must live inside the model folder. Lines may end in LF or CRLF, here and in
-// the two parsers below.
+// scale, a missing, zero or non-finite scale of an FP8 or INT8 table, or a shard path that is absolute or contains "..":
+// shards must live inside the model folder. Lines may end in LF or CRLF, here and in the two parsers below.
 Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& table_path);
 
 // Throws std::runtime_error, naming the missing capability and the library, when `plane` cannot decode the shards of the table:

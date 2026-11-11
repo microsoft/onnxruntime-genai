@@ -676,24 +676,16 @@ Qwen38PleDescription ParseQwen38PleDescription(const std::filesystem::path& tabl
     params.pad_ = QWEN38_PLANE_PLE_PAD_OF_FORMAT(plane_format);
   } else {
     // FP8 and INT8 shards are dequantized with the scale, so a missing, zero or non-finite one would decode every PLE row to
-    // zero or NaN without a diagnostic. Without a format line its sign selects the decoder (positive: FP8; negative: INT8, the
-    // negative of the dequantization scale), as before the format line existed, but for the two scales that GGUF tables were
-    // once marked with; with a format line, the sign has to agree with it.
+    // zero or NaN without a diagnostic. Without a format line the sign of the scale selects the decoder (positive: FP8;
+    // negative: INT8, the negative of the dequantization scale) whatever its value, as it always did, so that a description
+    // that predates the format line keeps its meaning and only a format line selects a GGUF format; with a format line, the
+    // sign has to agree with it.
     if (!unusable_scale_line.empty())
       throw std::runtime_error("qwen38_graph: malformed PLE scale line: " + unusable_scale_line);
     if (!has_scale)
       throw std::runtime_error("qwen38_graph: the PLE table " + table_path.string() +
                                " needs a finite, non-zero scale line (positive for FP8 shards, negative for INT8 shards)");
     if (!has_format) {
-      // The GGUF tables written before the format line existed marked Q8_0 and IQ4_NL shards with these two scales, which are
-      // also valid INT8 scales: such a table has to say which it holds instead of being decoded as either.
-      if (params.scale == -8.0f || params.scale == -20.0f) {
-        const bool q8_0 = params.scale == -8.0f;
-        throw std::runtime_error("qwen38_graph: the PLE table " + table_path.string() + " has scale " +
-                                 (q8_0 ? "-8.0" : "-20.0") + " without a format line; add `format " +
-                                 (q8_0 ? "q8_0` (GGUF Q8_0 blocks)" : "iq4_nl` (GGUF IQ4_NL blocks)") +
-                                 " or `format int8` (INT8 rows with scale " + (q8_0 ? "8.0" : "20.0") + ")");
-      }
       description.format = params.scale > 0.0f ? Qwen38PleFormat::kFp8 : Qwen38PleFormat::kInt8;
     } else if (description.format == Qwen38PleFormat::kFp8 && params.scale < 0.0f) {
       throw std::runtime_error("qwen38_graph: the PLE table " + table_path.string() +
