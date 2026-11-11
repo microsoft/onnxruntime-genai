@@ -274,7 +274,8 @@ class LFM3Model(LFM2Model):
     - RoPE per attention layer type (nested `rope_parameters`). The full-attention layers rotate only
       a prefix of the frequencies of the full head dim and leave a zero-frequency tail, like Gemma4's
       proportional RoPE, so the tail is baked into a full-width cos/sin cache;
-    - a sigmoid output gate per head (`gate_proj`) applied before `o_proj`;
+    - a sigmoid output gate per head (`g_proj` in transformers, `gate_proj` in the checkpoints' code) applied
+      before `o_proj`;
     - sandwich norms (`post_operator_norm`, `post_ffn_norm`), see `LFM2Model.make_post_norm`.
 
     d1-2B's full-attention layers read the whole prompt both ways; its other layers stay causal.
