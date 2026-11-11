@@ -28,5 +28,12 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
+
+    <None Include="$(MSBuildThisFileDirectory)..\..\runtimes\win-arm64\native\onnxruntime-genai-cuda.dll"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\runtimes\win-arm64\native\onnxruntime-genai-cuda.dll') AND '$(PlatformTarget)' == 'ARM64'">
+      <Link>onnxruntime-genai-cuda.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
   </ItemGroup>
 </Project>

@@ -1,0 +1,2076 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#include "fixed_state_pool.h"
+
+#include <algorithm>
+#include <array>
+#include <exception>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <unordered_set>
+#include <utility>
+
+#include "generator/generators.h"
+#include "../models/model.h"
+#include "../models/model_state_manifest.h"
+#include "request_index.h"
+#include "../models/utils.h"
+
+namespace Generators {
+namespace {
+
+using StateGroupKind = Config::Model::Decoder::StateGroupKind;
+
+class FixedStateCheckpointCaptureError final
+    : public std::exception,
+      public std::nested_exception {
+ public:
+  const char* what() const noexcept override {
+    return "Failed to capture a fixed state prefix checkpoint.";
+  }
+};
+
+std::string ExpandBinding(const std::string& binding, int layer_id) {
+  std::string name{binding};
+  name.replace(name.find("%d"), 2, std::to_string(layer_id));
+  return name;
+}
+
+struct FixedStateTemplate {
+  const std::string* input;
+  const std::string* output;
+  bool initialize_to_ple_token_pad_id{};
+  bool share_past_present_buffer{};
+};
+
+std::vector<FixedStateTemplate> FixedStateTemplates(
+    const Config::Model::Decoder& decoder,
+    StateGroupKind kind) {
+  if (kind == StateGroupKind::FixedConv) {
+    return {{&decoder.inputs.past_conv_names, &decoder.outputs.present_conv_names}};
+  }
+  if (kind == StateGroupKind::FixedRecurrent) {
+    return {{&decoder.inputs.past_recurrent_names, &decoder.outputs.present_recurrent_names}};
+  }
+  if (kind == StateGroupKind::FixedPle) {
+    return {
+        {&decoder.inputs.past_ple_token_names, &decoder.outputs.present_ple_token_names, true},
+        {&decoder.inputs.past_ple_conv_names, &decoder.outputs.present_ple_conv_names},
+    };
+  }
+  if (kind == StateGroupKind::FixedIndexer) {
+    return {
+        {&decoder.inputs.past_indexer_names, &decoder.outputs.present_indexer_names, false, true},
+        {&decoder.inputs.past_indexer_kv_buffer_names, &decoder.outputs.present_indexer_kv_buffer_names},
+        {&decoder.inputs.past_indexer_state_lengths_names, &decoder.outputs.present_indexer_state_lengths_names},
+    };
+  }
+  throw std::logic_error("Fixed state pool received a non-fixed state group.");
+}
+
+size_t CheckedMultiply(size_t left, size_t right, std::string_view description) {
+  if (left != 0 && right > std::numeric_limits<size_t>::max() / left) {
+    throw std::runtime_error(
+        "Fixed state " + std::string{description} + " exceeds addressable memory.");
+  }
+  return left * right;
+}
+
+size_t CheckedAdd(size_t left, size_t right, std::string_view description) {
+  if (right > std::numeric_limits<size_t>::max() - left) {
+    throw std::runtime_error(
+        "Fixed state " + std::string{description} + " exceeds addressable memory.");
+  }
+  return left + right;
+}
+
+std::vector<int64_t> StorageShape(size_t rows,
+                                  std::span<const int64_t> session_shape) {
+  std::vector<int64_t> shape{session_shape.begin(), session_shape.end()};
+  shape[0] = static_cast<int64_t>(rows);
+  return shape;
+}
+
+struct PrefixCheckpointOwner {
+  FixedStatePool* pool{};
+};
+
+}  // namespace
+
+void ValidateFixedStateUpdateElementSize(
+    Config::Model::Decoder::StateUpdateKind kind, size_t element_size) {
+  using Kind = Config::Model::Decoder::StateUpdateKind;
+  if (kind == Kind::CausalConv && element_size != 2 && element_size != 4) {
+    throw std::runtime_error(
+        "Causal convolution state_update supports only 2-byte and 4-byte elements.");
+  }
+  if (kind == Kind::Indexer && element_size != 2 && element_size != 4) {
+    throw std::runtime_error(
+        "Indexer state_update supports only 2-byte and 4-byte elements.");
+  }
+  if (kind == Kind::Ple && element_size != 2 && element_size != 4 && element_size != 8) {
+    throw std::runtime_error(
+        "PLE snapshot state_update supports only 2-byte, 4-byte and 8-byte elements.");
+  }
+}
+
+FixedStateGeometry ValidateFixedStateGeometry(std::string_view input_name,
+                                              ONNXTensorElementDataType input_type,
+                                              std::span<const int64_t> input_shape,
+                                              std::string_view output_name,
+                                              ONNXTensorElementDataType output_type,
+                                              std::span<const int64_t> output_shape) {
+  if (input_type != output_type) {
+    throw std::runtime_error(
+        "Fixed state binding '" + std::string{input_name} + "' and '" +
+        std::string{output_name} + "' have mismatched dtypes.");
+  }
+  if (input_shape.empty()) {
+    throw std::runtime_error(
+        "Fixed state input '" + std::string{input_name} +
+        "' must have a request batch dimension.");
+  }
+  if (input_shape.size() != output_shape.size()) {
+    throw std::runtime_error(
+        "Fixed state binding '" + std::string{input_name} + "' rank " +
+        std::to_string(input_shape.size()) + " does not match output '" +
+        std::string{output_name} + "' rank " +
+        std::to_string(output_shape.size()) + ".");
+  }
+
+  // Axis 0 is the per-request batch axis. It may be dynamic (< 0 for symbolic dimensions) or a
+  // positive fixed extent, but a fixed zero batch is never serviceable.
+  const auto to_fixed = [](int64_t extent) -> size_t {
+    return extent > 0 ? static_cast<size_t>(extent) : 0;
+  };
+  if (input_shape[0] == 0 || output_shape[0] == 0) {
+    throw std::runtime_error(
+        "Fixed state binding '" + std::string{input_name} +
+        "' declares a zero-length batch dimension.");
+  }
+  const size_t input_fixed_batch = to_fixed(input_shape[0]);
+  const size_t output_fixed_batch = to_fixed(output_shape[0]);
+  if (input_fixed_batch != 0 && output_fixed_batch != 0 &&
+      input_fixed_batch != output_fixed_batch) {
+    throw std::runtime_error(
+        "Fixed state binding '" + std::string{input_name} +
+        "' has asymmetric fixed batch dimensions between input and output.");
+  }
+
+  // Every non-batch axis must be statically known, positive, and identical on input and output;
+  // rows are copied and gathered by exact byte size, so a dynamic or mismatched non-batch axis
+  // cannot be sized.
+  size_t row_element_count = 1;
+  for (size_t axis = 1; axis < input_shape.size(); ++axis) {
+    if (input_shape[axis] <= 0) {
+      throw std::runtime_error(
+          "Fixed state input '" + std::string{input_name} +
+          "' has unsupported dynamic dimension at axis " + std::to_string(axis) + ".");
+    }
+    if (output_shape[axis] != input_shape[axis]) {
+      throw std::runtime_error(
+          "Fixed state binding '" + std::string{input_name} +
+          "' has incompatible non-batch geometry with output '" +
+          std::string{output_name} + "' at axis " + std::to_string(axis) + ".");
+    }
+    row_element_count = CheckedMultiply(
+        row_element_count, static_cast<size_t>(input_shape[axis]), "row element count");
+  }
+
+  // A fixed batch on either side constrains the whole binding: even if the input axis is symbolic,
+  // a fixed output axis means the session only accepts that exact batch, so the pool must adopt and
+  // enforce it rather than treating the batch as free.
+  const size_t fixed_batch = input_fixed_batch != 0 ? input_fixed_batch : output_fixed_batch;
+  return FixedStateGeometry{row_element_count, fixed_batch};
+}
+
+// Tensor views and binding descriptors of one reservation layout. They depend only on the row
+// count, the direct-binding bank and first slot, and whether compact updates are captured, and they
+// only view persistent pool buffers, so the pool reuses them across reservations instead of
+// rebuilding several hundred OrtValues on every decode step.
+struct FixedStateReservationViews {
+  struct StateUpdateTensors {
+    std::unique_ptr<OrtValue> value;
+    std::unique_ptr<OrtValue> capsule;
+  };
+
+  std::vector<std::shared_ptr<OrtValue>> binding_backing;
+  std::vector<std::unique_ptr<OrtValue>> gathered_inputs;
+  std::vector<std::unique_ptr<OrtValue>> staged_outputs;
+  std::unique_ptr<OrtValue> state_update_capture_count;
+  std::unique_ptr<OrtValue> state_update_active;
+  std::vector<StateUpdateTensors> state_update_tensors;
+  // The views own the binding name strings, and every reservation holds its views, so accessors
+  // stay valid even after the pool is destroyed; FixedStateBinding::input_name/output_name point
+  // into these.
+  std::vector<std::string> input_names;
+  std::vector<std::string> output_names;
+  std::string state_update_capture_count_name;
+  std::string state_update_active_name;
+  std::vector<std::string> state_update_value_names;
+  std::vector<std::string> state_update_capsule_names;
+  std::vector<FixedStateBinding> bindings;
+  size_t staging_bytes{};
+};
+
+struct FixedStateReservation::Storage {
+  std::shared_ptr<Model> model_keepalive;
+  std::vector<FixedStateSlotHandle> handles;
+  std::vector<bool> provisional;
+  std::vector<uint64_t> expected_state_generations;
+  std::vector<uint64_t> target_tokens;
+  std::vector<size_t> capture_counts;
+  std::vector<size_t> commit_step_tokens;
+  std::vector<size_t> commit_kept_tokens;
+  std::shared_ptr<FixedStateReservationViews> views;
+  bool captures_state_updates{};
+  bool uses_direct_bindings{};
+  uint8_t direct_active_bank{};
+  size_t first_direct_slot{};
+};
+
+struct FixedStatePool::Impl {
+  struct StateUpdateOutputSpec {
+    std::string name;
+    ONNXTensorElementDataType data_type{};
+    std::vector<int64_t> session_shape;
+    size_t row_bytes{};
+  };
+
+  struct TensorSpec {
+    StateGroupKind kind{};
+    int layer_id{};
+    size_t component_index{};
+    std::string input_name;
+    std::string output_name;
+    ONNXTensorElementDataType data_type{};
+    std::vector<int64_t> session_shape;
+    size_t row_bytes{};
+    std::optional<int64_t> initial_int64_value;
+    bool share_past_present_buffer{};
+    Config::Model::Decoder::StateUpdateKind state_update_kind{};
+    bool state_update_enabled{};
+    size_t state_update_capacity{};
+    std::string state_update_capture_count_name;
+    std::string state_update_active_name;
+    StateUpdateOutputSpec state_update_value;
+    StateUpdateOutputSpec state_update_capsule;
+    size_t state_update_row_bytes{};
+    size_t state_update_channel_count{};
+    size_t state_update_state_width{};
+    size_t state_update_key_width{};
+    size_t state_update_key_head_count{};
+    size_t state_update_state_capacity{};
+    size_t state_update_compress_ratio{};
+    // Fixed state normally uses two persistent [capacity, row...] banks. Append-only indexer keys
+    // may share those bank handles because separately published lengths govern their visibility.
+    std::array<std::shared_ptr<OrtValue>, 2> banks;
+    std::shared_ptr<OrtValue> checkpoint_bank;
+    std::unique_ptr<OrtValue> zero_row;  // [1, row...] reusable zeroed gather source.
+    // Capacity-sized backing storage shared by the single live reservation. Reservations expose
+    // exact-row tensor views over these buffers, so staging allocation is paid before paged KV
+    // auto-sizing and cannot fail after a step is planned.
+    std::shared_ptr<OrtValue> gathered_staging;
+    std::shared_ptr<OrtValue> output_staging;
+    std::shared_ptr<OrtValue> state_update_value_staging;
+    std::shared_ptr<OrtValue> state_update_capsule_staging;
+  };
+
+  struct Slot {
+    const void* request_id{};
+    uint64_t generation{};
+    uint64_t state_generation{};
+    uint64_t committed_tokens{};
+    uint64_t reservation_id{};
+    uint8_t active_bank{};  // Which persistent bank currently holds this slot's visible state.
+    FixedStateSlotOwnership ownership{FixedStateSlotOwnership::Free};
+  };
+
+  struct PrefixCheckpointSlot {
+    uint64_t generation{};
+    size_t token_count{};
+    bool occupied{};
+  };
+
+  explicit Impl(std::shared_ptr<Model> model_value, size_t capacity_value,
+                size_t checkpoint_capacity_value)
+      : model{std::move(model_value)},
+        device{model ? model->p_device_kvcache_ : nullptr},
+        capacity{capacity_value},
+        slots(capacity_value),
+        committed_index(capacity_value),
+        prefix_checkpoints(checkpoint_capacity_value),
+        checkpoint_owner(std::make_shared<PrefixCheckpointOwner>()) {}
+
+  Slot* FindSlot(const void* request_id) {
+    const auto index = committed_index.Find(request_id);
+    return index ? &slots[*index] : nullptr;
+  }
+
+  const Slot* FindSlot(const void* request_id) const {
+    const auto index = committed_index.Find(request_id);
+    return index ? &slots[*index] : nullptr;
+  }
+
+  size_t SlotIndex(const Slot& slot) const {
+    return static_cast<size_t>(&slot - slots.data());
+  }
+
+  void EnsureHealthy() const {
+    if (!healthy) {
+      throw std::logic_error(
+          "Fixed state pool is unhealthy after a failed commit.");
+    }
+  }
+
+  void EnsureIdle() const {
+    if (active_reservation_id != 0) {
+      throw std::logic_error(
+          "Fixed state pool already has a live reservation.");
+    }
+  }
+
+  Slot& ValidateHandle(const FixedStateSlotHandle& handle,
+                       FixedStateSlotOwnership required_ownership) {
+    if (handle.pool != owner || !handle.request_id ||
+        handle.slot >= slots.size()) {
+      throw std::runtime_error("Fixed state slot handle does not belong to this pool.");
+    }
+    auto& slot = slots[handle.slot];
+    if (slot.ownership != required_ownership ||
+        slot.request_id != handle.request_id ||
+        slot.generation != handle.generation) {
+      throw std::runtime_error("Fixed state slot handle is stale.");
+    }
+    return slot;
+  }
+
+  const Slot& ValidateCommittedHandle(
+      const FixedStateSlotHandle& handle) const {
+    if (handle.pool != owner || !handle.request_id ||
+        handle.slot >= slots.size()) {
+      throw std::runtime_error("Fixed state slot handle does not belong to this pool.");
+    }
+    const auto& slot = slots[handle.slot];
+    if (slot.ownership != FixedStateSlotOwnership::Committed ||
+        slot.request_id != handle.request_id ||
+        slot.generation != handle.generation) {
+      throw std::runtime_error("Fixed state slot handle is stale.");
+    }
+    return slot;
+  }
+
+  FixedStateSlotHandle MakeHandle(const Slot& slot) const {
+    return FixedStateSlotHandle{
+        owner, slot.request_id, SlotIndex(slot), slot.generation};
+  }
+
+  size_t FreeSlotCount() const {
+    return static_cast<size_t>(std::count_if(
+        slots.begin(), slots.end(), [](const Slot& slot) {
+          return slot.ownership == FixedStateSlotOwnership::Free;
+        }));
+  }
+
+  // Copies a resident slot's visible (active-bank) state into contiguous batch row `batch_row` of
+  // the gathered input. Enqueues a device copy only.
+  void GatherResidentRow(const TensorSpec& spec, size_t slot_index, uint8_t active_bank,
+                         size_t batch_row, OrtValue& gathered) {
+    auto destination = ByteWrapTensor(*device, gathered)
+                           .subspan(batch_row * spec.row_bytes, spec.row_bytes);
+    const auto source = ByteWrapTensor(*device, *spec.banks[active_bank])
+                            .subspan(slot_index * spec.row_bytes, spec.row_bytes);
+    destination.CopyFrom(source);
+  }
+
+  void GatherZeroRow(const TensorSpec& spec, size_t batch_row, OrtValue& gathered) {
+    auto destination = ByteWrapTensor(*device, gathered)
+                           .subspan(batch_row * spec.row_bytes, spec.row_bytes);
+    const auto source = ByteWrapTensor(*device, *spec.zero_row);
+    destination.CopyFrom(source);
+  }
+
+  void GatherCheckpointRow(const TensorSpec& spec, size_t checkpoint_slot,
+                           size_t batch_row, OrtValue& gathered) {
+    auto destination = ByteWrapTensor(*device, gathered)
+                           .subspan(batch_row * spec.row_bytes, spec.row_bytes);
+    const auto source = ByteWrapTensor(*device, *spec.checkpoint_bank)
+                            .subspan(checkpoint_slot * spec.row_bytes, spec.row_bytes);
+    destination.CopyFrom(source);
+  }
+
+  // Stages a committed batch row into the slot's inactive persistent bank. The active bank (the
+  // visible state) is untouched, so this device copy is fully reversible until PublishCommit flips
+  // the slot to `inactive_bank`.
+  void StageRowIntoInactiveBank(const TensorSpec& spec, size_t slot_index, uint8_t inactive_bank,
+                                size_t batch_row, OrtValue& staged) {
+    auto destination = ByteWrapTensor(*device, *spec.banks[inactive_bank])
+                           .subspan(slot_index * spec.row_bytes, spec.row_bytes);
+    const auto source = ByteWrapTensor(*device, staged)
+                            .subspan(batch_row * spec.row_bytes, spec.row_bytes);
+    destination.CopyFrom(source);
+  }
+
+  // Launches the compact-update replay the last PrepareCommit deferred. Replay only rewrites the
+  // banks that commit published, and every later reader of a bank (the next reservation's bindings,
+  // gathers, normalization, and checkpoint copies) is issued behind this launch on the same stream.
+  // Deferring it from PrepareCommit to the next pool operation lets it run while the host prepares
+  // the next step instead of stalling the host right after the verify pass.
+  void FlushDeferredReplay() {
+    if (deferred_replay.empty()) {
+      return;
+    }
+    try {
+      device->ReplayStateUpdates(deferred_replay.data(), deferred_replay.size());
+    } catch (...) {
+      // The replayed banks were already published, so a failed launch leaves visible state
+      // unwritten.
+      deferred_replay.clear();
+      healthy = false;
+      throw;
+    }
+    deferred_replay.clear();
+  }
+
+  struct ViewKey {
+    size_t rows{};
+    size_t first_direct_slot{};
+    uint8_t direct_active_bank{};
+    bool direct{};
+    bool captures_state_updates{};
+
+    bool operator==(const ViewKey& other) const {
+      return rows == other.rows && first_direct_slot == other.first_direct_slot &&
+             direct_active_bank == other.direct_active_bank && direct == other.direct &&
+             captures_state_updates == other.captures_state_updates;
+    }
+  };
+  static constexpr size_t kMaxCachedViews = 16;
+
+  std::shared_ptr<FixedStateReservationViews> BuildReservationViews(
+      size_t batch_rows, bool direct_layout, uint8_t direct_active_bank,
+      size_t first_direct_slot, bool capture_state_updates) {
+    auto result = std::make_shared<FixedStateReservationViews>();
+    auto& views = *result;
+    views.binding_backing.reserve(tensors.size() * 4 + 2);
+    views.gathered_inputs.reserve(tensors.size());
+    views.staged_outputs.reserve(tensors.size());
+    views.input_names.reserve(tensors.size());
+    views.output_names.reserve(tensors.size());
+    views.state_update_tensors.reserve(capture_state_updates ? tensors.size() : 0);
+    views.state_update_value_names.reserve(capture_state_updates ? tensors.size() : 0);
+    views.state_update_capsule_names.reserve(capture_state_updates ? tensors.size() : 0);
+    views.bindings.reserve(tensors.size());
+
+    if (state_update_capacity != 0) {
+      views.state_update_capture_count_name = state_update_capture_count_name;
+      const std::array<int64_t, 1> capture_count_shape{static_cast<int64_t>(batch_rows)};
+      views.state_update_capture_count = OrtValue::CreateTensor(
+          state_update_capture_count_staging->GetTensorMemoryInfo(),
+          state_update_capture_count_staging->GetTensorMutableData<void>(),
+          CheckedMultiply(batch_rows, sizeof(int32_t), "capture_count tensor view"),
+          capture_count_shape,
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+      views.binding_backing.push_back(state_update_capture_count_staging);
+      views.staging_bytes = CheckedAdd(
+          views.staging_bytes,
+          CheckedMultiply(batch_rows, sizeof(int32_t), "capture_count staging allocation"),
+          "capture_count staging allocation");
+      if (!state_update_active_name.empty()) {
+        views.state_update_active_name = state_update_active_name;
+        const std::array<int64_t, 1> active_shape{1};
+        views.state_update_active = OrtValue::CreateTensor(
+            state_update_active_staging->GetTensorMemoryInfo(),
+            state_update_active_staging->GetTensorMutableData<void>(),
+            sizeof(int32_t), active_shape,
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+        views.binding_backing.push_back(state_update_active_staging);
+        views.staging_bytes = CheckedAdd(
+            views.staging_bytes, sizeof(int32_t), "state_update active staging allocation");
+      }
+    }
+    for (auto& spec : tensors) {
+      const auto shape = StorageShape(batch_rows, spec.session_shape);
+      const size_t tensor_bytes = CheckedMultiply(
+          batch_rows, spec.row_bytes, "staging tensor view");
+      OrtValue* input_backing =
+          direct_layout ? spec.banks[direct_active_bank].get() : spec.gathered_staging.get();
+      OrtValue* output_backing =
+          direct_layout ? spec.banks[direct_active_bank ^ 1u].get() : spec.output_staging.get();
+      const size_t byte_offset = direct_layout ? first_direct_slot * spec.row_bytes : 0;
+      auto gathered = OrtValue::CreateTensor(
+          input_backing->GetTensorMemoryInfo(),
+          static_cast<uint8_t*>(input_backing->GetTensorMutableData<void>()) + byte_offset,
+          tensor_bytes, shape, spec.data_type);
+      auto staged = OrtValue::CreateTensor(
+          output_backing->GetTensorMemoryInfo(),
+          static_cast<uint8_t*>(output_backing->GetTensorMutableData<void>()) + byte_offset,
+          tensor_bytes, shape, spec.data_type);
+      if (direct_layout) {
+        views.binding_backing.push_back(spec.banks[direct_active_bank]);
+        views.binding_backing.push_back(spec.banks[direct_active_bank ^ 1u]);
+      } else {
+        views.binding_backing.push_back(spec.gathered_staging);
+        views.binding_backing.push_back(spec.output_staging);
+      }
+      FixedStateReservationViews::StateUpdateTensors state_updates;
+      const auto make_update_output_view = [&views, batch_rows, capture_state_updates](
+                                               const StateUpdateOutputSpec& output,
+                                               const std::shared_ptr<OrtValue>& backing) {
+        if (!capture_state_updates || output.name.empty()) {
+          return std::unique_ptr<OrtValue>{};
+        }
+        const size_t tensor_bytes = CheckedMultiply(
+            batch_rows, output.row_bytes, "state_update tensor view");
+        auto view = OrtValue::CreateTensor(
+            backing->GetTensorMemoryInfo(), backing->GetTensorMutableData<void>(),
+            tensor_bytes, StorageShape(batch_rows, output.session_shape), output.data_type);
+        views.binding_backing.push_back(backing);
+        return view;
+      };
+      state_updates.value = make_update_output_view(
+          spec.state_update_value, spec.state_update_value_staging);
+      state_updates.capsule = make_update_output_view(
+          spec.state_update_capsule, spec.state_update_capsule_staging);
+
+      views.staging_bytes = CheckedAdd(
+          views.staging_bytes,
+          CheckedMultiply(
+              CheckedMultiply(batch_rows, spec.row_bytes, "staging allocation"),
+              2, "staging allocation"),
+          "staging allocation");
+      if (capture_state_updates) {
+        views.staging_bytes = CheckedAdd(
+            views.staging_bytes,
+            CheckedMultiply(batch_rows, spec.state_update_row_bytes,
+                            "state_update staging allocation"),
+            "state_update staging allocation");
+      }
+      views.input_names.push_back(spec.input_name);
+      views.output_names.push_back(spec.output_name);
+      const auto keep_update_name = [&](const StateUpdateOutputSpec& output,
+                                        std::vector<std::string>& names) -> const char* {
+        if (!capture_state_updates || output.name.empty()) {
+          return nullptr;
+        }
+        names.push_back(output.name);
+        return names.back().c_str();
+      };
+      const char* state_update_value_name =
+          keep_update_name(spec.state_update_value, views.state_update_value_names);
+      const char* state_update_capsule_name =
+          keep_update_name(spec.state_update_capsule, views.state_update_capsule_names);
+      views.bindings.push_back(FixedStateBinding{
+          spec.kind,
+          spec.layer_id,
+          views.input_names.back().c_str(),
+          gathered.get(),
+          views.output_names.back().c_str(),
+          staged.get(),
+          spec.state_update_kind,
+          spec.state_update_capacity,
+          state_update_capacity != 0 ? views.state_update_capture_count_name.c_str() : nullptr,
+          views.state_update_capture_count.get(),
+          views.state_update_active_name.empty() ? nullptr : views.state_update_active_name.c_str(),
+          views.state_update_active.get(),
+          state_update_value_name,
+          state_updates.value.get(),
+          state_update_capsule_name,
+          state_updates.capsule.get(),
+      });
+      views.gathered_inputs.push_back(std::move(gathered));
+      views.staged_outputs.push_back(std::move(staged));
+      if (capture_state_updates) {
+        views.state_update_tensors.push_back(std::move(state_updates));
+      }
+    }
+    return result;
+  }
+
+  std::shared_ptr<Model> model;
+  DeviceInterface* device{};
+  FixedStatePool* owner{};
+  size_t capacity{};
+  size_t persistent_bytes{};
+  size_t zeroing_scratch_bytes{};
+  size_t active_staging_bytes{};
+  size_t fixed_session_batch_size{};
+  bool state_update_enabled{};
+  size_t state_update_capacity{};
+  std::string state_update_capture_count_name;
+  std::string state_update_active_name;
+  std::shared_ptr<OrtValue> state_update_capture_count_staging;
+  std::shared_ptr<OrtValue> state_update_active_staging;
+  uint64_t next_reservation_id{1};
+  uint64_t active_reservation_id{};
+  bool healthy{true};
+  FixedStateReservation* active_reservation{};
+  std::vector<TensorSpec> tensors;
+  std::vector<Slot> slots;
+  RequestIndex committed_index;
+  std::vector<PrefixCheckpointSlot> prefix_checkpoints;
+  std::shared_ptr<PrefixCheckpointOwner> checkpoint_owner;
+  std::vector<StateUpdateReplayDesc> deferred_replay;
+  std::vector<std::pair<ViewKey, std::shared_ptr<FixedStateReservationViews>>> view_cache;
+};
+
+FixedStateReservation::FixedStateReservation(
+    FixedStatePool& pool,
+    uint64_t reservation_id,
+    std::unique_ptr<Storage> storage)
+    : pool_{&pool},
+      reservation_id_{reservation_id},
+      storage_{std::move(storage)} {
+  pool.impl_->active_reservation = this;
+}
+
+FixedStateReservation::FixedStateReservation(
+    FixedStateReservation&& other) noexcept
+    : pool_{std::exchange(other.pool_, nullptr)},
+      reservation_id_{std::exchange(other.reservation_id_, 0)},
+      storage_{std::move(other.storage_)},
+      state_{std::exchange(other.state_,
+                           FixedStateReservationState::Discarded)} {
+  if (pool_) {
+    pool_->impl_->active_reservation = this;
+  }
+}
+
+FixedStateReservation::~FixedStateReservation() {
+  if (!pool_) {
+    return;
+  }
+  // A reservation holds the pool's single-reservation lock and its staging memory for its whole
+  // lifetime; both are released here. An uncommitted (Reserved or Prepared) reservation is discarded
+  // first so its provisional slots return to the pool; a committed, discarded, or failed reservation
+  // only needs to detach.
+  if (state_ == FixedStateReservationState::Reserved ||
+      state_ == FixedStateReservationState::Prepared) {
+    pool_->Discard(*this);
+  }
+  pool_->Finish(*this);
+}
+
+std::span<const FixedStateSlotHandle> FixedStateReservation::Handles() const {
+  return storage_ ? std::span<const FixedStateSlotHandle>{storage_->handles}
+                  : std::span<const FixedStateSlotHandle>{};
+}
+
+std::span<const FixedStateBinding> FixedStateReservation::Bindings() const {
+  return storage_ ? std::span<const FixedStateBinding>{storage_->views->bindings}
+                  : std::span<const FixedStateBinding>{};
+}
+
+std::span<const uint64_t> FixedStateReservation::TargetTokens() const {
+  return storage_ ? std::span<const uint64_t>{storage_->target_tokens}
+                  : std::span<const uint64_t>{};
+}
+
+size_t FixedStateReservation::PlannedStagingBytes() const {
+  return storage_ ? storage_->views->staging_bytes : 0;
+}
+
+size_t FixedStateReservation::NewSlotCount() const {
+  return storage_
+             ? static_cast<size_t>(std::count(
+                   storage_->provisional.begin(),
+                   storage_->provisional.end(), true))
+             : 0;
+}
+
+bool FixedStateReservation::CapturesStateUpdates() const {
+  return storage_ && storage_->captures_state_updates;
+}
+
+bool FixedStateReservation::UsesDirectBindings() const {
+  return storage_ && storage_->uses_direct_bindings;
+}
+
+size_t FixedStateReservation::BindingLayoutKey() const {
+  if (!storage_) {
+    return 0;
+  }
+  // The compact state_update outputs are present in the bindings only on steps that capture them,
+  // so the two binding sets must never share a graph.
+  const size_t state_updates = storage_->captures_state_updates ? 1 : 0;
+  // Staged bindings always view the same pool-lifetime buffers, so only the direct case contributes
+  // an address. Interleaving keeps both halves distinct.
+  const size_t addresses =
+      storage_->uses_direct_bindings
+          ? 1 + storage_->first_direct_slot * 2 + storage_->direct_active_bank
+          : 0;
+  return 1 + state_updates + addresses * 2;
+}
+
+void FixedStateReservation::CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens) {
+  if (!storage_ || !storage_->captures_state_updates) {
+    throw std::logic_error(
+        "Committing a prefix requires a reservation that captures compact state updates.");
+  }
+  if (state_ != FixedStateReservationState::Reserved) {
+    throw std::logic_error("Fixed state reservation is no longer accepting prefix commits.");
+  }
+  if (row >= storage_->handles.size()) {
+    throw std::out_of_range("Fixed state prefix commit row is out of range.");
+  }
+  if (kept_tokens == 0 || kept_tokens > step_tokens) {
+    throw std::runtime_error(
+        "Fixed state prefix commit must keep between one and step_tokens tokens.");
+  }
+  const size_t capture_count = storage_->capture_counts[row];
+  const bool full_acceptance = kept_tokens == step_tokens;
+  if (capture_count == 0 || step_tokens != capture_count + 1 ||
+      (!full_acceptance && kept_tokens > capture_count)) {
+    throw std::runtime_error(
+        "Compact fixed state prefix commit does not match the row's captured transition count.");
+  }
+  if (storage_->commit_kept_tokens[row] != 0) {
+    throw std::logic_error("Fixed state prefix commit is already set for this row.");
+  }
+  const auto rejected_tokens = static_cast<uint64_t>(step_tokens - kept_tokens);
+  if (rejected_tokens > storage_->target_tokens[row]) {
+    throw std::runtime_error(
+        "Fixed state prefix commit rejects more tokens than the row's step planned.");
+  }
+  storage_->target_tokens[row] -= rejected_tokens;
+  storage_->commit_step_tokens[row] = step_tokens;
+  storage_->commit_kept_tokens[row] = kept_tokens;
+}
+
+void FixedStateReservation::ValidateCommit() const {
+  if (!pool_ || state_ != FixedStateReservationState::Reserved) {
+    throw std::logic_error(
+        "Fixed state reservation can only be validated for commit while reserved.");
+  }
+  pool_->ValidateCommit(*this);
+}
+
+void FixedStateReservation::PrepareCommit() {
+  if (!pool_ || state_ != FixedStateReservationState::Reserved) {
+    throw std::logic_error(
+        "Fixed state reservation can only be prepared for commit once, while reserved.");
+  }
+  pool_->PrepareCommit(*this);
+}
+
+void FixedStateReservation::PublishCommit() noexcept {
+  if (!pool_) {
+    // Losing the pool before publication is a caller lifecycle bug. Silently succeeding here
+    // would let a composite transaction publish its other resources without fixed state.
+    std::terminate();
+  }
+  // PublishCommit must only be reached after a successful PrepareCommit. Anything else is a caller
+  // sequencing bug that would silently diverge fixed state from the rest of a composite commit.
+  if (state_ != FixedStateReservationState::Prepared) {
+    std::terminate();
+  }
+  pool_->PublishCommit(*this);
+}
+
+void FixedStateReservation::Commit() {
+  ValidateCommit();
+  PrepareCommit();
+  PublishCommit();
+}
+
+void FixedStateReservation::Discard() {
+  if (state_ == FixedStateReservationState::Committed) {
+    throw std::logic_error(
+        "Committed fixed state reservation cannot be discarded.");
+  }
+  // Discarding an already-terminal reservation is a harmless no-op. In particular a Failed
+  // reservation already released its provisional slots when PrepareCommit failed, and a reservation
+  // whose pool was destroyed has nothing left to release.
+  if (!pool_ ||
+      state_ == FixedStateReservationState::Discarded ||
+      state_ == FixedStateReservationState::Failed) {
+    return;
+  }
+  // Discard is valid from Reserved or Prepared. Ordinary state only wrote into inactive banks;
+  // shared indexer keys may contain appended data, but the uncommitted lengths keep it invisible.
+  // Nothing has to be undone, and only provisional slots are returned to the pool.
+  pool_->Discard(*this);
+}
+
+size_t FixedStatePool::StateBankBytes(const Model& model, size_t capacity) {
+  const auto& decoder = model.config_->model.decoder;
+  const ModelStateManifest manifest{decoder};
+  size_t bytes = 0;
+  for (const auto& group : manifest.StateGroups()) {
+    if (group.kind != StateGroupKind::FixedConv &&
+        group.kind != StateGroupKind::FixedRecurrent &&
+        group.kind != StateGroupKind::FixedPle &&
+        group.kind != StateGroupKind::FixedIndexer) {
+      continue;
+    }
+    for (const auto& binding : FixedStateTemplates(decoder, group.kind)) {
+      for (const int layer_id : group.layer_ids) {
+        const auto input = ExpandBinding(*binding.input, layer_id);
+        const auto output = ExpandBinding(*binding.output, layer_id);
+        const auto type = model.session_info_.GetInputDataType(input);
+        const auto geometry = ValidateFixedStateGeometry(
+            input, type, model.session_info_.GetInputShape(input),
+            output, model.session_info_.GetOutputDataType(output),
+            model.session_info_.GetOutputShape(output));
+        const size_t row_bytes = CheckedMultiply(geometry.row_element_count,
+                                                 Ort::SizeOf(type), "row size");
+        bytes = CheckedAdd(bytes, CheckedMultiply(capacity, row_bytes, "bank size"),
+                           "bank size");
+      }
+    }
+  }
+  return bytes;
+}
+
+FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
+                               size_t prefix_checkpoint_capacity)
+    : impl_{std::make_unique<Impl>(std::move(model), capacity,
+                                   prefix_checkpoint_capacity)} {
+  if (!impl_->model) {
+    throw std::invalid_argument("Fixed state pool requires a model.");
+  }
+  if (capacity == 0) {
+    throw std::invalid_argument(
+        "Fixed state pool capacity must be positive.");
+  }
+  if (capacity > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+    throw std::invalid_argument(
+        "Fixed state pool capacity exceeds the supported tensor dimension.");
+  }
+  if (!impl_->device) {
+    throw std::runtime_error(
+        "Fixed state pool requires a model state device.");
+  }
+  impl_->owner = this;
+  impl_->checkpoint_owner->pool = this;
+  const ModelStateManifest manifest{impl_->model->config_->model.decoder};
+  manifest.ValidateSession(impl_->model->session_info_);
+
+  const auto& decoder = impl_->model->config_->model.decoder;
+  for (const auto& group : manifest.StateGroups()) {
+    if (group.kind != StateGroupKind::FixedConv &&
+        group.kind != StateGroupKind::FixedRecurrent &&
+        group.kind != StateGroupKind::FixedPle &&
+        group.kind != StateGroupKind::FixedIndexer) {
+      continue;
+    }
+    const auto binding_templates = FixedStateTemplates(decoder, group.kind);
+    for (const int layer_id : group.layer_ids) {
+      for (size_t component_index = 0; component_index < binding_templates.size(); ++component_index) {
+        const auto& binding_template = binding_templates[component_index];
+        Impl::TensorSpec spec;
+        spec.kind = group.kind;
+        spec.layer_id = layer_id;
+        spec.component_index = component_index;
+        spec.input_name = ExpandBinding(*binding_template.input, layer_id);
+        spec.output_name = ExpandBinding(*binding_template.output, layer_id);
+        spec.share_past_present_buffer =
+            binding_template.share_past_present_buffer &&
+            impl_->model->config_->search.past_present_share_buffer &&
+            impl_->device->GetType() == DeviceType::CUDA;
+        if (binding_template.initialize_to_ple_token_pad_id) {
+          spec.initial_int64_value = decoder.ple_token_pad_id;
+        }
+        spec.data_type =
+            impl_->model->session_info_.GetInputDataType(spec.input_name);
+        spec.session_shape =
+            impl_->model->session_info_.GetInputShape(spec.input_name);
+
+        const auto output_type =
+            impl_->model->session_info_.GetOutputDataType(spec.output_name);
+        const auto output_shape =
+            impl_->model->session_info_.GetOutputShape(spec.output_name);
+        const auto geometry = ValidateFixedStateGeometry(
+            spec.input_name, spec.data_type, spec.session_shape,
+            spec.output_name, output_type, output_shape);
+
+        if (geometry.fixed_batch_size != 0) {
+          if (impl_->fixed_session_batch_size != 0 &&
+              impl_->fixed_session_batch_size != geometry.fixed_batch_size) {
+            throw std::runtime_error(
+                "Fixed state inputs declare inconsistent fixed batch dimensions.");
+          }
+          impl_->fixed_session_batch_size = geometry.fixed_batch_size;
+        }
+
+        spec.row_bytes = CheckedMultiply(
+            geometry.row_element_count, Ort::SizeOf(spec.data_type), "row size");
+        if (group.state_update) {
+          const auto& update = *group.state_update;
+          spec.state_update_enabled = update.enabled;
+          if (group.kind == StateGroupKind::FixedConv) {
+            spec.state_update_kind = Config::Model::Decoder::StateUpdateKind::CausalConv;
+          } else if (group.kind == StateGroupKind::FixedRecurrent) {
+            spec.state_update_kind = Config::Model::Decoder::StateUpdateKind::GatedDeltaNet;
+          } else if (group.kind == StateGroupKind::FixedPle) {
+            spec.state_update_kind = component_index == 0
+                                         ? Config::Model::Decoder::StateUpdateKind::Ple
+                                         : Config::Model::Decoder::StateUpdateKind::CausalConv;
+          } else if (component_index == 0) {
+            spec.state_update_kind = Config::Model::Decoder::StateUpdateKind::Indexer;
+          }
+          spec.state_update_capacity = static_cast<size_t>(update.capacity);
+          spec.state_update_capture_count_name = decoder.inputs.state_update_capture_count;
+          spec.state_update_active_name = decoder.inputs.state_update_active;
+
+          const auto load_update_output = [&](const std::string& output_template) {
+            Impl::StateUpdateOutputSpec output;
+            if (output_template.empty()) {
+              return output;
+            }
+            output.name = ExpandBinding(output_template, layer_id);
+            output.data_type = impl_->model->session_info_.GetOutputDataType(output.name);
+            output.session_shape = impl_->model->session_info_.GetOutputShape(output.name);
+            size_t row_elements = 1;
+            for (size_t axis = 1; axis < output.session_shape.size(); ++axis) {
+              if (output.session_shape[axis] <= 0) {
+                throw std::runtime_error(
+                    "Fixed state_update output '" + output.name +
+                    "' has unsupported dynamic non-batch geometry.");
+              }
+              row_elements = CheckedMultiply(
+                  row_elements, static_cast<size_t>(output.session_shape[axis]),
+                  "state_update row element count");
+            }
+            output.row_bytes = CheckedMultiply(
+                row_elements, Ort::SizeOf(output.data_type), "state_update row size");
+            return output;
+          };
+
+          spec.state_update_value = load_update_output(
+              group.kind == StateGroupKind::FixedConv
+                  ? decoder.outputs.state_update_conv_value_names
+              : group.kind == StateGroupKind::FixedPle && component_index == 0
+                  ? decoder.outputs.state_update_ple_token_names
+              : group.kind == StateGroupKind::FixedPle && component_index == 1
+                  ? decoder.outputs.state_update_ple_conv_value_names
+              : group.kind == StateGroupKind::FixedIndexer && component_index == 0
+                  ? decoder.outputs.state_update_indexer_names
+                  : std::string{});
+          spec.state_update_capsule = load_update_output(
+              group.kind == StateGroupKind::FixedRecurrent
+                  ? decoder.outputs.state_update_recurrent_capsule_names
+                  : std::string{});
+          spec.state_update_row_bytes = CheckedAdd(
+              spec.state_update_value.row_bytes, spec.state_update_capsule.row_bytes,
+              "state_update staging allocation");
+          if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::Ple) {
+            spec.state_update_channel_count = 1;
+            spec.state_update_state_width = geometry.row_element_count;
+          } else if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::Indexer) {
+            spec.state_update_state_width = static_cast<size_t>(spec.session_shape[2]);
+            spec.state_update_state_capacity = static_cast<size_t>(spec.session_shape[1]);
+            spec.state_update_compress_ratio = static_cast<size_t>(update.compress_ratio);
+          } else if (spec.state_update_kind != Config::Model::Decoder::StateUpdateKind::Invalid) {
+            spec.state_update_channel_count = static_cast<size_t>(spec.session_shape[1]);
+            spec.state_update_state_width = static_cast<size_t>(spec.session_shape[2]);
+          }
+          ValidateFixedStateUpdateElementSize(spec.state_update_kind, Ort::SizeOf(spec.data_type));
+          if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::GatedDeltaNet) {
+            spec.state_update_key_width = static_cast<size_t>(spec.session_shape[3]);
+            spec.state_update_key_head_count = static_cast<size_t>(update.key_head_count);
+          }
+        }
+        const size_t state_allocation_count = spec.share_past_present_buffer ? 2 : 4;
+        impl_->persistent_bytes = CheckedAdd(
+            impl_->persistent_bytes,
+            CheckedMultiply(CheckedMultiply(capacity, spec.row_bytes, "persistent allocation"),
+                            state_allocation_count, "persistent allocation"),
+            "persistent allocation");
+        impl_->persistent_bytes = CheckedAdd(
+            impl_->persistent_bytes,
+            CheckedMultiply(prefix_checkpoint_capacity, spec.row_bytes,
+                            "prefix checkpoint allocation"),
+            "prefix checkpoint allocation");
+        impl_->persistent_bytes = CheckedAdd(
+            impl_->persistent_bytes,
+            CheckedMultiply(capacity, spec.state_update_row_bytes,
+                            "state_update persistent allocation"),
+            "state_update persistent allocation");
+        impl_->zeroing_scratch_bytes = CheckedAdd(
+            impl_->zeroing_scratch_bytes, spec.row_bytes,
+            "zeroing scratch allocation");
+
+        impl_->tensors.push_back(std::move(spec));
+      }
+    }
+  }
+
+  if (impl_->tensors.empty()) {
+    throw std::runtime_error(
+        "Fixed state pool requires at least one fixed state binding.");
+  }
+  const bool state_update_enabled = impl_->tensors.front().state_update_enabled;
+  const size_t state_update_capacity = impl_->tensors.front().state_update_capacity;
+  const std::string& state_update_capture_count_name =
+      impl_->tensors.front().state_update_capture_count_name;
+  const std::string& state_update_active_name =
+      impl_->tensors.front().state_update_active_name;
+  for (const auto& spec : impl_->tensors) {
+    if (spec.state_update_enabled != state_update_enabled ||
+        spec.state_update_capacity != state_update_capacity ||
+        spec.state_update_capture_count_name != state_update_capture_count_name ||
+        spec.state_update_active_name != state_update_active_name) {
+      throw std::runtime_error(
+          "Fixed state bindings declare inconsistent compact state_update contracts.");
+    }
+  }
+  impl_->state_update_enabled = state_update_enabled;
+  impl_->state_update_capacity = state_update_capacity;
+  impl_->state_update_capture_count_name = state_update_capture_count_name;
+  impl_->state_update_active_name = state_update_active_name;
+  if (!impl_->device->SupportsTransactionalFixedState()) {
+    throw std::runtime_error(
+        "Fixed state pools require qualified transactional device semantics.");
+  }
+  if (SupportsStateUpdates() &&
+      !impl_->device->SupportsCompactStateReplay()) {
+    throw std::runtime_error(
+        "Compact fixed state replay is not supported by this device.");
+  }
+  if (impl_->state_update_capacity != 0) {
+    impl_->persistent_bytes = CheckedAdd(
+        impl_->persistent_bytes,
+        CheckedMultiply(capacity, sizeof(int32_t),
+                        "state_update capture_count persistent allocation"),
+        "state_update capture_count persistent allocation");
+    if (!impl_->state_update_active_name.empty()) {
+      impl_->persistent_bytes = CheckedAdd(
+          impl_->persistent_bytes, sizeof(int32_t),
+          "state_update active persistent allocation");
+    }
+  }
+  if (impl_->fixed_session_batch_size != 0) {
+    throw std::runtime_error(
+        "Dynamic batching requires fixed decoder state groups with a dynamic batch axis, but "
+        "this model declares a fixed (static) batch dimension of " +
+        std::to_string(impl_->fixed_session_batch_size) + ".");
+  }
+
+  // Geometry and compatibility validation is complete. Only now allocate persistent banks,
+  // zero rows, and capacity-sized staging so invalid static-batch models fail before device work.
+  for (auto& spec : impl_->tensors) {
+    const auto bank_shape = StorageShape(capacity, spec.session_shape);
+    const auto zero_shape = StorageShape(1, spec.session_shape);
+    spec.banks[0] = OrtValue::CreateTensor(
+        impl_->device->GetAllocator(), bank_shape, spec.data_type);
+    spec.banks[1] = spec.share_past_present_buffer
+                        ? spec.banks[0]
+                        : OrtValue::CreateTensor(
+                              impl_->device->GetAllocator(), bank_shape, spec.data_type);
+    if (prefix_checkpoint_capacity != 0) {
+      spec.checkpoint_bank = OrtValue::CreateTensor(
+          impl_->device->GetAllocator(),
+          StorageShape(prefix_checkpoint_capacity, spec.session_shape),
+          spec.data_type);
+    }
+    spec.zero_row = OrtValue::CreateTensor(
+        impl_->device->GetAllocator(), zero_shape, spec.data_type);
+    spec.gathered_staging = OrtValue::CreateTensor(
+        impl_->device->GetAllocator(), bank_shape, spec.data_type);
+    spec.output_staging = spec.share_past_present_buffer
+                              ? spec.gathered_staging
+                              : OrtValue::CreateTensor(
+                                    impl_->device->GetAllocator(), bank_shape, spec.data_type);
+    const auto allocate_state_update_staging = [&](const Impl::StateUpdateOutputSpec& output) {
+      if (output.name.empty()) {
+        return std::shared_ptr<OrtValue>{};
+      }
+      return std::shared_ptr<OrtValue>{OrtValue::CreateTensor(
+          impl_->device->GetAllocator(), StorageShape(capacity, output.session_shape),
+          output.data_type)};
+    };
+    spec.state_update_value_staging = allocate_state_update_staging(spec.state_update_value);
+    spec.state_update_capsule_staging = allocate_state_update_staging(spec.state_update_capsule);
+  }
+  if (impl_->state_update_capacity != 0) {
+    const std::array<int64_t, 1> capture_count_shape{static_cast<int64_t>(capacity)};
+    impl_->state_update_capture_count_staging = OrtValue::CreateTensor(
+        impl_->device->GetAllocator(), capture_count_shape,
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    if (!impl_->state_update_active_name.empty()) {
+      const std::array<int64_t, 1> active_shape{1};
+      impl_->state_update_active_staging = OrtValue::CreateTensor(
+          impl_->model->allocator_cpu_, active_shape,
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    }
+  }
+
+  // Allocate and validate every tensor before enqueueing device work. Once the first asynchronous
+  // zero is submitted, any failure must drain the stream before constructor unwinding releases the
+  // zero rows. Persistent banks are not zeroed: a commit writes a bank before it becomes visible.
+  bool device_work_enqueued = false;
+  try {
+    for (auto& spec : impl_->tensors) {
+      device_work_enqueued = true;
+      if (spec.initial_int64_value) {
+        if (spec.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+          throw std::runtime_error(
+              "PLE token state input '" + spec.input_name + "' must have int64 dtype.");
+        }
+        auto values = WrapTensor<int64_t>(*impl_->device, *spec.zero_row);
+        std::fill(values.CpuSpan().begin(), values.CpuSpan().end(), *spec.initial_int64_value);
+        values.CopyCpuToDevice();
+      } else {
+        ByteWrapTensor(*impl_->device, *spec.zero_row).Zero();
+      }
+    }
+    impl_->device->Synchronize();
+  } catch (...) {
+    if (device_work_enqueued) {
+      try {
+        impl_->device->Synchronize();
+      } catch (...) {
+      }
+    }
+    throw;
+  }
+}
+
+FixedStatePool::~FixedStatePool() {
+  impl_->checkpoint_owner->pool = nullptr;
+  // Neutralize a still-live reservation so its accessors stay valid but any further transactional
+  // call fails cleanly. Only an in-flight (Reserved/Prepared) reservation is downgraded to Failed;
+  // a terminal reservation has already detached itself (see Finish) and must keep its final state.
+  if (impl_->active_reservation) {
+    impl_->active_reservation->pool_ = nullptr;
+    impl_->active_reservation->reservation_id_ = 0;
+    if (impl_->active_reservation->state_ == FixedStateReservationState::Reserved ||
+        impl_->active_reservation->state_ == FixedStateReservationState::Prepared) {
+      impl_->active_reservation->state_ = FixedStateReservationState::Failed;
+    }
+    impl_->active_reservation = nullptr;
+  }
+}
+
+size_t FixedStatePool::Capacity() const {
+  return impl_->capacity;
+}
+
+size_t FixedStatePool::AvailableSlots() const {
+  return impl_->FreeSlotCount();
+}
+
+size_t FixedStatePool::CommittedSlotCount() const {
+  return impl_->committed_index.Size();
+}
+
+size_t FixedStatePool::PersistentBytes() const {
+  return impl_->persistent_bytes;
+}
+
+size_t FixedStatePool::ZeroingScratchBytes() const {
+  return impl_->zeroing_scratch_bytes;
+}
+
+size_t FixedStatePool::ActiveStagingBytes() const {
+  return impl_->active_staging_bytes;
+}
+
+size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool captures_state_updates) const {
+  // One input and one output binding per fixed tensor, each `row_count` rows wide, plus compact
+  // capture buffers when requested. Direct views overlap persistent banks; the byte footprint stays
+  // geometry-only so the plan and reservation agree before eligibility is determined.
+  size_t bytes = 0;
+  if (impl_->state_update_capacity != 0) {
+    bytes = CheckedAdd(
+        bytes,
+        CheckedMultiply(row_count, sizeof(int32_t), "capture_count staging allocation"),
+        "capture_count staging allocation");
+    if (!impl_->state_update_active_name.empty()) {
+      bytes = CheckedAdd(bytes, sizeof(int32_t), "state_update active staging allocation");
+    }
+  }
+  for (const auto& spec : impl_->tensors) {
+    bytes = CheckedAdd(
+        bytes,
+        CheckedMultiply(
+            CheckedMultiply(row_count, spec.row_bytes, "staging allocation"),
+            2, "staging allocation"),
+        "staging allocation");
+    if (captures_state_updates) {
+      bytes = CheckedAdd(
+          bytes,
+          CheckedMultiply(row_count, spec.state_update_row_bytes,
+                          "state_update staging allocation"),
+          "state_update staging allocation");
+    }
+  }
+  return bytes;
+}
+
+bool FixedStatePool::SupportsStateUpdates() const {
+  return impl_->state_update_enabled && impl_->state_update_capacity != 0;
+}
+
+size_t FixedStatePool::StateUpdateCapacity() const {
+  return SupportsStateUpdates() ? impl_->state_update_capacity : 0;
+}
+
+size_t FixedStatePool::PrefixCheckpointCapacity() const {
+  return impl_->prefix_checkpoints.size();
+}
+
+size_t FixedStatePool::AvailablePrefixCheckpoints() const {
+  return static_cast<size_t>(std::count_if(
+      impl_->prefix_checkpoints.begin(), impl_->prefix_checkpoints.end(),
+      [](const Impl::PrefixCheckpointSlot& slot) { return !slot.occupied; }));
+}
+
+std::shared_ptr<const FixedStatePrefixCheckpoint>
+FixedStatePool::CapturePrefixCheckpoint(
+    const void* request_id, const FixedStatePrefixCheckpoint* replacement,
+    const std::function<void()>& reclaim_checkpoint) {
+  impl_->EnsureHealthy();
+  impl_->FlushDeferredReplay();
+  const auto committed = CommittedState(request_id);
+  if (!committed) {
+    throw std::runtime_error(
+        "Cannot capture fixed state for a request without committed ownership.");
+  }
+  auto checkpoint_slot = std::find_if(
+      impl_->prefix_checkpoints.begin(), impl_->prefix_checkpoints.end(),
+      [](const Impl::PrefixCheckpointSlot& slot) { return !slot.occupied; });
+  if (checkpoint_slot == impl_->prefix_checkpoints.end()) {
+    if (!replacement) {
+      return nullptr;
+    }
+    if (!reclaim_checkpoint) {
+      throw std::invalid_argument("Replacing a fixed state checkpoint requires reclamation.");
+    }
+    ValidatePrefixCheckpoint(*replacement);
+    checkpoint_slot = impl_->prefix_checkpoints.begin() + replacement->slot_;
+  }
+  if (checkpoint_slot->generation == std::numeric_limits<uint64_t>::max()) {
+    throw std::overflow_error(
+        "Fixed state prefix checkpoint generation is exhausted.");
+  }
+
+  const size_t checkpoint_index = static_cast<size_t>(
+      checkpoint_slot - impl_->prefix_checkpoints.begin());
+  const uint64_t checkpoint_generation = checkpoint_slot->generation + 1;
+  auto owner = impl_->checkpoint_owner;
+  auto lease = std::shared_ptr<void>{
+      new uint8_t{},
+      [owner, checkpoint_index, checkpoint_generation](void* value) noexcept {
+        delete static_cast<uint8_t*>(value);
+        if (owner->pool) {
+          owner->pool->ReleasePrefixCheckpoint(
+              checkpoint_index, checkpoint_generation);
+        }
+      }};
+  auto checkpoint = std::shared_ptr<const FixedStatePrefixCheckpoint>{
+      new FixedStatePrefixCheckpoint{
+          this, checkpoint_index, checkpoint_generation,
+          static_cast<size_t>(committed->committed_tokens), std::move(lease)}};
+
+  const auto& source_slot = impl_->slots[committed->handle.slot];
+  std::vector<std::pair<DeviceSpan<uint8_t>, DeviceSpan<uint8_t>>> copies;
+  copies.reserve(impl_->tensors.size());
+  for (const auto& spec : impl_->tensors) {
+    copies.emplace_back(
+        ByteWrapTensor(*impl_->device, *spec.checkpoint_bank)
+            .subspan(checkpoint_index * spec.row_bytes, spec.row_bytes),
+        ByteWrapTensor(*impl_->device, *spec.banks[source_slot.active_bank])
+            .subspan(committed->handle.slot * spec.row_bytes, spec.row_bytes));
+  }
+  // Checkpoint metadata and tensor wrappers must all exist before a working checkpoint is lost.
+  if (checkpoint_slot->occupied) {
+    reclaim_checkpoint();
+    if (checkpoint_slot->occupied) {
+      throw std::logic_error("Fixed state checkpoint reclamation did not release the selected row.");
+    }
+  }
+  try {
+    for (auto& [destination, source] : copies) {
+      destination.CopyFrom(source);
+    }
+    impl_->device->Synchronize();
+  } catch (...) {
+    impl_->healthy = false;
+    try {
+      impl_->device->Synchronize();
+    } catch (...) {
+    }
+    throw FixedStateCheckpointCaptureError{};
+  }
+
+  checkpoint_slot->generation = checkpoint_generation;
+  checkpoint_slot->token_count =
+      static_cast<size_t>(committed->committed_tokens);
+  checkpoint_slot->occupied = true;
+  return checkpoint;
+}
+
+void FixedStatePool::ValidatePrefixCheckpoint(
+    const FixedStatePrefixCheckpoint& checkpoint) const {
+  if (checkpoint.pool_ != this ||
+      checkpoint.slot_ >= impl_->prefix_checkpoints.size()) {
+    throw std::runtime_error(
+        "Fixed state prefix checkpoint belongs to another pool.");
+  }
+  const auto& slot = impl_->prefix_checkpoints[checkpoint.slot_];
+  if (!slot.occupied ||
+      slot.generation != checkpoint.generation_ ||
+      slot.token_count != checkpoint.token_count_) {
+    throw std::runtime_error("Fixed state prefix checkpoint is stale.");
+  }
+}
+
+void FixedStatePool::ReleasePrefixCheckpoint(
+    size_t slot_index, uint64_t generation) noexcept {
+  if (!impl_ || slot_index >= impl_->prefix_checkpoints.size()) {
+    return;
+  }
+  auto& slot = impl_->prefix_checkpoints[slot_index];
+  if (!slot.occupied || slot.generation != generation) {
+    return;
+  }
+  slot.token_count = 0;
+  slot.occupied = false;
+}
+
+FixedStateSlotHandle FixedStatePool::HandleFor(
+    const void* request_id) const {
+  if (!request_id) {
+    throw std::invalid_argument(
+        "Fixed state slot requires a request identity.");
+  }
+  const auto* slot = impl_->FindSlot(request_id);
+  if (!slot || slot->ownership != FixedStateSlotOwnership::Committed) {
+    throw std::runtime_error(
+        "Request does not own a committed fixed state slot.");
+  }
+  return impl_->MakeHandle(*slot);
+}
+
+bool FixedStatePool::OwnsCommittedSlot(const void* request_id) const {
+  return impl_->committed_index.Find(request_id).has_value();
+}
+
+std::optional<FixedStateCommittedState> FixedStatePool::CommittedState(
+    const void* request_id) const noexcept {
+  const auto index = impl_->committed_index.Find(request_id);
+  if (!index) {
+    return std::nullopt;
+  }
+  const auto& slot = impl_->slots[*index];
+  return FixedStateCommittedState{
+      impl_->MakeHandle(slot), slot.committed_tokens};
+}
+
+FixedStateReservation FixedStatePool::Reserve(
+    std::span<const FixedStateReservationRequest> requests) {
+  impl_->EnsureHealthy();
+  impl_->EnsureIdle();
+  impl_->FlushDeferredReplay();
+  if (requests.empty()) {
+    throw std::invalid_argument(
+        "Fixed state reservation must contain at least one request.");
+  }
+  if (requests.size() > impl_->capacity) {
+    throw std::runtime_error(
+        "Fixed state reservation exceeds pool capacity.");
+  }
+  const bool capture_state_updates = std::any_of(
+      requests.begin(), requests.end(),
+      [](const FixedStateReservationRequest& request) { return request.capture_count != 0; });
+  if (capture_state_updates && !SupportsStateUpdates()) {
+    throw std::runtime_error(
+        impl_->state_update_capacity != 0
+            ? "This model's fixed state bindings disable compact state_update capture."
+            : "This model's fixed state bindings declare no compact state_update outputs.");
+  }
+  if (SupportsStateUpdates()) {
+    for (const auto& request : requests) {
+      if (request.capture_count > impl_->state_update_capacity ||
+          request.capture_count > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::runtime_error(
+            "Fixed state reservation capture_count exceeds state_update capacity.");
+      }
+    }
+  }
+  const uint64_t reservation_id = impl_->next_reservation_id;
+  if (reservation_id == 0 ||
+      reservation_id == std::numeric_limits<uint64_t>::max()) {
+    throw std::overflow_error(
+        "Fixed state reservation generation is exhausted.");
+  }
+
+  // Phase 1: host-only planning. Infer per-request ownership, choose provisional slots, and build
+  // handles. No device work is enqueued and no visible slot state is mutated yet, so any exception
+  // here leaves the pool exactly as it was.
+  struct RowPlan {
+    const void* request_id{};
+    size_t slot_index{};
+    bool provisional{};
+    uint64_t handle_generation{};
+    uint64_t expected_state_generation{};
+    uint64_t target_tokens{};
+    std::shared_ptr<const FixedStatePrefixCheckpoint> prefix_checkpoint;
+  };
+  std::vector<RowPlan> plan;
+  plan.reserve(requests.size());
+  std::unordered_set<const void*> request_ids;
+  request_ids.reserve(requests.size());
+  std::vector<char> slot_taken(impl_->slots.size(), 0);
+  for (const auto& slot : impl_->slots) {
+    if (slot.ownership != FixedStateSlotOwnership::Free) {
+      slot_taken[impl_->SlotIndex(slot)] = 1;
+    }
+  }
+
+  size_t next_free_index = 0;
+  const auto next_free_slot = [&]() -> size_t {
+    while (next_free_index < impl_->slots.size() &&
+           slot_taken[next_free_index]) {
+      ++next_free_index;
+    }
+    if (next_free_index < impl_->slots.size()) {
+      return next_free_index++;
+    }
+    throw std::runtime_error(
+        "Not enough free slots for the complete fixed state reservation.");
+  };
+
+  for (const auto& request : requests) {
+    const void* request_id = request.request_id;
+    if (!request_id || !request_ids.insert(request_id).second) {
+      throw std::runtime_error(
+          "Fixed state reservation contains an invalid or duplicate request.");
+    }
+    const Impl::Slot* slot = impl_->FindSlot(request_id);
+    if (request.prefix_checkpoint) {
+      ValidatePrefixCheckpoint(*request.prefix_checkpoint);
+      if (request.prefix_checkpoint->TokenCount() >= request.target_tokens) {
+        throw std::runtime_error(
+            "A fixed state prefix checkpoint must leave at least one token to execute.");
+      }
+    }
+    RowPlan row;
+    row.request_id = request_id;
+    row.target_tokens = request.target_tokens;
+    if (slot && slot->ownership == FixedStateSlotOwnership::Committed) {
+      if (request.prefix_checkpoint) {
+        throw std::runtime_error(
+            "A resident request cannot adopt a fixed state prefix checkpoint.");
+      }
+      row.slot_index = impl_->SlotIndex(*slot);
+      row.provisional = false;
+      row.handle_generation = slot->generation;
+      row.expected_state_generation = slot->state_generation;
+    } else {
+      const size_t slot_index = next_free_slot();
+      const auto& free_slot = impl_->slots[slot_index];
+      if (free_slot.generation == std::numeric_limits<uint64_t>::max()) {
+        throw std::overflow_error(
+            "Fixed state slot generation is exhausted.");
+      }
+      slot_taken[slot_index] = 1;
+      row.slot_index = slot_index;
+      row.provisional = true;
+      row.handle_generation = free_slot.generation + 1;
+      row.expected_state_generation = 0;
+      row.prefix_checkpoint = request.prefix_checkpoint;
+    }
+    plan.push_back(row);
+  }
+
+  // A free slot's bank selector has no visible meaning. Align every provisional row with a
+  // coherent resident cohort so their first joint commit leaves all rows on the same bank and the
+  // next reservation can use direct bindings. When there are no residents, choose bank zero as the
+  // canonical starting point so reused free slots do not inherit stale parity from prior owners.
+  std::optional<uint8_t> admission_active_bank;
+  bool mixed_resident_banks = false;
+  for (const auto& row : plan) {
+    if (row.provisional) {
+      continue;
+    }
+    const uint8_t active_bank = impl_->slots[row.slot_index].active_bank;
+    if (!admission_active_bank) {
+      admission_active_bank = active_bank;
+    } else if (*admission_active_bank != active_bank) {
+      mixed_resident_banks = true;
+      break;
+    }
+  }
+  const uint8_t provisional_active_bank =
+      mixed_resident_banks ? 0 : admission_active_bank.value_or(0);
+
+  // A contiguous resident interval can bind directly after all rows use the same active bank.
+  // Normalize only minority rows by copying their visible state to the cohort's canonical bank.
+  // The copy does not advance request state: both banks contain the same committed value, and the
+  // host bank selector changes only after every copy completes successfully.
+  bool direct_layout = impl_->device->SupportsOffsetTensorViews();
+  const size_t first_direct_slot = plan.front().slot_index;
+  size_t bank_one_count = 0;
+  for (size_t row = 0; row < plan.size(); ++row) {
+    direct_layout &= !plan[row].provisional &&
+                     plan[row].slot_index == first_direct_slot + row;
+    if (!plan[row].provisional) {
+      bank_one_count += impl_->slots[plan[row].slot_index].active_bank;
+    }
+  }
+  uint8_t direct_active_bank = 0;
+  if (direct_layout) {
+    const size_t bank_zero_count = plan.size() - bank_one_count;
+    direct_active_bank = bank_one_count > bank_zero_count
+                             ? 1
+                         : bank_zero_count > bank_one_count
+                             ? 0
+                             : impl_->slots[first_direct_slot].active_bank;
+    bool normalization_enqueued = false;
+    try {
+      for (const auto& spec : impl_->tensors) {
+        if (spec.share_past_present_buffer) {
+          continue;
+        }
+        for (const auto& row : plan) {
+          const auto& slot = impl_->slots[row.slot_index];
+          if (slot.active_bank == direct_active_bank) {
+            continue;
+          }
+          auto destination = ByteWrapTensor(
+                                 *impl_->device, *spec.banks[direct_active_bank])
+                                 .subspan(row.slot_index * spec.row_bytes, spec.row_bytes);
+          const auto source =
+              ByteWrapTensor(*impl_->device, *spec.banks[slot.active_bank])
+                  .subspan(row.slot_index * spec.row_bytes, spec.row_bytes);
+          destination.CopyFrom(source);
+          normalization_enqueued = true;
+        }
+      }
+      if (normalization_enqueued) {
+        impl_->device->Synchronize();
+        for (const auto& row : plan) {
+          impl_->slots[row.slot_index].active_bank = direct_active_bank;
+        }
+      }
+    } catch (...) {
+      impl_->healthy = false;
+      try {
+        impl_->device->Synchronize();
+      } catch (...) {
+      }
+      throw;
+    }
+  }
+
+  // Phase 2: allocate staging tensors and record binding metadata (host allocations only).
+  auto storage = std::make_unique<FixedStateReservation::Storage>();
+  storage->model_keepalive = impl_->model;
+  storage->handles.resize(requests.size());
+  storage->provisional.resize(requests.size());
+  storage->expected_state_generations.resize(requests.size());
+  storage->target_tokens.resize(requests.size());
+  storage->capture_counts.resize(requests.size());
+  storage->commit_step_tokens.assign(requests.size(), 0);
+  storage->commit_kept_tokens.assign(requests.size(), 0);
+  storage->captures_state_updates = capture_state_updates;
+
+  const size_t batch_rows = requests.size();
+  storage->uses_direct_bindings = direct_layout;
+  storage->direct_active_bank = direct_layout ? direct_active_bank : uint8_t{0};
+  storage->first_direct_slot = direct_layout ? first_direct_slot : size_t{0};
+  const Impl::ViewKey view_key{batch_rows, storage->first_direct_slot,
+                               storage->direct_active_bank, direct_layout,
+                               capture_state_updates};
+  for (const auto& [key, views] : impl_->view_cache) {
+    if (key == view_key) {
+      storage->views = views;
+      break;
+    }
+  }
+  if (!storage->views) {
+    storage->views = impl_->BuildReservationViews(batch_rows, direct_layout, direct_active_bank,
+                                                  first_direct_slot, capture_state_updates);
+    if (impl_->view_cache.size() >= Impl::kMaxCachedViews) {
+      impl_->view_cache.erase(impl_->view_cache.begin());
+    }
+    impl_->view_cache.emplace_back(view_key, storage->views);
+  }
+  auto& views = *storage->views;
+  if (views.state_update_active) {
+    views.state_update_active->GetTensorMutableData<int32_t>()[0] =
+        capture_state_updates ? 1 : 0;
+  }
+
+  for (size_t row = 0; row < plan.size(); ++row) {
+    storage->handles[row] = FixedStateSlotHandle{
+        this, plan[row].request_id, plan[row].slot_index,
+        plan[row].handle_generation};
+    storage->provisional[row] = plan[row].provisional;
+    storage->expected_state_generations[row] =
+        plan[row].expected_state_generation;
+    storage->target_tokens[row] = plan[row].target_tokens;
+    storage->capture_counts[row] = requests[row].capture_count;
+  }
+
+  // Phase 3: enqueue the gather copies, then synchronize. Once device work is in flight the staging
+  // buffers must outlive it, so a failure drains the device before the buffers unwind and marks the
+  // pool unhealthy. No visible slot state has changed yet, so there is nothing to roll back. On CUDA,
+  // direct bindings gather nothing and the capture-count upload reads a pooled pinned mirror that is
+  // only recycled after the copy completes, so that path does not wait for the device.
+  DeviceSpan<int32_t> capture_count_span;
+  if (views.state_update_capture_count) {
+    capture_count_span =
+        WrapTensor<int32_t>(*impl_->device, *views.state_update_capture_count);
+  }
+  try {
+    if (!capture_count_span.empty()) {
+      auto host_counts = capture_count_span.CpuSpan();
+      for (size_t row = 0; row < requests.size(); ++row) {
+        host_counts[row] = capture_state_updates
+                               ? static_cast<int32_t>(requests[row].capture_count)
+                               : 0;
+      }
+      capture_count_span.CopyCpuToDevice();
+    }
+    if (!storage->uses_direct_bindings) {
+      for (size_t tensor_index = 0; tensor_index < impl_->tensors.size();
+           ++tensor_index) {
+        const auto& spec = impl_->tensors[tensor_index];
+        auto& gathered = *views.gathered_inputs[tensor_index];
+        for (size_t row = 0; row < plan.size(); ++row) {
+          if (plan[row].provisional) {
+            if (plan[row].prefix_checkpoint) {
+              impl_->GatherCheckpointRow(
+                  spec, plan[row].prefix_checkpoint->slot_, row, gathered);
+            } else {
+              impl_->GatherZeroRow(spec, row, gathered);
+            }
+          } else {
+            impl_->GatherResidentRow(spec, plan[row].slot_index,
+                                     impl_->slots[plan[row].slot_index].active_bank,
+                                     row, gathered);
+          }
+        }
+      }
+      impl_->device->Synchronize();
+    } else if (impl_->device->GetType() != DeviceType::CUDA) {
+      impl_->device->Synchronize();
+    }
+  } catch (...) {
+    // Record the failure before draining: a sticky device error can make the drain itself throw,
+    // and the pool must still end up marked unhealthy. The drain is best-effort because the staging
+    // buffers are about to unwind and must not still be referenced by in-flight copies.
+    impl_->healthy = false;
+    try {
+      impl_->device->Synchronize();
+    } catch (...) {
+    }
+    throw;
+  }
+
+  // Phase 4: publish provisional ownership. This is host bookkeeping only; the gather is complete.
+  for (size_t row = 0; row < plan.size(); ++row) {
+    if (!plan[row].provisional) {
+      continue;
+    }
+    auto& slot = impl_->slots[plan[row].slot_index];
+    slot.request_id = plan[row].request_id;
+    ++slot.generation;
+    slot.state_generation = 0;
+    slot.committed_tokens =
+        plan[row].prefix_checkpoint
+            ? plan[row].prefix_checkpoint->TokenCount()
+            : 0;
+    slot.reservation_id = reservation_id;
+    slot.active_bank = provisional_active_bank;
+    slot.ownership = FixedStateSlotOwnership::Reserved;
+  }
+
+  ++impl_->next_reservation_id;
+  impl_->active_reservation_id = reservation_id;
+  impl_->active_staging_bytes = views.staging_bytes;
+  return FixedStateReservation{*this, reservation_id, std::move(storage)};
+}
+
+void FixedStatePool::Release(const FixedStateSlotHandle& handle) {
+  // Deliberately not gated on EnsureHealthy(): releasing a committed slot only resets host-side
+  // ownership metadata and never reads or writes a persistent bank, so it is safe even after a
+  // failed commit left the pool unhealthy. Teardown depends on this -- a fatal device error marks
+  // both the pool and the Engine unhealthy, and the Engine must still be able to remove/reap its
+  // requests (releasing paged blocks and this fixed slot) without the release itself throwing and
+  // masking the recorded fatal error. EnsureIdle() still holds: a live reservation owns the pool.
+  ValidateRelease(handle);
+  ReleaseValidated(handle);
+}
+
+void FixedStatePool::ValidateRelease(
+    const FixedStateSlotHandle& handle) const {
+  impl_->EnsureIdle();
+  static_cast<void>(impl_->ValidateHandle(
+      handle, FixedStateSlotOwnership::Committed));
+}
+
+void FixedStatePool::ReleaseValidated(
+    const FixedStateSlotHandle& handle) noexcept {
+  if (!impl_ || impl_->active_reservation_id != 0 ||
+      handle.pool != this ||
+      handle.slot >= impl_->slots.size()) {
+    std::terminate();
+  }
+  auto& slot = impl_->slots[handle.slot];
+  if (slot.ownership != FixedStateSlotOwnership::Committed ||
+      slot.request_id != handle.request_id ||
+      slot.generation != handle.generation) {
+    std::terminate();
+  }
+  // No zeroing on release: the slot's persistent banks are never read again until a future
+  // admission either gathers the reusable zero row (a new owner) or a commit fully overwrites the
+  // bank it publishes.
+  slot.request_id = nullptr;
+  slot.state_generation = 0;
+  slot.committed_tokens = 0;
+  slot.reservation_id = 0;
+  slot.ownership = FixedStateSlotOwnership::Free;
+  static_cast<void>(impl_->committed_index.Erase(handle.request_id));
+}
+
+uint64_t FixedStatePool::StateGeneration(
+    const FixedStateSlotHandle& handle) const {
+  return impl_->ValidateCommittedHandle(handle).state_generation;
+}
+
+uint64_t FixedStatePool::CommittedTokens(
+    const FixedStateSlotHandle& handle) const {
+  return impl_->ValidateCommittedHandle(handle).committed_tokens;
+}
+
+FixedStatePoolSnapshot FixedStatePool::Snapshot() const {
+  FixedStatePoolSnapshot snapshot;
+  snapshot.capacity = impl_->capacity;
+  snapshot.checkpoint_capacity = impl_->prefix_checkpoints.size();
+  snapshot.checkpoint_count = impl_->prefix_checkpoints.size() -
+                              AvailablePrefixCheckpoints();
+  snapshot.persistent_bytes = impl_->persistent_bytes;
+  snapshot.zeroing_scratch_bytes = impl_->zeroing_scratch_bytes;
+  snapshot.active_staging_bytes = impl_->active_staging_bytes;
+  snapshot.healthy = impl_->healthy;
+  snapshot.slots.reserve(impl_->slots.size());
+  for (size_t index = 0; index < impl_->slots.size(); ++index) {
+    const auto& slot = impl_->slots[index];
+    switch (slot.ownership) {
+      case FixedStateSlotOwnership::Free:
+        ++snapshot.free_slots;
+        break;
+      case FixedStateSlotOwnership::Reserved:
+        ++snapshot.reserved_slots;
+        break;
+      case FixedStateSlotOwnership::Committed:
+        ++snapshot.committed_slots;
+        break;
+    }
+    snapshot.slots.push_back(FixedStateSlotSnapshot{
+        slot.request_id,
+        index,
+        slot.generation,
+        slot.state_generation,
+        slot.committed_tokens,
+        slot.ownership,
+    });
+  }
+  return snapshot;
+}
+
+void FixedStatePool::ValidateCommit(
+    const FixedStateReservation& reservation) const {
+  impl_->EnsureHealthy();
+  if (impl_->active_reservation_id != reservation.reservation_id_ ||
+      !reservation.storage_) {
+    throw std::logic_error(
+        "Fixed state reservation is not active in this pool.");
+  }
+
+  const auto& storage = *reservation.storage_;
+  // Prove every checkpointed slot is exactly where the reservation left it, and that publishing it
+  // cannot overflow a generation or regress committed tokens. This is the only fallible part of the
+  // commit, so a composite transaction can validate every resource before any of them is published.
+  for (size_t row = 0; row < storage.handles.size(); ++row) {
+    const auto& handle = storage.handles[row];
+    if (handle.pool != reservation.pool_ || handle.slot >= impl_->slots.size()) {
+      throw std::logic_error(
+          "Fixed state changed after the reservation was prepared.");
+    }
+    const auto& slot = impl_->slots[handle.slot];
+    const auto required_ownership =
+        storage.provisional[row]
+            ? FixedStateSlotOwnership::Reserved
+            : FixedStateSlotOwnership::Committed;
+    if (slot.ownership != required_ownership ||
+        slot.request_id != handle.request_id ||
+        slot.generation != handle.generation ||
+        slot.state_generation != storage.expected_state_generations[row] ||
+        (storage.provisional[row] &&
+         slot.reservation_id != reservation.reservation_id_)) {
+      throw std::logic_error(
+          "Fixed state changed after the reservation was prepared.");
+    }
+    if (slot.state_generation == std::numeric_limits<uint64_t>::max()) {
+      throw std::overflow_error(
+          "Fixed state generation is exhausted.");
+    }
+    if (storage.target_tokens[row] < slot.committed_tokens) {
+      throw std::logic_error(
+          "Fixed state commit would regress a request's committed token count.");
+    }
+  }
+}
+
+void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
+  // Re-run validation so PrepareCommit is safe to call on its own, then perform all device work.
+  ValidateCommit(reservation);
+
+  auto& storage = *reservation.storage_;
+  // Stage every committed row and synchronize. Ordinary state goes to an inactive bank. Shared
+  // indexer keys are append-only and remain bounded by separately double-buffered lengths, so data
+  // written past the committed length is not visible before publication.
+  try {
+    impl_->FlushDeferredReplay();
+    auto& views = *storage.views;
+    std::vector<StateUpdateReplayDesc> replay_descriptors;
+    if (storage.captures_state_updates) {
+      replay_descriptors.reserve(impl_->tensors.size() * storage.handles.size());
+    }
+    for (size_t tensor_index = 0; tensor_index < impl_->tensors.size();
+         ++tensor_index) {
+      const auto& spec = impl_->tensors[tensor_index];
+      auto& staged = *views.staged_outputs[tensor_index];
+      // Shared wrappers let device replay coalesce host mirrors across rows of the same backing.
+      DeviceSpan<uint8_t> input_backing, value_backing, capsule_backing;
+      std::array<DeviceSpan<uint8_t>, 2> bank_backings;
+      DeviceSpan<uint8_t> indexer_buffer_input, indexer_lengths_input;
+      std::array<DeviceSpan<uint8_t>, 2> indexer_buffer_banks, indexer_lengths_banks;
+      const auto row_view = [&](DeviceSpan<uint8_t>& backing, OrtValue* tensor,
+                                size_t row, size_t row_bytes) {
+        if (!tensor) {
+          return DeviceSpan<uint8_t>{};
+        }
+        if (backing.empty()) {
+          backing = ByteWrapTensor(*impl_->device, *tensor);
+        }
+        return backing.subspan(row * row_bytes, row_bytes);
+      };
+      for (size_t row = 0; row < storage.handles.size(); ++row) {
+        const auto& slot = impl_->slots[storage.handles[row].slot];
+        const uint8_t inactive_bank = slot.active_bank ^ 1u;
+        const size_t kept_tokens = storage.commit_kept_tokens[row];
+        if (kept_tokens == 0 || kept_tokens == storage.commit_step_tokens[row]) {
+          if (!storage.uses_direct_bindings) {
+            impl_->StageRowIntoInactiveBank(
+                spec, storage.handles[row].slot, inactive_bank, row, staged);
+          }
+          continue;
+        }
+
+        if (spec.kind == StateGroupKind::FixedIndexer && spec.component_index != 0) {
+          continue;
+        }
+
+        if (spec.kind == StateGroupKind::FixedPle && spec.component_index == 0 &&
+            spec.state_update_value.name.empty()) {
+          if (!storage.uses_direct_bindings) {
+            impl_->StageRowIntoInactiveBank(
+                spec, storage.handles[row].slot, inactive_bank, row, staged);
+          }
+          continue;
+        }
+
+        const Impl::TensorSpec* indexer_buffer_spec{};
+        const Impl::TensorSpec* indexer_lengths_spec{};
+        size_t indexer_buffer_index{};
+        size_t indexer_lengths_index{};
+        if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::Indexer) {
+          indexer_buffer_index = tensor_index + 1;
+          indexer_lengths_index = tensor_index + 2;
+          indexer_buffer_spec = &impl_->tensors[indexer_buffer_index];
+          indexer_lengths_spec = &impl_->tensors[indexer_lengths_index];
+          auto lengths_tensor =
+              WrapTensor<int32_t>(*impl_->device, *views.gathered_inputs[indexer_lengths_index]);
+          const auto lengths = lengths_tensor.CopyDeviceToCpu().subspan(row * 2, 2);
+          const size_t ratio = spec.state_update_compress_ratio;
+          const size_t key_capacity = spec.state_update_state_capacity;
+          const size_t buffer_capacity = static_cast<size_t>(indexer_buffer_spec->session_shape[1]);
+          if (ratio == 0 || ratio - 1 > buffer_capacity ||
+              lengths[0] < 0 || lengths[1] < 0 ||
+              static_cast<size_t>(lengths[0]) > key_capacity ||
+              static_cast<size_t>(lengths[1]) >= ratio ||
+              static_cast<size_t>(lengths[1]) > buffer_capacity) {
+            throw std::runtime_error("Indexer state_update has invalid committed lengths.");
+          }
+          const size_t retained = static_cast<size_t>(lengths[1]) + kept_tokens;
+          if (retained / ratio > key_capacity - static_cast<size_t>(lengths[0]) ||
+              retained / ratio > static_cast<size_t>(INT32_MAX - lengths[0]) ||
+              retained % ratio > buffer_capacity) {
+            throw std::runtime_error("Indexer state_update replay exceeds state capacity.");
+          }
+        }
+        const auto sibling_source = [&](size_t index, const Impl::TensorSpec* sibling) {
+          return sibling
+                     ? row_view(index == indexer_buffer_index ? indexer_buffer_input : indexer_lengths_input,
+                                views.gathered_inputs[index].get(), row, sibling->row_bytes)
+                     : DeviceSpan<uint8_t>{};
+        };
+        const auto sibling_destination = [&](const Impl::TensorSpec* sibling) {
+          return sibling
+                     ? row_view(sibling == indexer_buffer_spec ? indexer_buffer_banks[inactive_bank]
+                                                               : indexer_lengths_banks[inactive_bank],
+                                sibling->banks[inactive_bank].get(), storage.handles[row].slot, sibling->row_bytes)
+                     : DeviceSpan<uint8_t>{};
+        };
+        const auto& updates = views.state_update_tensors[tensor_index];
+        const auto source = row_view(input_backing, views.gathered_inputs[tensor_index].get(),
+                                     row, spec.row_bytes);
+        auto destination = row_view(bank_backings[inactive_bank], spec.banks[inactive_bank].get(),
+                                    storage.handles[row].slot, spec.row_bytes);
+        auto capsule = row_view(capsule_backing, updates.capsule.get(),
+                                row, spec.state_update_capsule.row_bytes);
+        DeviceSpan<const uint8_t> decay;
+        DeviceSpan<const uint8_t> key;
+        DeviceSpan<const uint8_t> delta;
+        if (!capsule.empty()) {
+          const size_t decay_bytes =
+              spec.state_update_capacity * spec.state_update_channel_count * sizeof(float);
+          const size_t key_bytes =
+              spec.state_update_capacity * spec.state_update_key_head_count *
+              spec.state_update_key_width * sizeof(float);
+          const size_t delta_bytes =
+              spec.state_update_capacity * spec.state_update_channel_count *
+              spec.state_update_state_width * sizeof(float);
+          decay = capsule.subspan(0, decay_bytes);
+          key = capsule.subspan(decay_bytes, key_bytes);
+          delta = capsule.subspan(decay_bytes + key_bytes, delta_bytes);
+        }
+        replay_descriptors.push_back(StateUpdateReplayDesc{
+            source,
+            destination,
+            row_view(value_backing, updates.value.get(), row, spec.state_update_value.row_bytes),
+            decay,
+            key,
+            delta,
+            static_cast<uint64_t>(spec.state_update_channel_count),
+            static_cast<uint64_t>(spec.state_update_state_width),
+            static_cast<uint64_t>(spec.state_update_key_width),
+            static_cast<uint64_t>(spec.state_update_key_head_count),
+            static_cast<uint32_t>(spec.state_update_capacity),
+            static_cast<uint32_t>(kept_tokens),
+            static_cast<uint32_t>(Ort::SizeOf(spec.data_type)),
+            spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::CausalConv
+                ? StateUpdateReplayKind::CausalConv
+            : spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::GatedDeltaNet
+                ? StateUpdateReplayKind::GatedDeltaNet
+            : spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::Ple
+                ? StateUpdateReplayKind::Snapshot
+                : StateUpdateReplayKind::Indexer,
+            sibling_source(indexer_buffer_index, indexer_buffer_spec),
+            sibling_destination(indexer_buffer_spec),
+            sibling_source(indexer_lengths_index, indexer_lengths_spec),
+            sibling_destination(indexer_lengths_spec),
+            static_cast<uint64_t>(spec.state_update_state_capacity),
+            static_cast<uint64_t>(indexer_buffer_spec ? indexer_buffer_spec->session_shape[1] : 0),
+            static_cast<uint32_t>(spec.state_update_compress_ratio),
+        });
+      }
+    }
+    impl_->device->Synchronize();
+    // The replay reads only this step's inputs and captured updates, which stay untouched until the
+    // next reservation, and writes only inactive banks. It is launched by the next pool operation
+    // (see FlushDeferredReplay) so the device runs it while the host prepares that step.
+    impl_->deferred_replay = std::move(replay_descriptors);
+  } catch (...) {
+    // Record the failure and release this reservation's provisional slots before draining. The
+    // Ordinary active banks and published indexer lengths were not touched, so committed state is
+    // intact. Mark the pool unhealthy because a destination may be partially written. The drain is
+    // best-effort because a sticky device error can make Synchronize itself throw.
+    impl_->healthy = false;
+    reservation.state_ = FixedStateReservationState::Failed;
+    ReleaseProvisionalSlots(reservation);
+    try {
+      impl_->device->Synchronize();
+    } catch (...) {
+    }
+    throw;
+  }
+
+  reservation.state_ = FixedStateReservationState::Prepared;
+}
+
+void FixedStatePool::PublishCommit(FixedStateReservation& reservation) noexcept {
+  auto& storage = *reservation.storage_;
+  // Host bookkeeping only: PrepareCommit already wrote the inactive banks (or queued the compact
+  // replay that writes them ahead of any later reader) and ValidateCommit already proved no
+  // generation overflow, so every step here is infallible. Flip each slot to its freshly written
+  // bank and publish generation, committed tokens, and ownership.
+  for (size_t row = 0; row < storage.handles.size(); ++row) {
+    auto& slot = impl_->slots[storage.handles[row].slot];
+    slot.active_bank ^= 1u;
+    ++slot.state_generation;
+    slot.committed_tokens = storage.target_tokens[row];
+    if (storage.provisional[row]) {
+      slot.reservation_id = 0;
+      slot.ownership = FixedStateSlotOwnership::Committed;
+      if (!impl_->committed_index.Insert(
+              slot.request_id, storage.handles[row].slot)) {
+        std::terminate();
+      }
+    }
+  }
+  reservation.state_ = FixedStateReservationState::Committed;
+}
+
+void FixedStatePool::ReleaseProvisionalSlots(
+    FixedStateReservation& reservation) noexcept {
+  if (!reservation.storage_ || reservation.reservation_id_ == 0 ||
+      impl_->active_reservation_id != reservation.reservation_id_) {
+    return;
+  }
+  for (size_t row = 0; row < reservation.storage_->handles.size(); ++row) {
+    if (!reservation.storage_->provisional[row]) {
+      continue;
+    }
+    const auto& handle = reservation.storage_->handles[row];
+    auto& slot = impl_->slots[handle.slot];
+    if (slot.ownership == FixedStateSlotOwnership::Reserved &&
+        slot.request_id == handle.request_id &&
+        slot.generation == handle.generation &&
+        slot.reservation_id == reservation.reservation_id_) {
+      slot.request_id = nullptr;
+      slot.state_generation = 0;
+      slot.committed_tokens = 0;
+      slot.reservation_id = 0;
+      slot.ownership = FixedStateSlotOwnership::Free;
+    }
+  }
+}
+
+void FixedStatePool::Discard(
+    FixedStateReservation& reservation) noexcept {
+  // A discarded reservation leaves every resident slot's active state, generation, and committed
+  // tokens exactly as they were and returns only its provisional slots to the free pool. A replay a
+  // prepared reservation deferred would only have written inactive banks, so it is dropped.
+  if (reservation.state_ == FixedStateReservationState::Prepared &&
+      impl_->active_reservation_id == reservation.reservation_id_) {
+    impl_->deferred_replay.clear();
+  }
+  ReleaseProvisionalSlots(reservation);
+  reservation.state_ = FixedStateReservationState::Discarded;
+}
+
+void FixedStatePool::Finish(
+    FixedStateReservation& reservation) noexcept {
+  if (reservation.reservation_id_ != 0 &&
+      impl_->active_reservation_id == reservation.reservation_id_) {
+    impl_->active_reservation_id = 0;
+    impl_->active_staging_bytes = 0;
+  }
+  if (impl_->active_reservation == &reservation) {
+    impl_->active_reservation = nullptr;
+  }
+  reservation.pool_ = nullptr;
+  reservation.reservation_id_ = 0;
+}
+
+}  // namespace Generators

@@ -14,7 +14,7 @@ def register_execution_providers() -> list[str]:
     with EpCatalog() as catalog:
         for provider in catalog.find_all_providers():
             provider.ensure_ready()
-            if provider.library_path == '':
+            if provider.library_path == "":
                 continue
             try:
                 og.register_execution_provider_library(provider.name, provider.library_path)

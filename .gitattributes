@@ -1,0 +1,4 @@
+# Patch files must stay LF-only so `patch --binary` applies them cleanly against the
+# (LF) upstream sources on every platform, including Windows (where core.autocrlf would
+# otherwise convert them to CRLF in the working tree and break the apply).
+*.patch text eol=lf

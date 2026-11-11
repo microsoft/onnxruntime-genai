@@ -5,6 +5,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,7 +14,7 @@ REPO_ROOT = Path(__file__).parents[4]
 BUILD_PY = REPO_ROOT / "build.py"
 JAVA_ROOT = REPO_ROOT / "src" / "java"
 sys.path.append(str(REPO_ROOT / "tools" / "python"))
-import util  # REPO_ROOT/tools/python/util noqa: E402
+import util  # noqa: E402
 
 # Default to only build 64-bit ABIs. TBD if we need to support any 32-bit ABIs.
 # DEFAULT_BUILD_ABIS = ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"]
@@ -76,8 +77,28 @@ def _parse_build_settings(args):
         )
 
     build_settings["build_params"] = build_params
+    build_settings["telemetry_enabled"] = not any(param.split("=", 1)[0] == "--no_telemetry" for param in build_params)
 
     return build_settings
+
+
+def _strip_library(source, destination, strip_tool):
+    readelf_tool = strip_tool.with_name("llvm-readelf" + strip_tool.suffix)
+
+    def load_segments(library):
+        output = subprocess.run(
+            [readelf_tool, "--program-headers", "--wide", library], check=True, capture_output=True, text=True
+        ).stdout
+        segments = [line.split() for line in output.splitlines() if line.lstrip().startswith("LOAD ")]
+        if not segments:
+            raise RuntimeError(f"No LOAD segments found in {library}")
+        return segments
+
+    original_segments = load_segments(source)
+    shutil.copy2(source, destination)
+    subprocess.run([strip_tool, destination], shell=False, check=True)
+    if load_segments(destination) != original_segments:
+        raise RuntimeError(f"Stripping changed LOAD segments in {destination}")
 
 
 def _build_aar(args):
@@ -94,12 +115,30 @@ def _build_aar(args):
     build_config = args.config
     aar_dir = intermediates_dir / "aar" / build_config
     jnilibs_dir = intermediates_dir / "jnilibs" / build_config
+    strip_tool = None
+    if build_config in ("Release", "MinSizeRel"):
+        strip_tool_name = "llvm-strip.exe" if util.is_windows() else "llvm-strip"
+        strip_tools = [
+            tool
+            for tool in args.android_ndk_path.resolve().glob(f"toolchains/llvm/prebuilt/*/bin/{strip_tool_name}")
+            if tool.is_file()
+        ]
+        if len(strip_tools) != 1:
+            raise FileNotFoundError(f"Expected exactly one {strip_tool_name} in Android NDK {args.android_ndk_path}")
+        strip_tool = strip_tools[0]
+
     base_build_command = [sys.executable, str(BUILD_PY), f"--config={build_config}"]
     if args.ort_home:
         base_build_command += [f"--ort_home={args.ort_home!s}"]
     base_build_command += build_settings["build_params"]
 
     header_files_path = None
+    telemetry_java_src_dir = None
+    telemetry_resource_dir = None
+
+    if jnilibs_dir.exists():
+        shutil.rmtree(jnilibs_dir)
+    jnilibs_dir.mkdir(parents=True)
 
     # Build binary for each ABI, one by one
     for abi in build_settings["build_abis"]:
@@ -108,24 +147,40 @@ def _build_aar(args):
 
         subprocess.run(abi_build_command, env=temp_env, shell=False, check=True, cwd=REPO_ROOT)
 
-        # create symbolic links for libonnxruntime-genai.so and libonnxruntime-genai-jni.so
-        # to jnilibs/[abi] for later compiling the aar package
+        # Strip staging copies, not the original build outputs.
         abi_jnilibs_dir = jnilibs_dir / abi
-        abi_jnilibs_dir.mkdir(parents=True, exist_ok=True)
-        for lib_name in ["libonnxruntime-genai.so", "libonnxruntime-genai-jni.so"]:
+        abi_jnilibs_dir.mkdir()
+        native_lib_names = ["libonnxruntime-genai.so", "libonnxruntime-genai-jni.so"]
+        if build_settings["telemetry_enabled"]:
+            native_lib_names.append("libmat.so")
+        for lib_name in native_lib_names:
             src_lib_name = abi_build_dir / build_config / "src" / "java" / "android" / abi / lib_name
             target_lib_name = abi_jnilibs_dir / lib_name
-            # If the symbolic already exists, delete it first
-            target_lib_name.unlink(missing_ok=True)
-            target_lib_name.symlink_to(src_lib_name)
+            if strip_tool is not None:
+                _strip_library(src_lib_name, target_lib_name, strip_tool)
+            else:
+                target_lib_name.symlink_to(src_lib_name)
 
         # we only need to define the header files path once
         if not header_files_path:
             header_files_path = abi_build_dir / build_config / "src" / "java" / "android" / "headers"
+        if build_settings["telemetry_enabled"]:
+            java_build_dir = abi_build_dir / build_config / "src" / "java"
+            telemetry_java_src_dir = java_build_dir / "telemetry-java"
+            telemetry_resource_dir = java_build_dir / "telemetry-resources"
 
     # The directory to publish final AAR
     aar_publish_dir = os.path.join(build_dir, "aar_out", build_config)
     os.makedirs(aar_publish_dir, exist_ok=True)
+
+    if build_settings["telemetry_enabled"]:
+        if (
+            telemetry_java_src_dir is None
+            or telemetry_resource_dir is None
+            or not telemetry_java_src_dir.is_dir()
+            or not telemetry_resource_dir.is_dir()
+        ):
+            raise FileNotFoundError("Android telemetry Java bridge output was not generated")
 
     gradle_path = JAVA_ROOT / ("gradlew" if not util.is_windows() else "gradlew.bat")
 
@@ -142,6 +197,11 @@ def _build_aar(args):
         f"-DminSdkVer={build_settings['android_min_sdk_version']}",
         f"-DtargetSdkVer={build_settings['android_target_sdk_version']}",
     ]
+    if build_settings["telemetry_enabled"]:
+        gradle_command += [
+            f"-DtelemetryJavaSrcDir={telemetry_java_src_dir}",
+            f"-DtelemetryResourceDir={telemetry_resource_dir}",
+        ]
 
     # clean, build, and publish to a local directory
     subprocess.run([*gradle_command, "clean"], env=temp_env, shell=False, check=True, cwd=JAVA_ROOT)

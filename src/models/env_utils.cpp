@@ -3,41 +3,47 @@
 
 #include "env_utils.h"
 
+#include <cstdlib>
 #include <stdexcept>
+#include <utility>
 
-#if _MSC_VER
+#ifdef _WIN32
 #include <Windows.h>
 #endif
 
 namespace Generators {
 
-std::string GetEnv(const char* var_name) {
-#if _MSC_VER
-  // Why getenv() should be avoided on Windows:
-  // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/getenv-wgetenv
-  // Instead use the Win32 API: GetEnvironmentVariableA()
-
-  // Max limit of an environment variable on Windows including the null-terminating character
-  constexpr DWORD kBufferSize = 32767;
-
-  // Create buffer to hold the result
-  std::string buffer(kBufferSize, '\0');
-
-  // The last argument is the size of the buffer pointed to by the lpBuffer parameter, including the null-terminating character, in characters.
-  // If the function succeeds, the return value is the number of characters stored in the buffer pointed to by lpBuffer, not including the terminating null character.
-  // Therefore, If the function succeeds, kBufferSize should be larger than char_count.
-  auto char_count = ::GetEnvironmentVariableA(var_name, buffer.data(), kBufferSize);
-
-  if (kBufferSize > char_count) {
-    buffer.resize(char_count);
-    return buffer;
-  }
-
-  return {};
+std::optional<std::string> GetEnv(const char* name, size_t max_bytes) {
+#ifdef _WIN32
+  // Use the process environment rather than the CRT's potentially stale copy.
+  return EnvInternal::GetWindowsEnv(
+      name, max_bytes,
+      [](const char* variable_name, char* buffer, DWORD size) -> std::optional<DWORD> {
+        ::SetLastError(ERROR_SUCCESS);
+        const DWORD written = ::GetEnvironmentVariableA(variable_name, buffer, size);
+        if (written == 0) {
+          const DWORD error = ::GetLastError();
+          if (error != ERROR_SUCCESS && error != ERROR_ENVVAR_NOT_FOUND) return std::nullopt;
+        }
+        return written;
+      });
 #else
-  const char* val = getenv(var_name);
-  return val == nullptr ? "" : std::string(val);
-#endif  // _MSC_VER
+  const char* value = std::getenv(name);
+  if (value == nullptr) return std::string{};
+  size_t length = 0;
+  while (length < max_bytes && value[length] != '\0') ++length;
+  if (value[length] != '\0') return std::nullopt;
+  return std::string{value, length};
+#endif
+}
+
+std::string GetEnv(const char* var_name) {
+  auto value = GetEnv(var_name, kMaxEnvironmentVariableBytes);
+  if (!value) {
+    throw std::runtime_error("Environment variable " + std::string(var_name) +
+                             " exceeds the byte limit or could not be read consistently.");
+  }
+  return std::move(*value);
 }
 
 void GetEnv(const char* var_name, bool& value) {

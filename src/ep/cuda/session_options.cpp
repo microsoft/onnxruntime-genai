@@ -1,0 +1,161 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#include "session_options.h"
+#include "models/session_options.h"
+
+#include <algorithm>
+
+namespace Generators::CUDAExecutionProvider {
+
+size_t ParseArenaOptionValue(std::string_view key, const std::string& value) {
+  long long parsed = 0;
+  if (key == "arena_extend_strategy" && value == "kNextPowerOfTwo") {
+    parsed = 0;
+  } else if (key == "arena_extend_strategy" && value == "kSameAsRequested") {
+    parsed = 1;
+  } else {
+    size_t consumed = 0;
+    try {
+      parsed = std::stoll(value, &consumed);
+    } catch (const std::invalid_argument&) {
+      throw std::invalid_argument("CUDA arena option '" + std::string(key) + "' must be an integer, got '" + value + "'.");
+    } catch (const std::out_of_range&) {
+      throw std::out_of_range("CUDA arena option '" + std::string(key) + "' value '" + value + "' is out of range.");
+    }
+    // stoll stops at the first character that is not part of the number: "1GB" is not a byte count of 1.
+    if (consumed != value.size()) {
+      throw std::invalid_argument("CUDA arena option '" + std::string(key) + "' must be an integer, got '" + value + "'.");
+    }
+  }
+  if (parsed < -1) {
+    throw std::out_of_range("Arena configuration option value is out of range");
+  }
+  return parsed == -1 ? static_cast<size_t>(-1) : static_cast<size_t>(parsed);
+}
+
+Config::ProviderOptions ResolveStreamBindingOptions(const Config::ProviderOptions& provider_options,
+                                                    const std::optional<std::string>& selected_plugin_device_id) {
+  Config::ProviderOptions resolved = provider_options;
+  const bool has_device_id = std::any_of(provider_options.options.begin(), provider_options.options.end(),
+                                         [](const auto& option) { return option.first == "device_id" && !option.second.empty(); });
+  const std::string default_device_id = selected_plugin_device_id ? *selected_plugin_device_id : std::string("0");
+  if (!has_device_id && !default_device_id.empty()) {
+    resolved.options.emplace_back("device_id", default_device_id);
+  }
+  return resolved;
+}
+
+namespace {
+
+void AppendProviderBridgeExecutionProvider(
+    OrtSessionOptions& session_options,
+    const Config::ProviderOptions& provider_options,
+    DeviceInterface*& device) {
+  auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
+  std::vector<const char*> keys, values;
+
+  // Memory management settings
+  const char* arena_keys[] = {
+      "max_mem",
+      "arena_extend_strategy",
+      "initial_chunk_size_bytes",
+      "max_dead_bytes_per_chunk",
+      "initial_growth_chunk_size_bytes"};
+  size_t arena_values[] = {
+      static_cast<size_t>(0),
+      static_cast<size_t>(-1),
+      static_cast<size_t>(-1),
+      static_cast<size_t>(-1),
+      static_cast<size_t>(-1)};
+  bool use_arena_management = false;
+
+  for (auto& option : provider_options.options) {
+    auto it = std::find(std::begin(arena_keys), std::end(arena_keys), option.first);
+
+    if (it == std::end(arena_keys)) {
+      keys.emplace_back(option.first.c_str());
+      values.emplace_back(option.second.c_str());
+    } else {
+      const size_t idx = std::distance(std::begin(arena_keys), it);
+      arena_values[idx] = ParseArenaOptionValue(option.first, option.second);
+      use_arena_management = true;
+    }
+  }
+  ort_provider_options->Update(keys.data(), values.data(), keys.size());
+
+  // Device type determines the scoring device.
+  // Create and set our cudaStream_t
+  ort_provider_options->UpdateValue("user_compute_stream", device->GetCudaStream());
+
+  // Use fine-grained memory management of BFC Arena.
+  // The arena_cfg must outlive the AppendExecutionProvider_CUDA_V2 call below,
+  // so it is declared outside the if block.
+  std::unique_ptr<OrtArenaCfg> arena_cfg;
+  if (use_arena_management) {
+    arena_cfg = OrtArenaCfg::Create(arena_keys, arena_values, std::size(arena_keys));
+    ort_provider_options->UpdateValue("default_memory_arena_cfg", arena_cfg.get());
+  }
+
+  session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
+}
+
+}  // namespace
+
+void AddCudaStreamConfig(OrtSessionOptions& session_options, DeviceInterface* device,
+                         const std::string& config_key) {
+  if (device) {
+    void* stream_ptr = device->GetCudaStream();
+    std::stringstream stream_value;
+    stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
+    session_options.AddConfigEntry(config_key.c_str(), stream_value.str().c_str());
+  }
+}
+
+DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
+                                         const Config::ProviderOptions& provider_options,
+                                         const Config& /*config*/,
+                                         bool /*disable_graph_capture*/) {
+  auto device = GetDeviceInterface(DeviceType::CUDA);
+
+  // Resolve the selected CUDA device before creating/attaching the stream or registering the EP,
+  // so the CUDA runtime device, stream, and OrtMemoryInfo agree with the selected EP device.
+  std::optional<std::string> selected_plugin_device_id;
+  auto ep_devices_ptrs = FindRegisteredEpDevices("CUDAExecutionProvider");
+  if (!ep_devices_ptrs.empty()) {
+    auto filtered_ep_device_ptrs = ApplyDeviceFiltering(provider_options, ep_devices_ptrs);
+    std::optional<std::string> requested_id;
+    for (const auto& [k, v] : provider_options.options) {
+      if (k == "device_id" && !v.empty()) {
+        requested_id = v;
+        break;
+      }
+    }
+    std::vector<std::string> cuda_device_ids;
+    cuda_device_ids.reserve(filtered_ep_device_ptrs.size());
+    for (const auto* dev : filtered_ep_device_ptrs) {
+      cuda_device_ids.push_back(GetCudaDeviceIdMetadata(dev));
+    }
+    const size_t selected = SelectCudaDeviceIndex(cuda_device_ids, requested_id, HasDeviceFiltering(provider_options));
+    selected_plugin_device_id = cuda_device_ids[selected];
+  }
+  const Config::ProviderOptions effective_options = ResolveStreamBindingOptions(provider_options, selected_plugin_device_id);
+  (void)device->GetDeviceId(&effective_options);
+  AddCudaStreamConfig(session_options, device);
+
+  // CUDA EP honors enable_cuda_graph from the config as-is. Non-decoder
+  // sessions (vision, embedding, speech) should set enable_cuda_graph=0
+  // in their own session_options in genai_config.json.
+
+  // Try pre-registered plugin path first
+  if (!AppendExecutionProviderV2(session_options, provider_options,
+                                 DeviceType::CUDA, "CUDAExecutionProvider")) {
+    // Register the CUDA execution provider as a provider-bridge provider.
+    CUDAExecutionProvider::AppendProviderBridgeExecutionProvider(
+        session_options, provider_options, device);
+  }
+
+  return device;
+}
+
+}  // namespace Generators::CUDAExecutionProvider

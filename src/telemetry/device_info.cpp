@@ -1,0 +1,975 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#include "device_info.h"
+
+// The platform device-info implementation is only needed when telemetry is
+// compiled in. Guarding the whole translation unit keeps default (OFF) builds
+// from pulling in platform headers such as <sys/sysinfo.h>, which are not
+// portable to every target (e.g. some non-Linux Unix platforms).
+#if defined(ORTGENAI_ENABLE_TELEMETRY)
+
+#include "telemetry_environment.h"
+#include "telemetry_io.h"
+#include "../logging.h"
+
+#include <algorithm>
+#include <array>
+#include <cerrno>
+#include <cctype>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <random>
+#include <sstream>
+#include <string>
+#include <system_error>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#elif defined(__ANDROID__)
+#include <sys/sysinfo.h>
+#include <unistd.h>
+#elif defined(__APPLE__)
+#include <TargetConditionals.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#include <mach/mach.h>
+#include <unistd.h>
+#else  // Linux
+#include <unistd.h>
+#include <sys/sysinfo.h>
+#endif
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <pwd.h>
+#if defined(__has_include)
+#if __has_include(<sys/file.h>)
+#include <sys/file.h>
+#define ORTGENAI_DEVICE_ID_USE_FLOCK 1
+#endif
+#endif
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
+
+namespace Generators {
+
+namespace {
+
+constexpr char kDeviceIdHashSalt[] = "onnxruntime-genai:";
+
+void WarnOversizedTelemetryInput() {
+  if (g_log.enabled && g_log.warning) {
+    Log("warning", "Ignoring oversized or unstable telemetry environment/path input");
+  }
+}
+
+std::string ReadTelemetryEnvironment(const char* name) {
+  const auto value = GetEnv(name, kMaxTelemetryInputBytes);
+  if (!value) {
+    WarnOversizedTelemetryInput();
+    return {};
+  }
+  return *value;
+}
+
+#if defined(__linux__) || defined(__ANDROID__)
+std::string ReadBoundedFile(const char* path);
+#endif
+
+// FNV-1a 64-bit hash -> fixed-width hex. Stable across platforms and runs
+// (unlike std::hash), so the derived device id stays consistent over time.
+std::string Fnv1aHex(const std::string& input) {
+  uint64_t h = 14695981039346656037ULL;
+  for (unsigned char c : input) {
+    h ^= c;
+    h *= 1099511628211ULL;
+  }
+  char buf[17];
+  std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
+  return std::string(buf);
+}
+
+// Generate a random v4 UUID string.
+std::string GenerateUuidV4() {
+  uint64_t hi{};
+  uint64_t lo{};
+  try {
+    std::random_device rd;
+    hi = (static_cast<uint64_t>(rd()) << 32) | rd();
+    lo = (static_cast<uint64_t>(rd()) << 32) | rd();
+  } catch (...) {
+    const auto now = static_cast<uint64_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    const auto addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&hi));
+    std::mt19937_64 fallback{now ^ addr};
+    hi = fallback();
+    lo = fallback();
+  }
+  hi = (hi & 0xFFFFFFFFFFFF0FFFULL) | 0x0000000000004000ULL;  // version 4
+  lo = (lo & 0x3FFFFFFFFFFFFFFFULL) | 0x8000000000000000ULL;  // variant 10xx
+  char buf[37];
+  std::snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%04x-%012llx",
+                static_cast<uint32_t>(hi >> 32),
+                static_cast<uint32_t>((hi >> 16) & 0xFFFF),
+                static_cast<uint32_t>(hi & 0xFFFF),
+                static_cast<uint32_t>(lo >> 48),
+                static_cast<unsigned long long>(lo & 0xFFFFFFFFFFFFULL));
+  return std::string(buf);
+}
+
+std::string GetOsArchitecture() {
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC)
+  return "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+  return "x64";
+#elif defined(__i386__) || defined(_M_IX86)
+  return "x86";
+#else
+  return "unknown";
+#endif
+}
+
+int GetProcessorCount() {
+#if defined(_WIN32)
+  SYSTEM_INFO si{};
+  GetSystemInfo(&si);
+  return static_cast<int>(si.dwNumberOfProcessors);
+#else
+  auto n = sysconf(_SC_NPROCESSORS_ONLN);
+  return n > 0 ? static_cast<int>(n) : 1;
+#endif
+}
+
+int64_t GetTotalMemoryMB() {
+#if defined(_WIN32)
+  MEMORYSTATUSEX ms{};
+  ms.dwLength = sizeof(ms);
+  if (GlobalMemoryStatusEx(&ms)) {
+    return static_cast<int64_t>(ms.ullTotalPhys / (1024 * 1024));
+  }
+  return 0;
+#elif defined(__APPLE__)
+  int64_t mem = 0;
+  size_t len = sizeof(mem);
+  if (sysctlbyname("hw.memsize", &mem, &len, nullptr, 0) == 0) {
+    return mem / (1024 * 1024);
+  }
+  return 0;
+#else
+  struct sysinfo si{};
+  if (sysinfo(&si) == 0) {
+    return static_cast<int64_t>((static_cast<uint64_t>(si.totalram) * si.mem_unit) / (1024 * 1024));
+  }
+  return 0;
+#endif
+}
+
+std::string GetCpuModel() {
+#if defined(_WIN32)
+  HKEY key{};
+  if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                    "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                    0, KEY_READ, &key) == ERROR_SUCCESS) {
+    const auto read_processor_name = [&]() -> std::string {
+      constexpr DWORD kMaxProcessorNameBytes = 64 * 1024;
+      DWORD type = 0;
+      DWORD size = 0;
+      if (RegQueryValueExA(key, "ProcessorNameString", nullptr, &type, nullptr, &size) !=
+              ERROR_SUCCESS ||
+          type != REG_SZ || size == 0 || size > kMaxProcessorNameBytes) {
+        return {};
+      }
+
+      for (int attempt = 0; attempt < 3; ++attempt) {
+        std::string value(size, '\0');
+        DWORD bytes_read = size;
+        type = 0;
+        const LONG status = RegQueryValueExA(
+            key, "ProcessorNameString", nullptr, &type,
+            reinterpret_cast<LPBYTE>(value.data()), &bytes_read);
+        if (status == ERROR_MORE_DATA && bytes_read > size &&
+            bytes_read <= kMaxProcessorNameBytes) {
+          size = bytes_read;
+          continue;
+        }
+        if (status != ERROR_SUCCESS || type != REG_SZ) {
+          return {};
+        }
+
+        value.resize(std::min<size_t>(bytes_read, value.size()));
+        while (!value.empty() && value.back() == '\0') {
+          value.pop_back();
+        }
+        return BoundTelemetryString(value);
+      }
+      return {};
+    };
+
+    const std::string processor_name = read_processor_name();
+    RegCloseKey(key);
+    if (!processor_name.empty()) {
+      return processor_name;
+    }
+  }
+  return "unknown";
+#elif defined(__APPLE__)
+  char buf[256]{};
+  size_t len = sizeof(buf);
+  if (sysctlbyname("machdep.cpu.brand_string", buf, &len, nullptr, 0) == 0) {
+    return BoundTelemetryString(std::string_view(buf, len > 0 ? len - 1 : 0));
+  }
+  return "unknown";
+#else
+  return TelemetryInternal::CpuModelFromTelemetryInput(ReadBoundedFile("/proc/cpuinfo"));
+#endif
+}
+
+#if defined(__linux__) || defined(__ANDROID__)
+
+std::string ReadBoundedFile(const char* path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) return {};
+
+  return TelemetryInternal::ReadTelemetryInput(input);
+}
+
+bool FileExists(const char* path) {
+  std::error_code error;
+  return std::filesystem::exists(path, error);
+}
+
+#endif
+
+TelemetryInternal::HostEnvironmentInfo GetHostEnvironmentInfo() {
+  TelemetryInternal::HostEnvironmentEvidence evidence;
+#if defined(__linux__) || defined(__ANDROID__)
+  evidence.docker_marker = FileExists("/.dockerenv");
+  evidence.podman_marker = FileExists("/run/.containerenv");
+  evidence.kubernetes = !ReadTelemetryEnvironment("KUBERNETES_SERVICE_HOST").empty();
+  evidence.aws_ecs = !ReadTelemetryEnvironment("ECS_CONTAINER_METADATA_URI").empty() ||
+                     !ReadTelemetryEnvironment("ECS_CONTAINER_METADATA_URI_V4").empty();
+  evidence.generic_container =
+      TelemetryInternal::IsTruthyValue(
+          ReadTelemetryEnvironment("DOTNET_RUNNING_IN_CONTAINER"));
+  evidence.systemd_container =
+      ReadBoundedFile("/run/systemd/container") + ReadTelemetryEnvironment("container");
+  evidence.cgroup =
+      ReadBoundedFile("/proc/1/cgroup") + ReadBoundedFile("/proc/self/cgroup");
+  evidence.cpu_info = ReadBoundedFile("/proc/cpuinfo");
+  evidence.kernel_release = ReadBoundedFile("/proc/sys/kernel/osrelease");
+  evidence.dmi = ReadBoundedFile("/sys/class/dmi/id/sys_vendor") +
+                 ReadBoundedFile("/sys/class/dmi/id/product_name") +
+                 ReadBoundedFile("/sys/class/dmi/id/board_vendor");
+#if defined(__ANDROID__)
+  const std::string android_properties =
+      TelemetryInternal::ToLowerAscii(ReadBoundedFile("/system/build.prop"));
+  evidence.android_emulator =
+      android_properties.find("ro.kernel.qemu=1") != std::string::npos ||
+      android_properties.find("ro.boot.qemu=1") != std::string::npos ||
+      android_properties.find("ro.product.manufacturer=genymotion") != std::string::npos;
+#endif
+#elif defined(__APPLE__) && !TARGET_OS_IPHONE
+  int is_virtual_machine = 0;
+  size_t size = sizeof(is_virtual_machine);
+  evidence.apple_virtual_machine =
+      sysctlbyname("kern.hv_vmm_present", &is_virtual_machine, &size, nullptr, 0) == 0 &&
+      is_virtual_machine != 0;
+#endif
+  return TelemetryInternal::ClassifyHostEnvironment(evidence);
+}
+
+// Per-user directory shared by the Microsoft AI dev-tools family (ONNX Runtime, Olive) under
+// "Microsoft/DeveloperTools/.onnxruntime". Holds the generated device-id file for desktop POSIX and
+// the 1DS offline cache when available (on Windows, the device id itself lives in the registry — see
+// below; Android/iOS use the SDK/platform device id).
+// Returns an empty path when no per-user location is available, so the caller skips persistence
+// rather than writing to a predictable world-writable temp path. Never throws.
+std::filesystem::path GetDeviceIdStorageDir() {
+#if defined(_WIN32)
+  const auto base = ReadTelemetryEnvironment("LOCALAPPDATA");
+  if (base.empty()) return {};
+  return std::filesystem::path(base) / "Microsoft" / "DeveloperTools" / ".onnxruntime";
+#else
+#if !defined(__APPLE__)
+  // XDG requires absolute paths. Ignore relative values so telemetry state is never written below
+  // the process working directory.
+  if (const auto xdg = ReadTelemetryEnvironment("XDG_CACHE_HOME");
+      !xdg.empty() && std::filesystem::path(xdg).is_absolute()) {
+    return std::filesystem::path(xdg) / "Microsoft" / "DeveloperTools" / ".onnxruntime";
+  }
+#endif
+
+  std::filesystem::path home;
+  if (const auto h = ReadTelemetryEnvironment("HOME");
+      !h.empty() && std::filesystem::path(h).is_absolute()) {
+    home = h;
+  } else {
+    struct passwd pwd{};
+    struct passwd* result = nullptr;
+    const long sc = sysconf(_SC_GETPW_R_SIZE_MAX);
+    constexpr size_t kDefaultPwBufferSize = 16384;
+    constexpr size_t kMaxPwBufferSize = 1 << 20;
+    const size_t pw_buffer_size =
+        sc > 0 ? std::min(static_cast<size_t>(sc), kMaxPwBufferSize) : kDefaultPwBufferSize;
+    std::vector<char> buf(pw_buffer_size);
+    if (getpwuid_r(getuid(), &pwd, buf.data(), buf.size(), &result) == 0 &&
+        result != nullptr && result->pw_dir != nullptr) {
+      const auto directory = BoundedTelemetryCString(result->pw_dir);
+      if (directory.size() > kMaxTelemetryInputBytes) {
+        WarnOversizedTelemetryInput();
+      } else if (std::filesystem::path(directory).is_absolute()) {
+        home = directory;
+      }
+    }
+  }
+  if (home.empty()) return {};
+
+#if defined(__APPLE__)
+  return home / "Library" / "Application Support" / "Microsoft" / "DeveloperTools" / ".onnxruntime";
+#else  // Linux / Android / other POSIX
+  return home / ".cache" / "Microsoft" / "DeveloperTools" / ".onnxruntime";
+#endif
+#endif
+}
+
+// Basic v4-UUID shape check (8-4-4-4-12 hex with hyphens); used to reject a corrupted stored value.
+bool IsValidUuid(const std::string& s) {
+  if (s.size() != 36) return false;
+  for (size_t i = 0; i < s.size(); ++i) {
+    const char c = s[i];
+    if (i == 8 || i == 13 || i == 18 || i == 23) {
+      if (c != '-') return false;
+    } else if (!std::isxdigit(static_cast<unsigned char>(c))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Provenance of the persistent device id for this run, surfaced as ProcessInfo's deviceIdStatus so we
+// can gauge how often the id is freshly created vs reused (and detect corruption). Mirrors ONNX Runtime.
+enum class DeviceIdStatus { New,
+                            Existing,
+                            Corrupted,
+                            Failed,
+                            Platform };
+
+const char* DeviceIdStatusString(DeviceIdStatus s) {
+  switch (s) {
+    case DeviceIdStatus::New:
+      return "New";
+    case DeviceIdStatus::Existing:
+      return "Existing";
+    case DeviceIdStatus::Corrupted:
+      return "Corrupted";
+    case DeviceIdStatus::Failed:
+      return "Failed";
+    case DeviceIdStatus::Platform:
+      return "Platform";
+  }
+  return "Unknown";
+}
+
+#if defined(_WIN32)
+class ScopedWinHandle {
+ public:
+  explicit ScopedWinHandle(HANDLE handle = nullptr) : handle_{handle} {}
+  ~ScopedWinHandle() {
+    if (handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
+  }
+
+  ScopedWinHandle(const ScopedWinHandle&) = delete;
+  ScopedWinHandle& operator=(const ScopedWinHandle&) = delete;
+
+  HANDLE Get() const { return handle_; }
+
+ private:
+  HANDLE handle_{};
+};
+
+class ScopedDeviceIdMutex {
+ public:
+  ScopedDeviceIdMutex() {
+    HANDLE token{};
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return;
+    ScopedWinHandle token_handle{token};
+
+    DWORD size = 0;
+    GetTokenInformation(token_handle.Get(), TokenUser, nullptr, 0, &size);
+    if (size < sizeof(TOKEN_USER) || size > sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE) return;
+    std::vector<unsigned char> token_info(size);
+    if (size == 0 ||
+        !GetTokenInformation(token_handle.Get(), TokenUser, token_info.data(), size, &size)) {
+      return;
+    }
+
+    const auto* token_user = reinterpret_cast<const TOKEN_USER*>(token_info.data());
+    if (!IsValidSid(token_user->User.Sid)) return;
+    const DWORD sid_size = GetLengthSid(token_user->User.Sid);
+    uint64_t sid_hash = 14695981039346656037ULL;
+    const auto* sid_bytes = static_cast<const unsigned char*>(token_user->User.Sid);
+    for (DWORD i = 0; i < sid_size; ++i) {
+      sid_hash ^= sid_bytes[i];
+      sid_hash *= 1099511628211ULL;
+    }
+
+    std::array<wchar_t, 96> mutex_name{};
+    _snwprintf_s(mutex_name.data(), mutex_name.size(), _TRUNCATE,
+                 L"Global\\Microsoft.DeveloperTools.OnnxRuntime.DeviceId.%016llx",
+                 static_cast<unsigned long long>(sid_hash));
+
+    handle_ = CreateMutexW(nullptr, FALSE, mutex_name.data());
+    if (handle_ == nullptr) return;
+
+    const DWORD wait_result = WaitForSingleObject(handle_, 1000);
+    acquired_ = wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED;
+  }
+
+  ~ScopedDeviceIdMutex() {
+    if (acquired_) ReleaseMutex(handle_);
+    if (handle_ != nullptr) CloseHandle(handle_);
+  }
+
+  ScopedDeviceIdMutex(const ScopedDeviceIdMutex&) = delete;
+  ScopedDeviceIdMutex& operator=(const ScopedDeviceIdMutex&) = delete;
+
+  explicit operator bool() const { return acquired_; }
+
+ private:
+  HANDLE handle_{};
+  bool acquired_{};
+};
+
+enum class RegistryReadResult { Missing,
+                                Valid,
+                                Invalid,
+                                Failed };
+
+struct RegistryRead {
+  RegistryReadResult result;
+  std::string value;
+};
+
+// Read (or create) the persistent device id in the Windows registry at
+// HKCU\SOFTWARE\Microsoft\DeveloperTools\.onnxruntime : deviceid (REG_SZ), matching Olive and the
+// wider Microsoft AI dev-tools family so a machine reports one shared device id. HKCU is per-user;
+// the raw UUID is never sent (callers hash it) and can be reset by deleting the value.
+std::string GetOrCreateWindowsDeviceId(DeviceIdStatus& status) {
+  static constexpr const char* kSubKey = "SOFTWARE\\Microsoft\\DeveloperTools\\.onnxruntime";
+  static constexpr const char* kValueName = "deviceid";
+
+  const auto read_existing = [&]() -> RegistryRead {
+    HKEY key{};
+    const LSTATUS open_status =
+        RegOpenKeyExA(HKEY_CURRENT_USER, kSubKey, 0, KEY_READ | KEY_WOW64_64KEY, &key);
+    if (open_status == ERROR_FILE_NOT_FOUND) return {RegistryReadResult::Missing, {}};
+    if (open_status != ERROR_SUCCESS) return {RegistryReadResult::Failed, {}};
+
+    std::array<char, 256> buffer{};
+    DWORD type = 0;
+    DWORD size = static_cast<DWORD>(buffer.size());
+    const LSTATUS query =
+        RegQueryValueExA(key, kValueName, nullptr, &type, reinterpret_cast<LPBYTE>(buffer.data()), &size);
+    RegCloseKey(key);
+    if (query == ERROR_FILE_NOT_FOUND) return {RegistryReadResult::Missing, {}};
+    if (query == ERROR_MORE_DATA) return {RegistryReadResult::Invalid, {}};
+    if (query != ERROR_SUCCESS) return {RegistryReadResult::Failed, {}};
+    if (type != REG_SZ || size == 0 || size > buffer.size()) return {RegistryReadResult::Invalid, {}};
+
+    size_t length = size;
+    if (buffer[length - 1] == '\0') --length;
+    const std::string_view value{buffer.data(), length};
+    if (value.find('\0') != std::string_view::npos) return {RegistryReadResult::Invalid, {}};
+    std::string uuid{TelemetryInternal::TrimAscii(value)};
+    return {IsValidUuid(uuid) ? RegistryReadResult::Valid : RegistryReadResult::Invalid,
+            std::move(uuid)};
+  };
+
+  RegistryRead existing = read_existing();
+  if (existing.result == RegistryReadResult::Valid) {
+    status = DeviceIdStatus::Existing;
+    return std::move(existing.value);
+  }
+  if (existing.result == RegistryReadResult::Failed) {
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
+  }
+  const bool was_corrupted = existing.result == RegistryReadResult::Invalid;
+
+  ScopedDeviceIdMutex mutex;
+  if (!mutex) {
+    existing = read_existing();
+    if (existing.result == RegistryReadResult::Valid) {
+      status = DeviceIdStatus::Existing;
+      return std::move(existing.value);
+    }
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
+  }
+
+  // Another process may have published the value while this process waited.
+  existing = read_existing();
+  if (existing.result == RegistryReadResult::Valid) {
+    status = DeviceIdStatus::Existing;
+    return std::move(existing.value);
+  }
+  if (existing.result == RegistryReadResult::Failed) {
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
+  }
+
+  std::string uuid = GenerateUuidV4();
+  bool wrote = false;
+  HKEY write_key{};
+  if (RegCreateKeyExA(HKEY_CURRENT_USER, kSubKey, 0, nullptr, REG_OPTION_NON_VOLATILE,
+                      KEY_WRITE | KEY_WOW64_64KEY, nullptr, &write_key, nullptr) == ERROR_SUCCESS) {
+    wrote = RegSetValueExA(write_key, kValueName, 0, REG_SZ,
+                           reinterpret_cast<const BYTE*>(uuid.c_str()),
+                           static_cast<DWORD>(uuid.size() + 1)) == ERROR_SUCCESS;
+    RegCloseKey(write_key);
+  }
+  // Corrupted (invalid-and-regenerated) is preserved over New even after a successful rewrite so
+  // callers can still observe that the stored id had to be replaced.
+  status = !wrote ? DeviceIdStatus::Failed
+                  : (was_corrupted || existing.result == RegistryReadResult::Invalid
+                         ? DeviceIdStatus::Corrupted
+                         : DeviceIdStatus::New);
+  return uuid;
+}
+#endif  // _WIN32
+
+#if !defined(_WIN32)
+// ORT and OGA share this file and use the same flock-first protocol so corruption repair is
+// serialized even when both libraries are loaded in one process.
+constexpr char kDeviceIdLockFileName[] = "deviceid.lock";
+
+bool CreateDirectoryTreeOwnerOnly(const std::filesystem::path& dir, bool leaf = true) {
+  if (dir.empty()) return false;
+
+  std::error_code ec;
+  if (leaf && std::filesystem::is_symlink(dir, ec)) return false;
+  ec.clear();
+  if (std::filesystem::exists(dir, ec)) {
+    if (!std::filesystem::is_directory(dir, ec)) return false;
+    if (leaf) {
+      ec.clear();
+      std::filesystem::permissions(dir, std::filesystem::perms::owner_all,
+                                   std::filesystem::perm_options::replace, ec);
+      if (ec) return false;
+    }
+    return true;
+  }
+
+  const std::filesystem::path parent = dir.parent_path();
+  if (!parent.empty() && parent != dir && !CreateDirectoryTreeOwnerOnly(parent, false)) {
+    return false;
+  }
+
+  const std::string dir_path = dir.string();
+  if (mkdir(dir_path.c_str(), S_IRWXU) != 0 && errno != EEXIST) return false;
+
+  ec.clear();
+  if (leaf && std::filesystem::is_symlink(dir, ec)) return false;
+  ec.clear();
+  if (!std::filesystem::is_directory(dir, ec)) return false;
+  if (leaf) {
+    std::filesystem::permissions(dir, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace, ec);
+    if (ec) return false;
+  }
+  return true;
+}
+
+class ScopedFileDescriptor {
+ public:
+  explicit ScopedFileDescriptor(int fd = -1) : fd_(fd) {}
+  ~ScopedFileDescriptor() {
+    if (fd_ >= 0) close(fd_);
+  }
+
+  ScopedFileDescriptor(const ScopedFileDescriptor&) = delete;
+  ScopedFileDescriptor& operator=(const ScopedFileDescriptor&) = delete;
+
+  int Get() const { return fd_; }
+  explicit operator bool() const { return fd_ >= 0; }
+
+ private:
+  int fd_;
+};
+
+ScopedFileDescriptor OpenStorageDirectoryNoFollow(const std::filesystem::path& dir) {
+  int flags = O_RDONLY;
+#ifdef O_DIRECTORY
+  flags |= O_DIRECTORY;
+#endif
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+  flags |= O_CLOEXEC;
+#endif
+
+  const std::string dir_path = dir.string();
+  const int fd = open(dir_path.c_str(), flags);
+  if (fd < 0) return ScopedFileDescriptor{};
+
+  struct stat directory_info{};
+  if (fstat(fd, &directory_info) != 0 ||
+      !S_ISDIR(directory_info.st_mode) ||
+      directory_info.st_uid != geteuid() ||
+      fchmod(fd, S_IRWXU) != 0) {
+    close(fd);
+    return ScopedFileDescriptor{};
+  }
+
+  return ScopedFileDescriptor(fd);
+}
+
+bool AcquireExclusiveFileLock(int fd) {
+  constexpr auto kRetryDelay = std::chrono::milliseconds(10);
+  constexpr auto kTimeout = std::chrono::seconds(1);
+  const auto deadline = std::chrono::steady_clock::now() + kTimeout;
+
+  while (true) {
+#if defined(ORTGENAI_DEVICE_ID_USE_FLOCK)
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+      return true;
+    }
+#else
+    struct flock lock{};
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    if (fcntl(fd, F_SETLK, &lock) == 0) {
+      return true;
+    }
+#endif
+
+    if (errno == EINTR) continue;
+    if (errno != EACCES && errno != EAGAIN && errno != EWOULDBLOCK) return false;
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(kRetryDelay);
+  }
+}
+
+class ScopedDeviceIdFileLock {
+ public:
+  explicit ScopedDeviceIdFileLock(int directory_fd) {
+    int flags = O_RDWR | O_CREAT;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+
+    fd_ = openat(directory_fd, kDeviceIdLockFileName, flags, S_IRUSR | S_IWUSR);
+    if (fd_ < 0) return;
+
+    struct stat file_info{};
+    if (fstat(fd_, &file_info) != 0 ||
+        !S_ISREG(file_info.st_mode) ||
+        file_info.st_uid != geteuid() ||
+        fchmod(fd_, S_IRUSR | S_IWUSR) != 0 ||
+        !AcquireExclusiveFileLock(fd_)) {
+      close(fd_);
+      fd_ = -1;
+    }
+  }
+
+  ~ScopedDeviceIdFileLock() {
+    if (fd_ >= 0) close(fd_);
+  }
+
+  ScopedDeviceIdFileLock(const ScopedDeviceIdFileLock&) = delete;
+  ScopedDeviceIdFileLock& operator=(const ScopedDeviceIdFileLock&) = delete;
+
+  explicit operator bool() const { return fd_ >= 0; }
+
+ private:
+  int fd_{-1};
+};
+
+enum class DeviceIdPublishResult {
+  Created,
+  AlreadyExists,
+  Failed,
+};
+
+enum class DeviceIdReadResult {
+  Missing,
+  Valid,
+  Invalid,
+  Failed,
+};
+
+struct DeviceIdFileRead {
+  DeviceIdReadResult result;
+  std::string uuid;
+};
+
+DeviceIdFileRead ReadDeviceIdFileNoFollow(int directory_fd, const char* file_name) {
+  int flags = O_RDONLY;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+#ifdef O_NONBLOCK
+  flags |= O_NONBLOCK;
+#endif
+#ifdef O_CLOEXEC
+  flags |= O_CLOEXEC;
+#endif
+
+  const int fd = openat(directory_fd, file_name, flags);
+  if (fd < 0) {
+    return {errno == ENOENT ? DeviceIdReadResult::Missing : DeviceIdReadResult::Failed, {}};
+  }
+
+  struct stat file_info{};
+  if (fstat(fd, &file_info) != 0 || !S_ISREG(file_info.st_mode)) {
+    close(fd);
+    return {DeviceIdReadResult::Failed, {}};
+  }
+
+  std::array<char, 65> buffer{};
+  size_t total = 0;
+  bool read_ok = true;
+  while (total < buffer.size()) {
+    const ssize_t count = read(fd, buffer.data() + total, buffer.size() - total);
+    if (count > 0) {
+      total += static_cast<size_t>(count);
+    } else if (count == 0) {
+      break;
+    } else if (errno != EINTR) {
+      read_ok = false;
+      break;
+    }
+  }
+  if (close(fd) != 0) read_ok = false;
+  if (!read_ok) return {DeviceIdReadResult::Failed, {}};
+  if (total == buffer.size()) return {DeviceIdReadResult::Invalid, {}};
+
+  std::string uuid{TelemetryInternal::TrimAscii(std::string_view{buffer.data(), total})};
+  return {IsValidUuid(uuid) ? DeviceIdReadResult::Valid : DeviceIdReadResult::Invalid,
+          std::move(uuid)};
+}
+
+DeviceIdPublishResult PublishDeviceIdFileNoFollow(int directory_fd,
+                                                  const char* file_name,
+                                                  const std::string& uuid,
+                                                  bool replace_existing) {
+  const std::string temp_name = std::string(file_name) + ".tmp." + GenerateUuidV4();
+
+  int flags = O_WRONLY | O_CREAT | O_EXCL;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+  flags |= O_CLOEXEC;
+#endif
+  int fd = openat(directory_fd, temp_name.c_str(), flags, S_IRUSR | S_IWUSR);
+  if (fd < 0) return DeviceIdPublishResult::Failed;
+
+  bool wrote = fchmod(fd, S_IRUSR | S_IWUSR) == 0;
+  const char* data = uuid.data();
+  size_t remaining = uuid.size();
+  while (wrote && remaining > 0) {
+    const ssize_t n = write(fd, data, remaining);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) {
+      wrote = false;
+      break;
+    }
+    data += n;
+    remaining -= static_cast<size_t>(n);
+  }
+  if (close(fd) != 0) wrote = false;
+
+  if (!wrote) {
+    unlinkat(directory_fd, temp_name.c_str(), 0);
+    return DeviceIdPublishResult::Failed;
+  }
+
+  int publish_result;
+  if (replace_existing) {
+    publish_result = renameat(directory_fd, temp_name.c_str(), directory_fd, file_name);
+  } else {
+    publish_result = linkat(directory_fd, temp_name.c_str(), directory_fd, file_name, 0);
+  }
+  const int publish_error = errno;
+  unlinkat(directory_fd, temp_name.c_str(), 0);
+  if (publish_result != 0) {
+    const bool already_exists = !replace_existing && publish_error == EEXIST;
+    return already_exists ? DeviceIdPublishResult::AlreadyExists : DeviceIdPublishResult::Failed;
+  }
+  return DeviceIdPublishResult::Created;
+}
+#endif  // !_WIN32
+
+// Return a persistent desktop device id: a locally-generated random UUID (NOT a hardware identifier such
+// as the machine GUID). On Windows it lives in the registry (see GetOrCreateWindowsDeviceId); on POSIX
+// it is a "deviceid" file under the shared Microsoft/DeveloperTools/.onnxruntime directory, matching
+// ONNX Runtime and Olive. Because it is a generated UUID it is not a device fingerprint and can be reset
+// by clearing the registry value / deleting the file. The raw UUID is never sent — callers hash it.
+// `status` records the id's provenance for this run (New/Existing/Corrupted/Failed).
+std::string GetOrCreatePersistentDeviceId(DeviceIdStatus& status) {
+#if defined(_WIN32)
+  return GetOrCreateWindowsDeviceId(status);
+#else
+  const std::filesystem::path dir = GetDeviceIdStorageDir();
+  if (dir.empty()) {
+    // No per-user storage location (e.g. HOME unset). Use an ephemeral UUID instead of persisting to a
+    // predictable world-writable temp path, which would be a target for pre-seeding or symlink attacks.
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
+  }
+  if (!CreateDirectoryTreeOwnerOnly(dir)) {
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
+  }
+  ScopedFileDescriptor directory = OpenStorageDirectoryNoFollow(dir);
+  if (!directory) {
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
+  }
+
+  const DeviceIdFileRead existing = ReadDeviceIdFileNoFollow(directory.Get(), "deviceid");
+  if (existing.result == DeviceIdReadResult::Valid) {
+    status = DeviceIdStatus::Existing;
+    return existing.uuid;
+  }
+  if (existing.result == DeviceIdReadResult::Failed) {
+    status = DeviceIdStatus::Failed;
+    return GenerateUuidV4();
+  }
+
+  const bool file_existed = existing.result == DeviceIdReadResult::Invalid;
+
+  std::optional<ScopedDeviceIdFileLock> repair_lock;
+  if (file_existed) {
+    repair_lock.emplace(directory.Get());
+    if (!*repair_lock) {
+      status = DeviceIdStatus::Failed;
+      return GenerateUuidV4();
+    }
+
+    // Another OGA or ORT process may have repaired the shared file while this process waited.
+    const DeviceIdFileRead repaired = ReadDeviceIdFileNoFollow(directory.Get(), "deviceid");
+    if (repaired.result == DeviceIdReadResult::Valid) {
+      status = DeviceIdStatus::Existing;
+      return repaired.uuid;
+    }
+    if (repaired.result == DeviceIdReadResult::Failed) {
+      status = DeviceIdStatus::Failed;
+      return GenerateUuidV4();
+    }
+  }
+
+  std::string uuid = GenerateUuidV4();
+  const DeviceIdPublishResult publish_result =
+      PublishDeviceIdFileNoFollow(directory.Get(), "deviceid", uuid, file_existed);
+  if (publish_result == DeviceIdPublishResult::AlreadyExists) {
+    // Another process published a complete first-run id first. Read back the winner so all
+    // concurrent processes report the same value.
+    const DeviceIdFileRead winner = ReadDeviceIdFileNoFollow(directory.Get(), "deviceid");
+    if (winner.result == DeviceIdReadResult::Valid) {
+      status = DeviceIdStatus::Existing;
+      return winner.uuid;
+    }
+    status = DeviceIdStatus::Failed;
+    return uuid;
+  }
+
+  // A file that existed but held an invalid id is reported as Corrupted; a fresh write as New.
+  status = publish_result != DeviceIdPublishResult::Created
+               ? DeviceIdStatus::Failed
+               : (file_existed ? DeviceIdStatus::Corrupted : DeviceIdStatus::New);
+  return uuid;
+#endif  // _WIN32
+}
+
+bool UsePlatformDeviceId() {
+#if defined(__ANDROID__)
+  return true;
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+  return true;
+#else
+  return false;
+#endif
+}
+
+}  // namespace
+
+std::filesystem::path GetTelemetryStorageDir() {
+  const std::filesystem::path dir = GetDeviceIdStorageDir();
+  if (dir.empty()) return {};
+#if !defined(_WIN32)
+  if (!CreateDirectoryTreeOwnerOnly(dir)) return {};
+#else
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+#endif
+  return dir;
+}
+
+const DeviceInfo& GetDeviceInfo() {
+  static DeviceInfo info = [] {
+    DeviceInfo di;
+    DeviceIdStatus id_status = DeviceIdStatus::Failed;
+    if (UsePlatformDeviceId()) {
+      id_status = DeviceIdStatus::Platform;
+    } else {
+      // "c:" prefix marks a custom device id; the value is a stable hash of a
+      // locally-generated UUID plus a product salt (no hardware identifier is ever sent).
+      di.device_id = "c:" + Fnv1aHex(std::string{kDeviceIdHashSalt} + GetOrCreatePersistentDeviceId(id_status));
+    }
+    di.device_id_status = DeviceIdStatusString(id_status);
+    di.os_architecture = GetOsArchitecture();
+    di.processor_count = GetProcessorCount();
+    di.total_memory_mb = GetTotalMemoryMB();
+    di.cpu_model = GetCpuModel();
+    const auto host_environment = GetHostEnvironmentInfo();
+    di.is_container = host_environment.is_container;
+    di.is_virtual_machine = host_environment.is_virtual_machine;
+    di.is_emulator = host_environment.is_emulator;
+    di.container_type = host_environment.container_type;
+    di.virtualization_type = host_environment.virtualization_type;
+    di.host_environment = host_environment.environment_class;
+    di.environment_detection_confidence = host_environment.detection_confidence;
+    di.device_id_scope = host_environment.device_id_scope;
+    return di;
+  }();
+  return info;
+}
+
+}  // namespace Generators
+
+#else
+
+namespace Generators {
+
+const DeviceInfo& GetDeviceInfo() {
+  static const DeviceInfo info{};
+  return info;
+}
+
+std::filesystem::path GetTelemetryStorageDir() {
+  return {};
+}
+
+}  // namespace Generators
+
+#endif  // ORTGENAI_ENABLE_TELEMETRY
+
+#if defined(ORTGENAI_DEVICE_ID_USE_FLOCK)
+#undef ORTGENAI_DEVICE_ID_USE_FLOCK
+#endif

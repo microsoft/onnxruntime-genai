@@ -32,5 +32,4 @@ class NemotronModel(LlamaModel):
         down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
         down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
 
-        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+        self.mlp_attrs["output_0"] = f"{down_name}/output_0"

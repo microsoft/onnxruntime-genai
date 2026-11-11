@@ -115,7 +115,10 @@ def generate_dependencies(xml_text, package_version, ort_package_name, ort_packa
     for framework in target_frameworks:
         xml_text.append(f'<group targetFramework="{framework}">')
         xml_text.append(f'<dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="{package_version}" />')
-        xml_text.append(f'<dependency id="{ort_package_name}" version="{ort_package_version}" />')
+        # ort_package_name is empty for packages (e.g. .Foundry) that intentionally
+        # carry no ONNX Runtime dependency; skip the ORT <dependency> in that case.
+        if ort_package_name:
+            xml_text.append(f'<dependency id="{ort_package_name}" version="{ort_package_version}" />')
         xml_text.append("</group>")
 
     xml_text.append("</dependencies>")

@@ -1,0 +1,5 @@
+-keep class ai.onnxruntime.genai.TelemetryInitializer { *; }
+-keep class com.microsoft.applications.events.HttpClient { *; }
+-keep class com.microsoft.applications.events.HttpClient$* { *; }
+-keep class com.microsoft.applications.events.HttpClientRequest { *; }
+-keep class com.microsoft.applications.events.HttpClientRequest$* { *; }

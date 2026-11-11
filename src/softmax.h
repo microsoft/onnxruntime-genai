@@ -1,8 +1,12 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
+#include <span>
+
 namespace Generators {
 
-void SoftmaxWithMax(std::span<float> scores, float temperature, float max_score) {
+inline void SoftmaxWithMax(std::span<float> scores, float temperature, float max_score) {
   // Fused: compute exp and accumulate sum in a single pass
   float inv_temp = 1.0f / temperature;
   float exp_sum = 0.0f;
@@ -19,13 +23,13 @@ void SoftmaxWithMax(std::span<float> scores, float temperature, float max_score)
   }
 }
 
-void Softmax(std::span<float> scores, float temperature) {
+inline void Softmax(std::span<float> scores, float temperature) {
   const float max_score = *std::max_element(scores.begin(), scores.end());
 
   SoftmaxWithMax(scores, temperature, max_score);
 }
 
-void LogSoftMax(std::span<float> scores, float temperature) {
+inline void LogSoftMax(std::span<float> scores, float temperature) {
   float const max_score = *std::max_element(scores.begin(), scores.end());
 
   // Fused: scale and compute sum of exponentials in a single pass

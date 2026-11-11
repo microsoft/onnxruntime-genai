@@ -6,6 +6,7 @@
 #include "request.h"
 #include "scheduled_requests.h"
 #include "cache_manager.h"
+#include "step_plan.h"
 
 /**
  * @file scheduler.h
@@ -15,13 +16,28 @@
 
 namespace Generators {
 
+inline constexpr size_t kDefaultStaticBatchSize = 4;
+
+// Engine::BeginTurn restarts a turn that was canceled before the request made any progress, even after another request
+// took the request's device state, and it enrolls only the first turn of a request. A scheduler that displaces such a
+// request from its slot must therefore keep it in its pool.
+inline bool StaysEnrolledWhenDisplaced(const Request& request) {
+  return request.IsTurnComplete() &&
+         (request.IsRestartableCanceledTurn() || request.NeedsReplayAfterRewind());
+}
+
+struct NontransactionalSchedulingResult {
+  StepOutcome outcome;
+  std::optional<ScheduledRequests> scheduled;
+};
+
 struct Scheduler {
   /**
    * @brief Constructs a Scheduler instance with the specified model and cache manager.
    * @param model A shared pointer to the Model object to be used by the Scheduler.
    * @param cache_manager A shared pointer to the CacheManager for managing cache states.
    */
-  Scheduler() = default;
+  explicit Scheduler(std::shared_ptr<Model> model);
 
   static std::unique_ptr<Scheduler> Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
 
@@ -43,6 +59,20 @@ struct Scheduler {
   virtual void RemoveRequest(std::shared_ptr<Request> request) = 0;
 
   /**
+   * @brief Removes scheduler and cache ownership during Engine destruction.
+   *
+   * Unlike normal removal, this path cannot consult the Request's weak Engine reference and must
+   * not throw from the Engine destructor.
+   */
+  virtual void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept {
+    try {
+      RemoveRequest(request);
+    } catch (...) {
+    }
+  }
+
+  /**
    * @brief Steps through the Scheduler to process requests.
    * @return An instance of ScheduledRequests struct.
    *
@@ -50,6 +80,27 @@ struct Scheduler {
    * and returning any requests that have been scheduled.
    */
   virtual ScheduledRequests Schedule() = 0;
+
+  // Expected capacity and phase deferral use a value, never the fatal exception path.
+  // Existing schedulers retain their Schedule implementation through this adapter.
+  virtual NontransactionalSchedulingResult ScheduleStep() {
+    auto scheduled = Schedule();
+    if (!scheduled)
+      return {{StepOutcomeKind::NoWork, 0, nullptr}, std::nullopt};
+    return {{StepOutcomeKind::Committed, 0, nullptr}, std::move(scheduled)};
+  }
+
+  virtual StepPlanningResult PlanStep(StepPlan&) {
+    throw std::logic_error("Scheduler does not support transactional step planning.");
+  }
+
+  ScheduledRequests CreateScheduledRequests(const StepPlan& plan);
+
+  bool SupportsTransactionalSamplerState() const {
+    return !batched_sampler_ || batched_sampler_->SupportsTransactions();
+  }
+
+  virtual bool SupportsIndependentSlotAdmission() const { return false; }
 
   /**
    * @brief Checks if the Scheduler has any pending requests.
@@ -61,6 +112,17 @@ struct Scheduler {
   virtual bool HasPendingRequests() const = 0;
 
   virtual ~Scheduler() = default;
+
+ protected:
+  std::unique_ptr<BatchedSamplerState> CreateSamplingState(
+      const Request& request) const;
+  BatchedSampler* GetBatchedSampler() const { return batched_sampler_.get(); }
+  BatchedSamplingPlan* GetBatchedSamplingPlan() { return &batched_sampling_plan_; }
+
+ private:
+  std::shared_ptr<Model> model_;
+  std::unique_ptr<BatchedSampler> batched_sampler_;
+  BatchedSamplingPlan batched_sampling_plan_;
 };
 
 struct StaticBatchScheduler : Scheduler {
@@ -70,6 +132,9 @@ struct StaticBatchScheduler : Scheduler {
 
   void RemoveRequest(std::shared_ptr<Request> request) override;
 
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept override;
+
   ScheduledRequests Schedule() override;
 
   bool HasPendingRequests() const override;
@@ -78,7 +143,6 @@ struct StaticBatchScheduler : Scheduler {
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
-  std::set<std::shared_ptr<Request>> to_be_removed_requests_;
 };
 
 struct DynamicBatchScheduler : Scheduler {
@@ -88,9 +152,16 @@ struct DynamicBatchScheduler : Scheduler {
 
   void RemoveRequest(std::shared_ptr<Request> request) override;
 
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept override;
+
   ScheduledRequests Schedule() override;
 
+  StepPlanningResult PlanStep(StepPlan& plan) override;
+
   bool HasPendingRequests() const override;
+
+  bool SupportsIndependentSlotAdmission() const override { return true; }
 
  private:
   std::shared_ptr<Model> model_;

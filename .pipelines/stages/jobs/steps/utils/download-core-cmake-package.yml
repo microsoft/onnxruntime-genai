@@ -1,0 +1,15 @@
+parameters:
+- name: core_artifact
+  type: string
+- name: target_path
+  type: string
+- name: artifact_label
+  type: string
+  default: 'core CMake package'
+
+steps:
+- task: DownloadPipelineArtifact@2
+  displayName: 'Download ${{ parameters.artifact_label }} (${{ parameters.core_artifact }})'
+  inputs:
+    artifactName: '${{ parameters.core_artifact }}'
+    targetPath: '${{ parameters.target_path }}'

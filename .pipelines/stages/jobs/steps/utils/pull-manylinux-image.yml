@@ -1,0 +1,58 @@
+parameters:
+- name: arch
+  type: string
+  values: [x64, arm64]
+- name: ep
+  type: string
+  values: [cpu, cuda]
+- name: cuda_version
+  type: string
+- name: base_image_family
+  type: string
+  default: ''
+- name: docker_build_args
+  type: string
+  default: ''
+
+steps:
+- bash: |
+    set -e
+
+    if [ -z "${PIP_INDEX_URL:-}" ]; then
+      echo "PIP_INDEX_URL is not configured; authenticate the Python package feed before building the manylinux image."
+      exit 1
+    fi
+    venv_dir=$(mktemp -d "$(Agent.TempDirectory)/manylinux-image-venv.XXXXXX")
+    trap 'rm -rf -- "$venv_dir"' EXIT
+    python3 -m venv "$venv_dir"
+    source "$venv_dir/bin/activate"
+    python -m pip install requests
+    dockerBuildArgs="$DOCKER_BUILD_ARGS --build-arg BUILD_UID=$(id -u) --secret id=pip_index_url,env=PIP_INDEX_URL"
+    if [ '${{ parameters.ep }}' = 'cuda' ] && [ '${{ parameters.arch }}' = 'arm64' ]; then
+      [ '${{ parameters.cuda_version }}' = '13.1' ] || {
+        echo 'Linux ARM64 CUDA requires CUDA 13.1'; exit 1; }
+      dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_34_cuda_13_aarch64'
+    elif [ '${{ parameters.ep }}' = 'cuda' ]; then
+      cudaDockerVer='${{ parameters.cuda_version }}'
+      if [[ '${{ parameters.cuda_version }}' == 13.* ]]; then
+        cudaDockerVer='13'
+      fi
+      dockerfile="tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_${cudaDockerVer}"
+    elif [ '${{ parameters.arch }}' = 'arm64' ]; then
+      dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_aarch64'
+    else
+      dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_x64'
+    fi
+    set -x
+    python tools/ci_build/get_docker_image.py \
+      --dockerfile "$dockerfile" \
+      --context tools/ci_build/github/linux/docker/manylinux \
+      --base-image-family "$BASE_IMAGE_FAMILY" \
+      --docker-build-args "$dockerBuildArgs" \
+      --container-registry onnxruntimebuildcache.azurecr.io \
+      --repository "ortgenai${{ parameters.ep }}build${{ parameters.arch }}"
+  displayName: 'Pull manylinux Docker image (${{ parameters.ep }}, ${{ parameters.arch }})'
+  workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    BASE_IMAGE_FAMILY: ${{ parameters.base_image_family }}
+    DOCKER_BUILD_ARGS: ${{ parameters.docker_build_args }}

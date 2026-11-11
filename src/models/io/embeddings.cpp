@@ -1,0 +1,179 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#include "generator/generators.h"
+#include "models/model.h"
+#include "models/io/embeddings.h"
+
+namespace Generators {
+
+Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name, int64_t hidden_size,
+                       int64_t feature_count)
+    : state_{state},
+      type_{mode == Embeddings::Mode::Input
+                ? model_.session_info_.GetInputDataType(name)
+                : model_.session_info_.GetOutputDataType(name)},
+      mode_{mode},
+      name_{name} {
+  shape_ = {
+      static_cast<int64_t>(state_.params_->search.batch_size) * state_.params_->search.num_beams,
+      0,
+  };
+  if (feature_count > 0) {
+    shape_.push_back(feature_count);
+  }
+  shape_.push_back(hidden_size > 0 ? hidden_size : model_.config_->model.decoder.hidden_size);
+
+  // Embeddings are only transient inputs and outputs.
+  // They are never the user provided/requested model inputs/outputs
+  // So only create the transient input and reuse that ortvalue for previous
+  // steps in the pipeline.
+  if (mode == Embeddings::Mode::Input) {
+    embeddings_ = std::make_unique<Tensor>(state_.p_session_device_inputs_, type_);
+    embeddings_->CreateTensor(shape_);
+  }
+}
+
+void Embeddings::Add() {
+  if (mode_ == Embeddings::Mode::Output) {
+    // In case the embeddings are output of a model, they are added
+    // as a nullptr to reserve a slot in the outputs. The embedding
+    // output will be overwritten by the input of the following model
+    // when ReuseEmbeddingsBuffer is invoked. For example, if we have
+    // a pipeline that looks like EmbeddingModel -> TextModel, we
+    // create the embedding tensor in the TextModel as an input and
+    // simply reuse it in the EmbeddingModel as an output.
+    index_ = state_.outputs_.size();
+    state_.outputs_.push_back(nullptr);
+    state_.output_names_.push_back(name_.c_str());
+  } else {
+    index_ = state_.inputs_.size();
+    state_.inputs_.push_back(embeddings_->GetOrtTensor());
+    state_.input_names_.push_back(name_.c_str());
+  }
+}
+
+void Embeddings::UpdateSequenceLength(size_t new_length) {
+  RestoreFullView();
+
+  if (static_cast<size_t>(shape_[1]) != new_length) {
+    shape_[1] = new_length;
+
+    if (mode_ == Embeddings::Mode::Input) {
+      const bool capture = state_.params_->use_graph_capture && new_length > 0 &&
+                           new_length <= static_cast<size_t>(state_.params_->max_graph_capture_length);
+      if (capture) {
+        auto& buffer = captured_embeddings_[new_length];
+        if (!buffer) {
+          buffer = std::make_shared<Tensor>(state_.p_session_device_inputs_, type_);
+          buffer->CreateTensor(shape_, true);
+        }
+        embeddings_ = buffer;
+      } else {
+        embeddings_ = std::make_shared<Tensor>(state_.p_session_device_inputs_, type_);
+        embeddings_->CreateTensor(shape_);
+      }
+      state_.inputs_[index_] = embeddings_->GetOrtTensor();
+    }
+  }
+}
+
+void Embeddings::UseChunkView(size_t offset, size_t length) {
+  if (mode_ != Embeddings::Mode::Input) {
+    throw std::runtime_error("Embeddings::UseChunkView is only valid for input embeddings.");
+  }
+  if (shape_[0] != 1) {
+    throw std::runtime_error("Prefill chunking requires a batch size of 1 for the embeddings input.");
+  }
+  if (offset + length > static_cast<size_t>(shape_[1])) {
+    throw std::runtime_error("Embeddings::UseChunkView - requested chunk exceeds the embeddings sequence length.");
+  }
+
+  const size_t element_size = Ort::SizeOf(type_);
+  size_t feature_elements = 1;
+  for (size_t i = 2; i < shape_.size(); ++i) {
+    feature_elements *= static_cast<size_t>(shape_[i]);
+  }
+  auto* raw = static_cast<uint8_t*>(embeddings_->GetMutableRawData());
+
+  auto chunk_shape = shape_;
+  chunk_shape[1] = static_cast<int64_t>(length);
+  chunk_view_ = OrtValue::CreateTensor(embeddings_->GetOrtTensor()->GetTensorMemoryInfo(),
+                                       raw + offset * feature_elements * element_size,
+                                       length * feature_elements * element_size,
+                                       std::span<const int64_t>(chunk_shape), type_);
+  state_.inputs_[index_] = chunk_view_.get();
+}
+
+void Embeddings::RestoreFullView() {
+  if (!chunk_view_)
+    return;
+
+  chunk_view_ = nullptr;
+  if (mode_ == Embeddings::Mode::Input) {
+    state_.inputs_[index_] = embeddings_->GetOrtTensor();
+  }
+}
+
+void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
+  if (mode_ == Embeddings::Mode::Input ||
+      other.mode_ == Embeddings::Mode::Output) {
+    throw std::runtime_error("Incorrect usage of the embeddings inputs and outputs.");
+  }
+
+  OrtValue* consumer = other.state_.inputs_[other.index_];
+  auto& consumer_device = *other.state_.p_session_device_inputs_;
+
+  if (SessionCanAccess(*state_.p_session_device_, consumer_device)) {
+    // Share the input embeddings OrtValue* from other with the output embedding for this.
+    consumer_ = nullptr;
+    consumer_device_ = nullptr;
+    consumer_bytes_ = {};
+    host_view_ = nullptr;
+    state_.outputs_[index_] = consumer;
+    return;
+  }
+
+  // The consumer allocated its input on a device this session has no EP for. Binding it as an
+  // output would have ORT write host bytes over that device pointer, so this session writes the
+  // buffer's host mirror instead, and CopyToConsumer() uploads it once the session has run.
+  if (consumer != consumer_ || recycle_mirror_) {
+    // Wrapped once per decoder buffer, so that decode steps reuse the wrapper and its mirror, unless
+    // the device recycles mirrors. Then every step takes a fresh one: replacing the wrapper hands the
+    // previous mirror back to a pool that reuses it only once its upload has completed, so nothing
+    // has to wait for that upload, whereas reusing a mirror drains the whole stream, including the
+    // decoder's input updates queued since (see CpuEmbedding::Workspace::Prepare).
+    auto info = consumer->GetTensorTypeAndShapeInfo();
+    auto shape = info->GetShape();
+    consumer_bytes_ = ByteWrapTensor(consumer_device, *consumer);
+    auto mirror = consumer_bytes_.empty() ? std::span<uint8_t>{} : consumer_bytes_.CpuSpan();
+    host_view_ = OrtValue::CreateTensor(*OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault),
+                                        mirror.data(), mirror.size_bytes(), shape, info->GetElementType());
+    consumer_ = consumer;
+    consumer_device_ = &consumer_device;
+    recycle_mirror_ = consumer_device.RecyclesHostMirrorsAfterUpload(mirror.size_bytes());
+  }
+  state_.outputs_[index_] = host_view_.get();
+}
+
+void Embeddings::CopyToConsumer() {
+  if (!consumer_ || consumer_bytes_.empty())
+    return;
+
+  // Queued on the consumer device's stream ahead of the consumer's run. Nothing waits for it here,
+  // so that it does not hold back that run. A recycled mirror is never written again; any other is,
+  // so WaitForUpload waits for this upload first.
+  consumer_bytes_.CopyCpuToDevice();
+  if (!recycle_mirror_)
+    upload_device_ = consumer_device_;
+}
+
+void Embeddings::WaitForUpload() {
+  if (!upload_device_)
+    return;
+
+  upload_device_->Synchronize();
+  upload_device_ = nullptr;
+}
+
+}  // namespace Generators

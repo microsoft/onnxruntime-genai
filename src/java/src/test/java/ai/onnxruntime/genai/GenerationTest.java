@@ -24,7 +24,7 @@ public class GenerationTest {
   // phi-2 can be used in full end-to-end testing but needs to be manually downloaded.
   // it's also used this way in the C# unit tests.
   private static final String phi2ModelPath() {
-    return TestUtils.getTestResourcePath("phi-2/int4/cpu");
+    return TestUtils.getTestModelPath("phi-2/int4/cpu");
   }
 
   @SuppressWarnings("unused") // Used in EnabledIf
@@ -141,6 +141,11 @@ public class GenerationTest {
 
         assertEquals(params.getSearchNumber("max_length"), maxLength);
         assertEquals(params.getSearchBool("early_stopping"), true);
+        try (SpeculativeStats stats = generator.getSpeculativeStats()) {
+          assertEquals(0, stats.getCount("rounds"));
+          assertEquals(false, stats.getBool("formula_supported"));
+          assertEquals(0.0, stats.getNumber("acceptance_rate"));
+        }
         assertEquals(generator.tokenCount(), 4);
 
         while (!generator.isDone()) {

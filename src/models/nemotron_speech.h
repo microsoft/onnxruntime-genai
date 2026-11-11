@@ -4,11 +4,51 @@
 // Nemotron Speech Streaming ASR model support.
 #pragma once
 
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
 #include "model.h"
-#include "audio_features.h"
+#include "models/io/audio_features.h"
 #include "transducer_state.h"
 
 namespace Generators {
+
+int64_t GetNemotronChunkStartSample(const std::vector<ExtraInput>& extra_inputs);
+
+inline int64_t GetNemotronGlobalFrame(int64_t chunk_start_sample, int64_t local_frame,
+                                      int hop_length, int subsampling_factor) {
+  if (chunk_start_sample < 0 || local_frame < 0 || hop_length <= 0 || subsampling_factor <= 0) {
+    throw std::runtime_error("Nemotron timestamp frame inputs must be non-negative with a positive frame stride");
+  }
+  const int64_t samples_per_frame = static_cast<int64_t>(hop_length) * subsampling_factor;
+  return chunk_start_sample / samples_per_frame + local_frame;
+}
+
+inline int64_t GetValidatedNemotronMelFrameCount(const std::vector<int64_t>& mel_shape, int64_t expected_num_mels) {
+  if (mel_shape.size() != 3) {
+    throw std::runtime_error("mel input must have rank 3 [batch, frames, mels], got rank " + std::to_string(mel_shape.size()));
+  }
+
+  if (mel_shape[0] != 1) {
+    throw std::runtime_error("mel input batch dimension must be 1, got " + std::to_string(mel_shape[0]));
+  }
+
+  if (mel_shape[2] != expected_num_mels) {
+    throw std::runtime_error("mel input mels dimension (" + std::to_string(mel_shape[2]) +
+                             ") does not match expected num_mels (" + std::to_string(expected_num_mels) + ")");
+  }
+
+  return mel_shape[1];
+}
+
+inline void ValidateNemotronEncoderOutputRank(const std::vector<int64_t>& encoder_shape) {
+  if (encoder_shape.size() != 3) {
+    throw std::runtime_error("Encoder output must have rank 3 [batch, time, channels], got rank " +
+                             std::to_string(encoder_shape.size()));
+  }
+}
 
 struct NemotronConfig {
   // Encoder dimensions (from encoder.hidden_size / num_hidden_layers)
@@ -32,6 +72,11 @@ struct NemotronConfig {
   int chunk_samples{};
   int subsampling_factor{};
   int max_symbols_per_step{};
+
+  // Timestamp production; segment policy belongs to the tokenizer stream.
+  Config::TimestampLevel timestamp_level{Config::TimestampLevel::Off};
+
+  bool TimestampsEnabled() const { return timestamp_level != Config::TimestampLevel::Off; }
 
   // Mel spectrogram parameters
   int num_mels{};
@@ -73,6 +118,9 @@ struct NemotronConfig {
   void PopulateFromConfig(const Config& config);
 };
 
+int NemotronArgMax(const OrtValue& logits, int blank_id, float blank_penalty);
+ONNXTensorElementDataType ValidateNemotronFloatType(std::span<const ONNXTensorElementDataType> types);
+
 /// Holds the rolling encoder cache state between streaming chunks.
 struct NemotronEncoderCache {
   std::unique_ptr<OrtValue> cache_last_channel;
@@ -109,6 +157,7 @@ struct NemotronSpeechModel : Model {
   std::unique_ptr<OrtSessionOptions> joiner_session_options_;
 
   NemotronConfig nemotron_config_;
+  ONNXTensorElementDataType float_type_{};
 };
 
 /// Sub-state for the streaming encoder.
@@ -224,11 +273,12 @@ struct NemotronSpeechState : TransducerState {
   std::unique_ptr<OrtValue> encoded_output_;
   int64_t encoded_len_{0};
 
-  // Pre-allocated encoder frame for joiner input
+  // Pre-allocated encoder frame for the homogeneous joiner input type
   std::unique_ptr<OrtValue> encoder_frame_;
 
   // Decoder state machine
   int64_t time_step_{0};
+  int64_t chunk_start_sample_{0};
   int symbol_step_{0};
   bool need_encoder_run_{false};
 

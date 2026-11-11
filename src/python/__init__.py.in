@@ -4,6 +4,7 @@
 from onnxruntime_genai import _dll_directory
 
 __version__ = "@VERSION_INFO@"
+__commit__ = "@GENAI_COMMIT@"
 __id__ = "@TARGET_NAME@"
 
 _dll_directory.add_onnxruntime_dependency(__id__)
@@ -20,3 +21,5 @@ except ImportError as e:
         from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
     else:
         raise e
+
+from .non_generative import NonGenerativeSession

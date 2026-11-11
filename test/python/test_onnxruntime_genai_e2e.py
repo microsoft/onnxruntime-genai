@@ -8,10 +8,13 @@ import os
 import sys
 
 import onnxruntime_genai as og
-from _test_utils import download_model, get_ci_data_path, run_subprocess
+from _test_utils import download_model, get_ci_data_path, register_plugin_providers, run_subprocess
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
+
+# Register any installed plugin EPs before loading models.
+register_plugin_providers(log)
 
 
 def run_model(model_path: str | bytes | os.PathLike):
@@ -24,17 +27,57 @@ def run_model(model_path: str | bytes | os.PathLike):
         "def binary_search(arr, x):",
     ]
 
-    sequences = tokenizer.encode_batch(prompts)
     params = og.GeneratorParams(model)
-    params.set_search_options(batch_size=3, max_length=200)
+    batch_size = len(prompts)
+    offset = 0
+    while offset < len(prompts):
+        params.set_search_options(batch_size=batch_size, max_length=200)
+        try:
+            generator = og.Generator(model, params)
+        except RuntimeError as error:
+            if (
+                batch_size == 1
+                or "LongRoPE context selection currently requires batch_size=1 and num_beams=1" not in str(error)
+            ):
+                raise
+            batch_size = 1
+            continue
+
+        sequences = tokenizer.encode_batch(prompts[offset : offset + batch_size])
+        generator.append_tokens(sequences)
+        while not generator.is_done():
+            generator.generate_next_token()
+
+        for i in range(batch_size):
+            assert generator.get_sequence(i) is not None
+        offset += batch_size
+        del generator
+
+
+def run_graph_capture_model(model_path: str | bytes | os.PathLike):
+    """Run a graph-capture model for validation.
+
+    Graph-capture models have special compilation to use CUDA/DML/WebGPU
+    graph capture optimization. This method validates that they load and
+    generate output correctly.
+    """
+    model = og.Model(model_path)
+
+    tokenizer = og.Tokenizer(model)
+    prompt = "The quick brown fox"
+    input_ids = tokenizer.encode(prompt)
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=50)
 
     generator = og.Generator(model, params)
-    generator.append_tokens(sequences)
+    generator.append_tokens([input_ids])
     while not generator.is_done():
         generator.generate_next_token()
 
-    for i in range(3):
-        assert generator.get_sequence(i) is not None
+    output = generator.get_sequence(0)
+    assert output is not None
+    assert len(output) > len(input_ids), "Graph-capture model should generate at least one new token"
 
 
 def run_whisper():
@@ -47,15 +90,23 @@ def run_whisper():
 
     num_beams = 5
     (audio_path, expected_transcription) = (
-        os.path.join(cwd, "..", "test_models", "audios", "1272-141231-0002.mp3"),
+        os.path.join(cwd, "..", "audios", "1272-141231-0002.mp3"),
         "The cut on his chest is still dripping blood. The ache of his overstrained eyes. Even the soaring arena around him with thousands of spectators, retrievalidies not worth thinking about.",
     )
 
-    for precision, execution_provider in [("fp16", "cuda"), ("fp32", "cuda"), ("fp32", "cpu")]:
+    # TODO: Re-enable the FP32 CUDA case when its plugin EP memory usage fits the CI GPU.
+    for precision, execution_provider in [("fp16", "cuda"), ("fp32", "cpu")]:
         # Generate model via model builder
-        built_model = os.path.join(cwd, "..", "test_models", f"whisper-tiny-{precision}-{execution_provider}")
-        download_model(model_name="openai/whisper-tiny", input_path="", output_path=built_model, precision=precision,
-                       device=execution_provider, one_layer=False, enable_graph_capture=False)
+        built_model = os.path.join(cwd, "..", "models", f"whisper-tiny-{precision}-{execution_provider}")
+        download_model(
+            model_name="openai/whisper-tiny",
+            input_path="",
+            output_path=built_model,
+            precision=precision,
+            device=execution_provider,
+            one_layer=False,
+            enable_graph_capture=False,
+        )
 
         # Get prebuilt model from CI
         ci_model = os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}")
@@ -95,10 +146,13 @@ def run_tool_calling():
     user_prompt = "What is the weather in Redmond, WA?"
     response_format = "lark_grammar"
 
-    for (model_name, tool_call_start, tool_call_end) in tool_call_models:
-        for (precision, execution_provider) in [("int4", "cpu")]: # TODO: add ("int4", "cuda"), ("int4", "dml") in CIs later
-            model_path = os.path.join(cwd, "..", "test_models", model_name, precision, execution_provider)
-            if not os.path.exists(model_path): continue
+    for model_name, tool_call_start, tool_call_end in tool_call_models:
+        for precision, execution_provider in [
+            ("int4", "cpu")
+        ]:  # TODO: add ("int4", "cuda"), ("int4", "dml") in CIs later
+            model_path = os.path.join(cwd, "..", "models", model_name, precision, execution_provider)
+            if not os.path.exists(model_path):
+                continue
 
             # Run special_tokens.py to mark tool call token ids as special
             command = [
@@ -126,7 +180,7 @@ def run_tool_calling():
                 "--response_format",
                 response_format,
                 "--tools_file",
-                os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
+                os.path.join(cwd, "..", "tool-definitions", "weather.json"),
                 "--tool_call_start",
                 tool_call_start,
                 "--tool_call_end",
@@ -141,7 +195,16 @@ def run_tool_calling():
 
             # Run model_qa.cpp for inference
             command = [
-                os.path.join(cwd, "..", "..", "examples", "c", "build", f"{'Release' if sys.platform.startswith('win') else ''}", f"model_qa{'.exe' if sys.platform.startswith('win') else ''}"),
+                os.path.join(
+                    cwd,
+                    "..",
+                    "..",
+                    "examples",
+                    "c",
+                    "build",
+                    f"{'Release' if sys.platform.startswith('win') else ''}",
+                    f"model_qa{'.exe' if sys.platform.startswith('win') else ''}",
+                ),
                 "-m",
                 model_path,
                 "-e",
@@ -151,7 +214,7 @@ def run_tool_calling():
                 "--response_format",
                 response_format,
                 "--tools_file",
-                os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
+                os.path.join(cwd, "..", "tool-definitions", "weather.json"),
                 "--tool_call_start",
                 tool_call_start,
                 "--tool_call_end",
@@ -166,25 +229,25 @@ def run_tool_calling():
 
 
 def run_nemotron_speech():
-    """Run Nemotron Speech Streaming ASR E2E test by invoking the nemotron_speech.py example."""
+    """Run Nemotron Speech Streaming ASR E2E test by invoking the model-asr.py example."""
     log.debug("Running Nemotron Speech Python E2E Test")
 
-    # Look for nemotron speech model in test_models directory
+    # Look for nemotron speech model in "models" directory
     cwd = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(cwd, "..", "test_models", "nemotron-speech-streaming")
+    model_path = os.path.join(cwd, "..", "models", "nemotron-speech-streaming")
     if not os.path.exists(model_path):
         log.info(f"Nemotron speech model not found at {model_path}, skipping E2E test.")
         return
 
     # Look for a test audio file
-    audio_path = os.path.join(cwd, "..", "test_models", "audios", "1272-141231-0002.mp3")
+    audio_path = os.path.join(cwd, "..", "audios", "1272-141231-0002.mp3")
     if not os.path.exists(audio_path):
         log.info(f"Test audio file not found at {audio_path}, skipping E2E test.")
         return
 
     command = [
         sys.executable,
-        os.path.join(cwd, "..", "..", "examples", "python", "nemotron_speech.py"),
+        os.path.join(cwd, "..", "..", "examples", "python", "model-asr.py"),
         "--model_path",
         model_path,
         "--audio_file",
@@ -198,13 +261,13 @@ def run_parakeet_tdt():
     log.debug("Running Parakeet TDT Python E2E Test")
 
     cwd = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(cwd, "..", "test_models", "parakeet-tdt")
+    model_path = os.path.join(cwd, "..", "models", "parakeet-tdt")
     if not os.path.exists(model_path):
         log.info(f"Parakeet TDT model not found at {model_path}, skipping E2E test.")
         return
 
     for audio_filename in ("jfk.flac", "tedlium_long_120s.flac"):
-        audio_path = os.path.join(cwd, "..", "test_models", "audios", audio_filename)
+        audio_path = os.path.join(cwd, "..", "audios", audio_filename)
         if not os.path.exists(audio_path):
             log.info(f"Test audio file not found at {audio_path}, skipping.")
             continue
@@ -231,20 +294,41 @@ def get_args():
         help="List of model paths to run. Pass as `json.dumps(model_paths)` to this argument.",
     )
 
+    parser.add_argument(
+        "-g",
+        "--graph-capture-models",
+        type=str,
+        default="[]",
+        help="List of graph-capture model paths to run. Pass as `json.dumps(model_paths)` to this argument.",
+    )
+
     args = parser.parse_args()
     args.models = json.loads(args.models)
+    args.graph_capture_models = json.loads(args.graph_capture_models)
     return args
 
 
-if __name__ == "__main__":
+def main():
     args = get_args()
+    failed_models = []
     for model_path in args.models:
         try:
             log.info(f"Running {model_path}")
             run_model(model_path)
         except Exception as e:
             log.error(e)
-            log.error(f"Failed to run {model_path}", exc_info=True)
+            log.exception(f"Failed to run {model_path}")
+            failed_models.append(model_path)
+
+    # Run graph-capture models with pytest for proper marker filtering
+    for model_path in args.graph_capture_models:
+        try:
+            log.info(f"Running graph-capture model {model_path}")
+            run_graph_capture_model(model_path)
+        except Exception as e:
+            log.error(e)
+            log.exception(f"Failed to run graph-capture model {model_path}")
+            failed_models.append(model_path)
 
     # Run Whisper E2E tests
     run_whisper()
@@ -257,3 +341,10 @@ if __name__ == "__main__":
 
     # Run tool calling E2E tests
     run_tool_calling()
+
+    if failed_models:
+        raise RuntimeError(f"Failed to run models: {failed_models}")
+
+
+if __name__ == "__main__":
+    main()

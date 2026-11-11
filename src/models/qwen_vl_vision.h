@@ -7,10 +7,44 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include <stdexcept>
 
 #include "onnxruntime_api.h"
 
 namespace Generators {
+
+// Validates grid dimensions and config parameters for the Qwen vision window indexing.
+// Throws std::runtime_error on invalid inputs.
+// Defined inline in the header so that unit tests can call it directly without requiring
+// DLL export, since this is a free function not part of the public C API.
+inline void ValidateWindowIndexParams(int64_t grid_t, int64_t grid_h, int64_t grid_w,
+                                      int64_t spatial_merge_size, int64_t patch_size, int64_t window_size) {
+  if (spatial_merge_size <= 0)
+    throw std::runtime_error("CalculateWindowIndex: spatial_merge_size must be positive");
+  if (patch_size <= 0)
+    throw std::runtime_error("CalculateWindowIndex: patch_size must be positive");
+  if (grid_t <= 0 || grid_h <= 0 || grid_w <= 0)
+    throw std::runtime_error("CalculateWindowIndex: grid dimensions must be positive");
+  if (grid_h % spatial_merge_size != 0 || grid_w % spatial_merge_size != 0)
+    throw std::runtime_error("CalculateWindowIndex: grid_h and grid_w must be divisible by spatial_merge_size");
+
+  int64_t vit_merger_window_size = window_size / spatial_merge_size / patch_size;
+  if (vit_merger_window_size <= 0)
+    throw std::runtime_error("CalculateWindowIndex: vit_merger_window_size must be positive (check window_size, spatial_merge_size, patch_size config)");
+
+  constexpr int64_t kMaxElements = static_cast<int64_t>(1) << 30;
+  int64_t llm_grid_h = grid_h / spatial_merge_size;
+  int64_t llm_grid_w = grid_w / spatial_merge_size;
+  if (llm_grid_h > kMaxElements || llm_grid_w > kMaxElements || grid_t > kMaxElements)
+    throw std::runtime_error("CalculateWindowIndex: grid dimensions are too large");
+
+  int64_t pad_h = (vit_merger_window_size - (llm_grid_h % vit_merger_window_size)) % vit_merger_window_size;
+  int64_t pad_w = (vit_merger_window_size - (llm_grid_w % vit_merger_window_size)) % vit_merger_window_size;
+  int64_t padded_h = llm_grid_h + pad_h;
+  int64_t padded_w = llm_grid_w + pad_w;
+  if (padded_h > 0 && padded_w > 0 && grid_t > kMaxElements / padded_h / padded_w)
+    throw std::runtime_error("CalculateWindowIndex: total grid size exceeds maximum allowed");
+}
 
 // Internal vision pipeline (no external DLL interface required after Python binding removal).
 struct QwenVisionPipeline {

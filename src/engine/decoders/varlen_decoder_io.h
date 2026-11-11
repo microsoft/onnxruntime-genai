@@ -3,10 +3,145 @@
 
 #pragma once
 
+#include <array>
+#include <optional>
+
 #include "decoder.h"
+#include "../graph_annotation_ids.h"
+#include "../step_plan.h"
 #include "../../models/decoder_only.h"
 
 namespace Generators {
+
+struct AttentionMetadataValues {
+  int32_t max_query_len_bound{};
+  int32_t max_kv_len_bound{};
+  int32_t max_kv_len_lower_bound{};
+};
+
+inline constexpr size_t kAttentionMetadataElementCount = 3;
+inline constexpr size_t kSparseAttentionMetadataElementCount = 5;
+
+void ValidatePackedPositionIdsInput(
+    ONNXTensorElementDataType data_type,
+    std::span<const int64_t> shape,
+    std::span<const char* const> symbolic_shape = {});
+void ValidatePackedHiddenStatesInputShape(
+    std::span<const int64_t> shape,
+    size_t scheduled_token_rows,
+    std::span<const int64_t> model_shape);
+
+AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan);
+// `max_query_len` is the number of new tokens every sequence contributes to steps served by this
+// graph, which is one for plain decode and the verified block for speculative decode.
+AttentionMetadataValues GetAttentionMetadataForGraph(size_t max_query_len, size_t block_table_columns,
+                                                     size_t block_size);
+AttentionMetadataValues GetAttentionMetadataForGraphStep(
+    const AttentionMetadataValues& exact_metadata, size_t block_table_columns, size_t block_size);
+AttentionMetadataValues GetAttentionMetadataForGraphStep(
+    const StepPlan& plan, size_t block_table_columns, size_t block_size);
+std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
+    const AttentionMetadataValues& metadata);
+std::array<int32_t, kSparseAttentionMetadataElementCount> PackSparseAttentionMetadata(
+    const AttentionMetadataValues& metadata);
+
+// Packed token rows whose logits the Engine consumes, ordered exactly as ProcessLogits returns
+// them: every draft-verification row followed by the row that produces each request's next token.
+std::vector<size_t> GetSelectedLogitsIndices(const StepPlan& plan);
+
+// True when the decoder can expose logits for arbitrary packed tokens, either by emitting every
+// row or by accepting logits_indices. Only such a model can verify draft tokens, because a rejected
+// draft is checked against the logits of the row that precedes it.
+bool DecoderLogitsArePerToken(const Model& model);
+
+// True when the decoder accepts logits_indices and emits only those rows. Throws for a model that
+// also declares batch_size logits rows, because the selected rows could not be mapped back.
+bool DecoderLogitsAreSelected(const Model& model);
+
+// 0 when the model takes no packed position_ids, 1 for [num_tokens], and 3 for the [3, num_tokens]
+// multimodal-rope layout.
+size_t PackedPositionIdPlanes(const Model& model);
+
+// Bytes VarlenGraphBuffers will hold for this model. The engine prices these buffers before the
+// paged cache probes free memory, because they are allocated afterwards out of the same pool.
+size_t VarlenGraphBufferBytes(const Model& model, size_t position_planes,
+                              size_t max_query_tokens_per_request);
+
+// Returns the annotation key for a captured decode step, or nullopt when the shape cannot be
+// captured. Every component changes something the captured launches bake in: tensor shapes come
+// from the batch and the per-request token count, grid dimensions from the block-table width, and
+// the device addresses of the fixed decoder state from its binding layout. `state_binding_key` is
+// zero for models without fixed decoder state. Session, IndexShare mode, and the owner's persistent
+// extra-binding layout each occupy their own exact component, never a combined pointer hash.
+std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t tokens_per_request,
+                                                      size_t block_table_columns,
+                                                      size_t state_binding_key,
+                                                      size_t state_binding_domain = 0,
+                                                      const OrtSession* decoder_session = nullptr,
+                                                      bool indexshare_decode = false,
+                                                      size_t extra_binding_layout_key = 0);
+
+/**
+ * @struct VarlenGraphBuffers
+ * @brief Fixed-address input and output buffers for capturable decode steps.
+ *
+ * CUDA graph replay re-issues the launches recorded at capture time together with the device
+ * pointers they were given, and it never re-runs the operators' host-side code. Every buffer the
+ * captured step reads or writes must therefore stay at the same address for the life of the graph,
+ * which the per-step tensors of an ordinary decode step do not. This holder outlives the per-step
+ * VarlenDecoderIO and hands it the same allocations every time.
+ *
+ * The buffers are sized once for the largest batch the engine will schedule; a given step views a
+ * smaller prefix of them. Steps that differ in shape are captured under different annotation ids.
+ */
+struct VarlenGraphBuffers {
+  // `position_planes` is 0 when the model takes no packed position_ids, 1 for [num_tokens], and 3
+  // for the [3, num_tokens] multimodal-rope layout. `max_query_tokens` is the largest number of
+  // tokens one request may contribute to a step, which the engine caps at one plus the draft width
+  // its cache can roll back.
+  VarlenGraphBuffers(DecoderOnly_Model& model, size_t position_planes, size_t max_query_tokens);
+
+  // Annotation id for a decode step of this shape, or -1 when it cannot be captured.
+  int GraphId(size_t batch_size, size_t tokens_per_request, size_t block_table_columns,
+              size_t state_binding_key, size_t state_binding_domain = 0,
+              const OrtSession* decoder_session = nullptr, bool indexshare_decode = false,
+              size_t extra_binding_layout_key = 0) {
+    const auto key = DecodeGraphKey(batch_size, tokens_per_request, block_table_columns,
+                                    state_binding_key, state_binding_domain, decoder_session,
+                                    indexshare_decode, extra_binding_layout_key);
+    return key ? graph_ids.Id(*key) : -1;
+  }
+
+  bool Fits(size_t batch_size, size_t tokens_per_request) const {
+    return batch_size <= max_batch_size && tokens_per_request <= max_query_tokens &&
+           batch_size * tokens_per_request <= max_token_rows;
+  }
+
+  std::unique_ptr<Tensor> input_ids;
+  std::unique_ptr<Tensor> embeddings;
+  std::unique_ptr<Tensor> engram_embeddings;
+  std::unique_ptr<Tensor> engram_present_tokens;
+  std::unique_ptr<Tensor> cumulative_sequence_lengths;
+  std::unique_ptr<Tensor> past_sequence_lengths;
+  // Null unless the model consumes packed position_ids.
+  std::unique_ptr<Tensor> position_ids;
+  std::unique_ptr<Tensor> rotary_position_ids;
+  // Null unless the model gathers selected packed rows before its LM head.
+  std::unique_ptr<Tensor> logits_indices;
+  std::unique_ptr<Tensor> logits;
+  // Null unless the model consumes hidden_states (for example, an MTP head).
+  std::unique_ptr<Tensor> hidden_states_input;
+  // Null unless the model was exported with include_hidden_states.
+  std::unique_ptr<Tensor> hidden_states;
+  // Null unless the model exposes auxiliary hidden states for a DFlash 2 drafter.
+  std::unique_ptr<Tensor> aux_hidden_states;
+  size_t max_batch_size{};
+  // Largest per-request token count a captured step may carry, and the largest packed row count the
+  // buffers above can hold.
+  size_t max_query_tokens{};
+  size_t max_token_rows{};
+  GraphAnnotationIds graph_ids;
+};
 
 /**
  * @class VarlenDecoderIO
@@ -18,8 +153,12 @@ namespace Generators {
  * - Input IDs - int64[total_num_tokens]
  * - Cumulative Sequence Lengths - int32[batch_size + 1]
  * - Past Sequence Lengths - int32[batch_size]
+ * - Attention Metadata - int32[3] (CPU), optional
  * Outputs:
- * - Logits - float16/float32[total_num_tokens, vocab_size]
+ * - Logits - float16/float32[batch_size, vocab_size] for one row per request, or
+ *   float16/float32[total_num_tokens, vocab_size] for one row per packed token.
+ * - Hidden States - float16/float32[total_num_tokens, hidden_size], only when the model was
+ *   exported with include_hidden_states. This is what an MTP draft head consumes.
  *
  * The inputs prepared by this class are compatible with models that use the
  * PagedAttention operator.
@@ -27,17 +166,60 @@ namespace Generators {
 struct VarlenDecoderIO : DecoderIO {
   VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                   ScheduledRequests& scheduled_requests,
-                  std::shared_ptr<CacheManager> cache_manager);
+                  std::shared_ptr<CacheManager> cache_manager,
+                  const ExecutionContext* execution_context = nullptr,
+                  VarlenGraphBuffers* graph_buffers = nullptr,
+                  size_t position_planes = 0,
+                  CpuEmbedding::Workspace* embedding_workspace = nullptr);
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;
 
+  // The step's packed [total_num_tokens, hidden_size] hidden states, or null when the model does
+  // not expose them. Row i corresponds to packed token i; logits have the same ordering only when
+  // the model emits one logits row per packed token.
+  Tensor* HiddenStates() const override { return active_hidden_states_; }
+
+  // The step's packed [total_num_tokens, aux_hidden_size] auxiliary hidden states, or null when
+  // the model was not exported with aux_hidden_state_layers. This is what a DFlash 2 drafter reads.
+  Tensor* AuxHiddenStates() const override { return active_aux_hidden_states_; }
+
  private:
   void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareRotaryPositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareHiddenStatesInput(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareLogitsIndices(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareAuxHiddenStates(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
 
+  // Number of packed token rows in this step, which is what both the logits and the hidden states
+  // are indexed by.
+  size_t TokenCount(ScheduledRequests& scheduled_requests) const;
+
+  // Non-null when this step is being captured or replayed, in which case the tensors below are
+  // borrowed from the holder instead of being allocated fresh.
+  VarlenGraphBuffers* graph_buffers_{};
+  const StepPlan* plan_{};
+  size_t block_table_columns_{};
+  // Borrowed spans/pointers whose backing storage is owned through synchronous model execution.
+  DeviceSpan<int32_t> input_ids_;
+  OrtValue* hidden_states_input_{};
+  size_t position_planes_{};
   std::vector<std::unique_ptr<Tensor>> owned_inputs_;
+  CpuEmbedding::Workspace local_embedding_workspace_;
+  CpuEmbedding::Workspace* embedding_workspace_{};
   std::unique_ptr<Tensor> logits_;
+  Tensor* active_logits_{};
   std::unique_ptr<Tensor> logits_fp32_;
+  std::vector<size_t> valid_token_indices_;
+  std::unique_ptr<Tensor> hidden_states_;
+  Tensor* active_hidden_states_{};
+  std::unique_ptr<Tensor> aux_hidden_states_;
+  Tensor* active_aux_hidden_states_{};
+  bool logits_are_per_token_{true};
+  bool logits_are_selected_{};
 };
 
 }  // namespace Generators

@@ -28,7 +28,7 @@ struct StandardAllocator : OrtAllocator {
   StandardAllocator() : OrtAllocator{} {
     version = ORT_API_VERSION;
     OrtAllocator::Alloc = [](OrtAllocator* /*this_*/, size_t size) -> void* { return new std::byte[size]; };
-    OrtAllocator::Free = [](OrtAllocator* /*this_*/, void* p) { delete reinterpret_cast<std::byte*>(p); };
+    OrtAllocator::Free = [](OrtAllocator* /*this_*/, void* p) { delete[] reinterpret_cast<std::byte*>(p); };
   }
 };
 
@@ -121,6 +121,11 @@ inline size_t SizeOf(ONNXTensorElementDataType type) {
       return sizeof(Ort::Float16_t);
     case Ort::TypeToTensorType<Ort::BFloat16_t>:
       return sizeof(Ort::BFloat16_t);
+    // FP8 KV caches are stored as single-byte elements. There is no Ort wrapper type for them,
+    // so match the ONNX element type directly.
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2:
+      return sizeof(uint8_t);
     default:
       throw std::runtime_error("Unsupported ONNXTensorElementDataType in GetTypeSize");
   }
@@ -360,6 +365,12 @@ inline const OrtHardwareDevice* OrtEpDevice::Device() const {
   return Ort::api->EpDevice_Device(this);
 }
 
+inline const OrtMemoryInfo* OrtEpDevice::GetMemoryInfo(OrtDeviceMemoryType memory_type) const {
+  // Returns nullptr when the EP advertises no allocator of this type — callers branch on that, so
+  // forward the pointer directly and do NOT ThrowOnError (the C API returns no status here).
+  return Ort::api->EpDevice_MemoryInfo(this, memory_type);
+}
+
 inline OrtHardwareDeviceType OrtHardwareDevice::Type() const {
   return Ort::api->HardwareDevice_Type(this);
 }
@@ -433,6 +444,12 @@ inline OrtEnv& OrtEnv::CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info,
   return *this;
 }
 
+inline Ort::Allocator* OrtEnv::GetSharedAllocator(const OrtMemoryInfo& mem_info) const {
+  OrtAllocator* p = nullptr;
+  Ort::ThrowOnError(Ort::api->GetSharedAllocator(const_cast<OrtEnv*>(this), &mem_info, &p));
+  return static_cast<Ort::Allocator*>(p);  // env-owned; may be nullptr if no match
+}
+
 inline void OrtEnv::CopyTensors(const std::vector<const OrtValue*>& src_tensors,
                                 const std::vector<OrtValue*>& dst_tensors,
                                 OrtSyncStream* stream) const {
@@ -452,6 +469,10 @@ inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() {
     devices.emplace_back(device_ptrs[i]);
   }
   return devices;
+}
+
+inline void OrtEnv::ReleaseSharedAllocator(const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type) {
+  Ort::ThrowOnError(Ort::api->ReleaseSharedAllocator(this, ep_device, mem_type));
 }
 
 inline std::unique_ptr<OrtThreadingOptions> OrtThreadingOptions::Create() {
@@ -610,6 +631,11 @@ inline OrtSessionOptions& OrtSessionOptions::SetGraphOptimizationLevel(GraphOpti
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::SetDeterministicCompute(bool value) {
+  Ort::ThrowOnError(Ort::api->SetDeterministicCompute(this, value));
+  return *this;
+}
+
 inline OrtSessionOptions& OrtSessionOptions::SetOptimizedModelFilePath(const ORTCHAR_T* optimized_model_filepath) {
   Ort::ThrowOnError(Ort::api->SetOptimizedModelFilePath(this, optimized_model_filepath));
   return *this;
@@ -680,6 +706,19 @@ inline OrtSessionOptions& OrtSessionOptions::AddConfigEntry(const char* config_k
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::AddFreeDimensionOverrideByName(
+    const char* dim_name, int64_t dim_value) {
+  Ort::ThrowOnError(
+      Ort::api->AddFreeDimensionOverrideByName(this, dim_name, dim_value));
+  return *this;
+}
+
+inline bool OrtSessionOptions::HasConfigEntry(const char* config_key) const {
+  int out = 0;
+  Ort::ThrowOnError(Ort::api->HasSessionConfigEntry(this, config_key, &out));
+  return out != 0;
+}
+
 inline OrtSessionOptions& OrtSessionOptions::AddInitializer(const char* name, const OrtValue& ort_val) {
   Ort::ThrowOnError(Ort::api->AddInitializer(this, name, &ort_val));
   return *this;
@@ -715,11 +754,6 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA(const 
 
 inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA_V2(const OrtCUDAProviderOptionsV2& provider_options) {
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_CUDA_V2(this, &provider_options));
-  return *this;
-}
-
-inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_ROCM(const OrtROCMProviderOptions& provider_options) {
-  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_ROCM(this, &provider_options));
   return *this;
 }
 
@@ -935,6 +969,12 @@ inline void OrtSession::SetEpDynamicOptions(const char* const* keys, const char*
   Ort::ThrowOnError(Ort::api->SetEpDynamicOptions(this, keys, values, kv_len));
 }
 
+#if ORT_API_VERSION >= 27
+inline void OrtSession::ReleaseCapturedGraph(int graph_annotation_id) {
+  Ort::ThrowOnError(Ort::api->SessionReleaseCapturedGraph(this, graph_annotation_id));
+}
+#endif
+
 inline std::string OrtModelMetadata::GetProducerName() const {
   Ort::StringAllocator string_allocator;
   Ort::ThrowOnError(Ort::api->ModelMetadataGetProducerName(this, &string_allocator, &string_allocator.out));
@@ -972,16 +1012,20 @@ inline std::string OrtModelMetadata::LookupCustomMetadataMap(const char* key) co
 }
 
 inline std::vector<std::string> OrtModelMetadata::GetCustomMetadataMapKeysAllocated() const {
-  char** out;
+  char** out{};
   int64_t num_keys = 0;
   Ort::ThrowOnError(Ort::api->ModelMetadataGetCustomMetadataMapKeys(this, &Ort::standard_allocator, &out, &num_keys));
+
+  // Own the returned memory so it will be freed
+  auto strings_deleter = [num_keys](char** keys) {
+    for (int64_t i = 0; i < num_keys; ++i)
+      Ort::standard_allocator.Free(&Ort::standard_allocator, keys[i]);
+    Ort::standard_allocator.Free(&Ort::standard_allocator, keys);
+  };
+  std::unique_ptr<char*, decltype(strings_deleter)> strings_guard(out, strings_deleter);
   if (num_keys <= 0) {
     return {};
   }
-
-  // Own the returned memory so it will be freed
-  auto strings_deletor = [num_keys](char** out) { for(int64_t i = 0; i < num_keys; ++i) delete out[i]; };
-  std::unique_ptr<char*, decltype(strings_deletor)> strings_guard(out, strings_deletor);
 
   std::vector<std::string> result;
   for (int64_t i = 0; i < num_keys; ++i)
@@ -1519,8 +1563,94 @@ inline void OrtOp::Invoke(const OrtKernelContext* context,
                                        output_values, static_cast<int>(output_count)));
 }
 
-inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* adapter_file_path, OrtAllocator& allocator) {
+inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* adapter_file_path, OrtAllocator* allocator) {
   OrtLoraAdapter* p;
-  Ort::ThrowOnError(Ort::api->CreateLoraAdapter(adapter_file_path, &allocator, &p));
+  Ort::ThrowOnError(Ort::api->CreateLoraAdapter(adapter_file_path, allocator, &p));
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
+
+#if ORT_GENAI_HAS_MODEL_PACKAGE
+
+namespace Ort {
+
+inline const OrtModelPackageApi& GetModelPackageApi() {
+  if (api == nullptr || api_version < 31) {
+    throw std::runtime_error("Model packages require ONNX Runtime 1.31 or newer.");
+  }
+  const auto* model_package_api = api->GetModelPackageApi();
+  if (model_package_api == nullptr) {
+    throw std::runtime_error(
+        "Model package API is not available in this ONNX Runtime build.");
+  }
+  return *model_package_api;
+}
+
+}  // namespace Ort
+
+inline std::unique_ptr<OrtModelPackageOptions> OrtModelPackageOptions::Create(const OrtEnv& env,
+                                                                              const OrtSessionOptions& session_options) {
+  OrtModelPackageOptions* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().CreateModelPackageOptionsFromSessionOptions(&env, &session_options, &p));
+  return std::unique_ptr<OrtModelPackageOptions>{p};
+}
+
+inline std::unique_ptr<OrtModelPackageContext> OrtModelPackageContext::Create(const ORTCHAR_T* package_root) {
+  OrtModelPackageContext* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().CreateModelPackageContext(package_root, &p));
+  return std::unique_ptr<OrtModelPackageContext>{p};
+}
+
+inline std::vector<std::string> OrtModelPackageContext::GetComponentNames() const {
+  const char* const* names = nullptr;
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetComponentNames(this, &names, &count));
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    result.emplace_back(names[i]);
+  }
+  return result;
+}
+
+inline std::vector<std::string> OrtModelPackageContext::GetVariantNames(const char* component_name) const {
+  const char* const* names = nullptr;
+  size_t count = 0;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantNames(this, component_name, &names, &count));
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    result.emplace_back(names[i]);
+  }
+  return result;
+}
+
+inline std::string OrtModelPackageContext::GetVariantEpName(const char* component_name,
+                                                            const char* variant_name) const {
+  const char* ep = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_GetVariantEpName(this, component_name, variant_name, &ep));
+  return (ep == nullptr) ? std::string{} : std::string{ep};
+}
+
+inline std::string OrtModelPackageContext::ResolveStringRef(const std::string& base_dir,
+                                                            const std::string& input,
+                                                            bool must_exist) const {
+  const char* resolved = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackage_ResolveStringRef(
+      this, base_dir.empty() ? nullptr : base_dir.c_str(), input.c_str(), must_exist ? 1 : 0, &resolved));
+  return (resolved == nullptr) ? std::string{} : std::string{resolved};
+}
+
+inline std::unique_ptr<OrtModelPackageComponentContext> OrtModelPackageContext::SelectComponent(
+    const char* component_name, const OrtModelPackageOptions& options) const {
+  OrtModelPackageComponentContext* p = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().SelectComponent(this, component_name, &options, &p));
+  return std::unique_ptr<OrtModelPackageComponentContext>{p};
+}
+
+inline std::basic_string<ORTCHAR_T> OrtModelPackageComponentContext::GetSelectedVariantFolderPath() const {
+  const ORTCHAR_T* path = nullptr;
+  Ort::ThrowOnError(Ort::GetModelPackageApi().ModelPackageComponent_GetSelectedVariantFolderPath(this, &path));
+  return path == nullptr ? std::basic_string<ORTCHAR_T>{} : std::basic_string<ORTCHAR_T>{path};
+}
+
+#endif  // ORT_GENAI_HAS_MODEL_PACKAGE

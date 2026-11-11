@@ -1,6 +1,23 @@
 buildscript {
 	repositories {
-		mavenCentral()
+		// Feed isolation: when built in CI the pipeline sets the lotusMavenUrl
+		// project property (via ORG_GRADLE_PROJECT_lotusMavenUrl) to resolve the
+		// plugin classpath from the internal Lotus Maven feed. Local dev falls
+		// back to Maven Central.
+		if (project.findProperty('lotusMavenUrl')) {
+			maven {
+				url project.findProperty('lotusMavenUrl')
+				credentials(HttpHeaderCredentials) {
+					name = 'Authorization'
+					value = 'Bearer ' + project.findProperty('lotusMavenToken')
+				}
+				authentication {
+					header(HttpHeaderAuthentication)
+				}
+			}
+		} else {
+			mavenCentral()
+		}
 	}
 	dependencies {
 		classpath 'com.diffplug.spotless:spotless-plugin-gradle:6.25.0'
@@ -18,7 +35,22 @@ apply plugin: 'com.diffplug.spotless'
 
 allprojects {
 	repositories {
-		mavenCentral()
+		// Feed isolation: resolve dependencies from the internal Lotus Maven feed
+		// in CI (lotusMavenUrl project property), else Maven Central for local dev.
+		if (project.findProperty('lotusMavenUrl')) {
+			maven {
+				url project.findProperty('lotusMavenUrl')
+				credentials(HttpHeaderCredentials) {
+					name = 'Authorization'
+					value = 'Bearer ' + project.findProperty('lotusMavenToken')
+				}
+				authentication {
+					header(HttpHeaderAuthentication)
+				}
+			}
+		} else {
+			mavenCentral()
+		}
 	}
 }
 
@@ -40,7 +72,7 @@ def mavenPwd = System.properties['mavenPwd']
 def mavenArtifactId = useCUDA == null ? project.name : project.name + "_gpu"
 
 def onnxruntimeArtifactId = useCUDA == null ? "onnxruntime" : "onnxruntime_gpu"
-def onnxruntimeVersion = System.properties["ONNXRUNTIME_VERSION"] ?: "1.23.0"
+def onnxruntimeVersion = System.properties["ONNXRUNTIME_VERSION"] ?: System.getenv("ONNXRUNTIME_VERSION") ?: "1.23.0"
 
 def defaultDescription = 'ONNX Runtime GenAI is <TODO>'
 

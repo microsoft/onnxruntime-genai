@@ -5,8 +5,11 @@
 
 import argparse
 import logging
+import os
 import pathlib
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -98,10 +101,6 @@ def parse_args():
 
 
 def run(arg_list, cwd=None):
-    import os
-    import shlex
-    import subprocess
-
     log.info("Running subprocess in '%s'\n  %s", cwd or os.getcwd(), " ".join([shlex.quote(arg) for arg in arg_list]))
 
     return subprocess.run(arg_list, check=True, cwd=cwd)

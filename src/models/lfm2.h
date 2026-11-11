@@ -3,11 +3,11 @@
 
 #pragma once
 #include "model.h"
-#include "input_ids.h"
-#include "logits.h"
-#include "kv_cache.h"
-#include "position_inputs.h"
-#include "extra_inputs.h"
+#include "models/io/input_ids.h"
+#include "models/io/logits.h"
+#include "io/kv_cache.h"
+#include "models/io/position_inputs.h"
+#include "models/io/extra_inputs.h"
 
 namespace Generators {
 
@@ -30,6 +30,8 @@ struct LFM2_State : State {
 
  private:
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
+  std::vector<int64_t> PaddedRowLengths(DeviceSpan<int32_t>& next_tokens);
+  void RunRowsAlone(std::span<const int64_t> lengths);
 
   const LFM2_Model& model_;
 
@@ -38,6 +40,7 @@ struct LFM2_State : State {
   std::unique_ptr<KeyValueCache> cache_;
   std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};
+  size_t extra_inputs_begin_{};
 };
 
 }  // namespace Generators

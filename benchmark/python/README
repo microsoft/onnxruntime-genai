@@ -11,3 +11,24 @@ Prerequisites:
 
 Example call to benchmarking script
 python benchmark_e2e.py -i {model folder} -b 1 -l 128 -g 256 -r 100 -w 10 -k 5 -o {output csv file name}
+
+Engine guidance benchmark
+
+Build with guidance and run paired guided and unguided requests to compare setup latency, time to first token, inter-token latency, decode throughput, and schema compliance:
+
+python build.py --use_cuda --use_guidance --skip_tests --skip_examples
+python benchmark/python/benchmark_engine_guidance.py -m {model folder} -e cuda --warmup 5 --iterations 30 --output guidance-profile.json
+
+Guidance remains request-local. The benchmark alternates guided and unguided requests on one Engine and reports token counts because constrained and unconstrained output lengths may differ.
+
+CPU preprocessing/inference contention benchmark (Linux)
+
+Use benchmark_preprocessing_contention.py with a real supported text model export, a supported multimodal image processor export, and an image. The text model must contain real weights, not a dummy test graph. The preprocessing model may be a controlled fixture when only its processor is measured; disclose this when reporting results.
+
+python benchmark/python/benchmark_preprocessing_contention.py --inference-model {real text model} --preprocessing-model {image model or fixture} --image {image file} --image-prompt "<image>Describe this image." --cpus 4,5,6,7 --cpu-counts 4 1 --workers 0 1 3 --seconds 6 --trials 3 --output contention.json
+
+The benchmark uses separate processes sharing the selected CPU affinity, not Python threads competing for the GIL. Both model configurations are temporary CPU-only overlays; the source exports are not modified. Inference uses as many intra-op threads as selected CPUs; preprocessing sessions use one thread. ORT session spinning is disabled. Worker settings are applied before processor creation, and observed worker creation and preprocessing output equality are checked.
+
+Each worker is warmed up. Within each trial, the order of inference-only, preprocessing-only, and simultaneous windows rotates. JSON records inference tokens/second, preprocessing calls/second, and median/p95 operation latency. Token throughput includes prompt processing and generator restarts every 32 tokens; it is not decode-only throughput. Each window runs for at least the requested duration, finishing any in-flight operation. The processes share the CPUs as an application would, but do not share a model instance.
+
+The one-CPU run is an affinity-limited setup, not a cgroup quota experiment. Affinity and worker settings are explicit; the pool default still does not detect process quotas. Results describe CPU resource contention, not end-to-end multimodal inference or universal inference speedups. Run on an otherwise idle allocation and retain all three worker controls; faster isolated preprocessing can still slow concurrent inference.

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
@@ -9,6 +10,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     {
         private IntPtr _generatorHandle;
         private bool _disposed = false;
+
+        internal IntPtr Handle
+        {
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(Generator));
+                return _generatorHandle;
+            }
+        }
 
         public Generator(Model model, GeneratorParams generatorParams)
         {
@@ -87,6 +97,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             {
                 return new ReadOnlySpan<int>(sequencePtr.ToPointer(), (int)sequenceLength);
             }
+        }
+
+        /// <summary>
+        /// Gets an immutable snapshot of the generator's speculative decoding statistics.
+        /// </summary>
+        /// <returns>A disposable snapshot of the current speculative decoding statistics.</returns>
+        public SpeculativeStats GetSpeculativeStats()
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GetSpeculativeStats(_generatorHandle, out IntPtr stats));
+            return new SpeculativeStats(stats);
         }
 
         /// <summary>

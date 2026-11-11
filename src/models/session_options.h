@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include "../generators.h"
+#include "generator/generators.h"
 
 namespace Generators {
 
@@ -12,6 +12,21 @@ namespace Generators {
 // Throws std::runtime_error if criteria are set but no devices match.
 std::vector<const OrtEpDevice*> ApplyDeviceFiltering(const Config::ProviderOptions& provider_options,
                                                      const std::vector<const OrtEpDevice*>& devices);
+
+// True when provider_options sets at least one hardware filtering criterion.
+bool HasDeviceFiltering(const Config::ProviderOptions& provider_options);
+
+// Returns EpMetadata["cuda_device_id"] of |device|, or an empty string when the device does not report it.
+std::string GetCudaDeviceIdMetadata(const OrtEpDevice* device);
+
+// Returns the index of the CUDA EP device a session must use. |cuda_device_ids| lists EpMetadata["cuda_device_id"] of the
+// devices that survived hardware filtering, in enumeration order (which need not be CUDA device_id order).
+// Hardware filtering takes precedence: an explicit |requested_id| selects only among the surviving devices and throws
+// std::runtime_error, naming the requested and the available ids, when none matches. Without a requested id the CUDA
+// default device "0" is used when it survived, otherwise the first surviving device.
+size_t SelectCudaDeviceIndex(const std::vector<std::string>& cuda_device_ids,
+                             const std::optional<std::string>& requested_id,
+                             bool hardware_filtered);
 
 // Returns all OrtEpDevice instances whose EP name matches |ep_name|.
 // Returns an empty vector if the provider is not registered as a plugin.
@@ -30,6 +45,10 @@ bool AppendExecutionProviderV2(OrtSessionOptions& session_options,
 void AppendExecutionProviderV1(OrtSessionOptions& session_options,
                                const Config::ProviderOptions& provider_options);
 
+// Keeps the first provider-specific device selected for the primary session.
+DeviceInterface* SelectPrimarySessionDevice(DeviceInterface* selected_device,
+                                            DeviceInterface* candidate_device);
+
 // Iterates over the requested providers, dispatches to provider-specific
 // AppendExecutionProvider implementations, and returns the DeviceInterface
 // for the first provider that supplies one (or nullptr if none do).
@@ -39,5 +58,18 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            bool is_primary_session_options,
                                            const Config& config,
                                            bool disable_graph_capture = false);
+
+// Gets a trivial ONNX model that just returns a single float constant.
+inline auto GetTrivialModel() {
+  static constexpr std::array<uint8_t, 96> trivial_model{
+      0x08, 0x0a, 0x12, 0x01, 0x61, 0x3a, 0x53, 0x0a, 0x38, 0x12, 0x06, 0x76, 0x61, 0x6c, 0x75, 0x65,
+      0x73, 0x22, 0x08, 0x43, 0x6f, 0x6e, 0x73, 0x74, 0x61, 0x6e, 0x74, 0x2a, 0x24, 0x0a, 0x05, 0x76,
+      0x61, 0x6c, 0x75, 0x65, 0x2a, 0x18, 0x08, 0x01, 0x10, 0x01, 0x42, 0x0c, 0x63, 0x6f, 0x6e, 0x73,
+      0x74, 0x5f, 0x74, 0x65, 0x6e, 0x73, 0x6f, 0x72, 0x4a, 0x04, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01,
+      0x04, 0x12, 0x01, 0x62, 0x62, 0x14, 0x0a, 0x06, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x73, 0x12, 0x0a,
+      0x0a, 0x08, 0x08, 0x01, 0x12, 0x04, 0x0a, 0x02, 0x08, 0x01, 0x42, 0x04, 0x0a, 0x00, 0x10, 0x15};
+
+  return std::span<const uint8_t>{trivial_model};
+}
 
 }  // namespace Generators

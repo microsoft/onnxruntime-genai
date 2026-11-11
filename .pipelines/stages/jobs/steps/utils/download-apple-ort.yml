@@ -1,0 +1,20 @@
+parameters:
+- name: ort_version
+  type: string
+
+steps:
+- bash: |
+    set -e
+    pkg_name='Microsoft.ML.OnnxRuntime'
+    ort_home="$(Build.BinariesDirectory)/ort_home"
+    url="$(lotusOrtContentBase)/${pkg_name}/versions/${{ parameters.ort_version }}/content?api-version=6.0-preview.1"
+    echo "Downloading $pkg_name ${{ parameters.ort_version }} from Lotus"
+    mkdir -p "$ort_home"
+    curl --fail --retry 5 --retry-all-errors -L \
+      -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
+      -o "$ort_home/ort.zip" "$url"
+    unzip -oq "$ort_home/ort.zip" -d "$ort_home"
+    rm "$ort_home/ort.zip"
+  displayName: 'Download ORT ${{ parameters.ort_version }} from Lotus feed'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)

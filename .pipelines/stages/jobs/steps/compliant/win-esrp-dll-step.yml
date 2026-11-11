@@ -5,18 +5,15 @@ parameters:
 
 - name: FolderPath
   type: string
-  default: ''
 
 - name: DisplayName
   type: string
-  default: ''
 
 - name: Pattern
   type: string
-  default: '*.dll'
 
 steps:
-- task: SFP.build-tasks.custom-build-task-1.EsrpCodeSigning@5
+- task: EsrpCodeSigning@6
   displayName: ${{ parameters.DisplayName }}
   condition: and(succeeded(), eq('${{ parameters.DoEsrp }}', true))
   continueOnError: true
@@ -64,7 +61,7 @@ steps:
           "toolName": "signtool.exe",
           "toolVersion": "6.2.9304.0"
         }
-      ]    
+      ]
 
 - task: PowerShell@2
   displayName: 'Signature validation for signed file(s)'
@@ -90,7 +87,7 @@ steps:
           $pattern=$pattern_original.Trim()
           Write-Host "Validating pattern:" $pattern
 
-          $file_names=Get-ChildItem -Path ${{ parameters.FolderPath }} .\$pattern -Name -Recurse -Force
+          $file_names=Get-ChildItem -Path ${{ parameters.FolderPath }} ./$pattern -Name -Recurse -Force
 
           foreach($file in $file_names)
           {

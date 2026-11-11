@@ -1,0 +1,58 @@
+{
+  "model": {
+    "bos_token_id": 32000,
+    "context_length": 768,
+    "decoder": {
+      "session_options": {
+        "log_id": "onnxruntime-genai",
+        "provider_options": []
+      },
+      "filename": "decoder.onnx",
+      "head_size": 3,
+      "hidden_size": 512,
+      "inputs": {
+        "input_ids": "input_ids",
+        "encoder_hidden_states": "encoder_hidden_states",
+        "encoder_attention_mask": "encoder_attention_mask",
+        "rnn_states_prev": "rnn_states_prev",
+        "past_key_values_length": "past_key_values_length"
+      },
+      "outputs": {
+        "logits": "logits",
+        "rnn_states": "rnn_states"
+      }
+    },
+    "encoder": {
+      "filename": "encoder.onnx",
+      "head_size": 12,
+      "hidden_size": 512,
+      "inputs": {
+        "input_ids": "input_ids",
+        "attention_mask": "attention_mask"
+      },
+      "outputs": {
+        "encoder_outputs": "encoder_outputs"
+      }
+    },
+    "eos_token_id": 0,
+    "pad_token_id": 32000,
+    "type": "marian-ssru",
+    "vocab_size": 32001
+  },
+  "search": {
+    "diversity_penalty": 0.0,
+    "do_sample": false,
+    "early_stopping": true,
+    "length_penalty": 1.0,
+    "max_length": 448,
+    "min_length": 0,
+    "no_repeat_ngram_size": 0,
+    "num_beams": 2,
+    "num_return_sequences": 1,
+    "past_present_share_buffer": true,
+    "repetition_penalty": 1.0,
+    "temperature": 1.0,
+    "top_k": 1,
+    "top_p": 1.0
+  }
+}

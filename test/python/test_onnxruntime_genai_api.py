@@ -3,33 +3,36 @@
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
+import json
+import logging
 import os
+import re
 import shutil
-import sysconfig
 import tempfile
 from pathlib import Path
 
 import numpy as np
+import onnx
 import onnxruntime
 import onnxruntime_genai as og
 import pytest
+from _test_utils import register_plugin_providers
 
-if not sysconfig.get_platform().endswith("arm64"):
-    # Skip importing onnx if running on ARM64
-    # TODO(justinchuby): ONNX 1.18 supports arm64. Remove the condition when
-    # there is a version bump
-    import onnx
+logger = logging.getLogger(__name__)
 
-devices = ["cpu"]
+# Register every available plug-in execution provider library (e.g. WebGPU) with ONNX Runtime.
+register_plugin_providers(logger)
+
+has_accelerator_ep = og.is_cuda_available() or og.is_dml_available() or og.is_webgpu_available()
+devices = [] if has_accelerator_ep else ["cpu"]
 
 if og.is_cuda_available():
     devices.append("cuda")
 
 if og.is_dml_available():
     devices.append("dml")
-
-if og.is_rocm_available():
-    devices.append("rocm")
 
 if og.is_openvino_available():
     devices.append("openvino")
@@ -38,8 +41,13 @@ if og.is_webgpu_available():
     devices.append("webgpu")
 
 
+@pytest.fixture
+def test_data_path(request):
+    return os.fspath(Path(request.config.getoption("--test_models")).parent)
+
+
 def test_config(test_data_path):
-    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
     config.clear_providers()
     config.append_provider("cuda")
@@ -47,6 +55,289 @@ def test_config(test_data_path):
     config.set_provider_option("cuda", "infinite_clock", "1")
     config.set_provider_option("quantum", "break_universe", "true")
     config.append_provider("slide rule")
+
+
+def test_tokenizer_create_from_config_and_path(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    text = "She sells sea shells by the sea shore."
+
+    config = og.Config(model_path)
+    tokenizer_from_config = og.Tokenizer(config)
+    tokenizer_from_path = og.Tokenizer(model_path)
+
+    assert tokenizer_from_path.decode(tokenizer_from_config.encode(text)) == text
+
+
+@pytest.mark.parametrize("model_type,timing,reason", [
+    ("nemotron_speech", {}, "positive sample_rate"),
+    ("gpt2", {"sample_rate": 100, "hop_length": 10, "subsampling_factor": 1}, "nemotron_speech model"),
+])
+def test_requested_timestamps_reject_invalid_model_config(test_data_path, model_type, timing, reason):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    config = og.Config(model_path)
+    with pytest.raises(RuntimeError, match=reason):
+        config.overlay(json.dumps({"model": {"type": model_type, "timestamp_level": "word", **timing}}))
+
+
+@pytest.fixture
+def asr_example(monkeypatch):
+    examples_path = Path(__file__).resolve().parents[2] / "examples" / "python"
+    monkeypatch.syspath_prepend(os.fspath(examples_path))
+    spec = importlib.util.spec_from_file_location("model_asr_example", examples_path / "model-asr.py")
+    assert spec is not None and spec.loader is not None
+    example = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(example)
+    return example
+
+
+@pytest.mark.parametrize("use_segments", [False, True])
+def test_asr_example_formats_empty_results(test_data_path, asr_example, use_segments):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    generator = og.Generator(model, og.GeneratorParams(model))
+    postprocessor = og.ASRPostProcessor(generator)
+    postprocessor.finalize()
+    result = postprocessor.get_next_results()[0]
+    assert isinstance(result, og.ASRPostProcessorResult)
+    assert asr_example.format_timestamp_records(result, use_segments) == ""
+    postprocessor.reset()
+    postprocessor.finalize()
+    for result in postprocessor.get_next_results():
+        assert asr_example.format_timestamp_records(result, use_segments) == ""
+
+
+def test_asr_example_decodes_all_generated_results(test_data_path, asr_example, capsys):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10)
+    generator = og.Generator(model, params)
+    prompt = np.array([[0, 0, 0, 52]], dtype=np.int32)
+    generator.append_tokens(prompt)
+    postprocessor = og.ASRPostProcessor(generator)
+    transcript = asr_example.decode_tokens(generator, postprocessor, "off", [])
+    tokenizer = og.Tokenizer(model)
+    plain = tokenizer.create_stream()
+    expected = "".join(plain.decode(int(token_id)) for token_id in generator.get_sequence(0)[prompt.size:])
+    assert transcript == expected
+    assert capsys.readouterr().out == expected
+
+
+@pytest.mark.parametrize(
+    "timestamp_level,use_vad",
+    [("off", False), ("word", False), ("segment", False), ("all", False), ("all", True)],
+)
+def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, timestamp_level, use_vad):
+    model_path = os.getenv("NEMOTRON_STREAMING_MODEL_PATH") or os.fspath(
+        Path(test_data_path) / "models" / "nemotron-speech-streaming"
+    )
+    audio_path = Path(test_data_path) / "audios" / "jfk.flac"
+    if not Path(model_path).is_dir() or not audio_path.is_file():
+        pytest.skip("Nemotron streaming model and JFK audio are required")
+
+    config = og.Config(model_path)
+    config.clear_providers()
+    config.overlay(
+        json.dumps(
+            {
+                "model": {
+                    "timestamp_level": timestamp_level,
+                    "encoder": {"session_options": {"provider_options": []}},
+                    "decoder": {"session_options": {"provider_options": []}},
+                    "joiner": {"session_options": {"provider_options": []}},
+                }
+            }
+        )
+    )
+    model = og.Model(config)
+    processor = og.StreamingProcessor(model)
+    processor.set_option("use_vad", "true" if use_vad else "false")
+    tokenizer = og.Tokenizer(model)
+    plain_stream = tokenizer.create_stream()
+    generator = og.Generator(model, og.GeneratorParams(model))
+    postprocessor = og.ASRPostProcessor(generator)
+    sample_rate, chunk_samples, _ = asr_example.load_config(model_path)
+    audio = asr_example.load_audio(audio_path, sample_rate)[: 2 * sample_rate]
+    if use_vad:
+        audio = np.concatenate((np.zeros(4 * sample_rate, dtype=np.float32), audio))
+
+    words = []
+    segments = []
+    word_start_times = []
+    text_fragments = []
+    skipped_chunks = 0
+
+    def process_result(result):
+        timestamps = result.timestamp_result
+        if timestamp_level == "off":
+            assert timestamps is None
+            assert asr_example.format_timestamp_records(result, False) == ""
+            assert asr_example.format_timestamp_records(result, True) == ""
+            return
+        word_records = timestamps.words
+        segment_records = timestamps.segments
+        assert asr_example.format_timestamp_records(result, False) == "".join(
+            f"[{word.time_interval[0]:.2f} - {word.time_interval[1]:.2f}]{word.text.strip()} "
+            for word in word_records
+        )
+        assert asr_example.format_timestamp_records(result, True) == "".join(
+            f"[{segment.time_interval[0]:.2f} - {segment.time_interval[1]:.2f}]"
+            f"{'' if segment.text[:1].isspace() else ' '}{segment.text}"
+            for segment in segment_records
+        )
+        words.extend(word.text for word in word_records)
+        segments.extend(segment.text for segment in segment_records)
+        word_start_times.extend(word.time_interval[0] for word in word_records)
+
+    def decode_inputs(inputs):
+        generator.set_inputs(inputs)
+        while not generator.is_done():
+            generator.generate_next_token()
+            text = "".join(plain_stream.decode(int(token_id)) for token_id in generator.get_next_tokens())
+            postprocessor.process_next()
+            step_results = postprocessor.get_next_results()
+            assert "".join(result.text for result in step_results) == text
+            text_fragments.append(text)
+            for result in step_results:
+                process_result(result)
+
+    for offset in range(0, len(audio), chunk_samples):
+        inputs = processor.process(audio[offset : offset + chunk_samples])
+        if inputs is None:
+            skipped_chunks += 1
+            continue
+        decode_inputs(inputs)
+
+    inputs = processor.flush()
+    if inputs is not None:
+        decode_inputs(inputs)
+
+    postprocessor.finalize()
+    for result in postprocessor.get_next_results():
+        assert result.text == ""
+        process_result(result)
+    transcript = "".join(text_fragments)
+    assert transcript.strip()
+    if timestamp_level in ("word", "all"):
+        assert "".join(words) == transcript
+    if timestamp_level in ("segment", "all"):
+        assert "".join(segments) == transcript
+    if use_vad:
+        assert skipped_chunks > 0
+        assert word_start_times[0] >= 3.0
+    postprocessor.finalize()
+    for result in postprocessor.get_next_results():
+        assert asr_example.format_timestamp_records(result, False) == ""
+        assert asr_example.format_timestamp_records(result, True) == ""
+
+
+def test_asr_postprocessor_results_are_borrowed_and_reads_are_repeatable(test_data_path):
+    assert hasattr(og, "ASRPostProcessorTimestampResult")
+    assert not hasattr(og, "ASRPostProcessorTimestamp")
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+    plain = tokenizer.create_stream()
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10)
+    generator = og.Generator(model, params)
+    processor = og.ASRPostProcessor(generator)
+    assert processor.get_next_results() == []
+    processor.finalize()
+    initial = processor.get_next_results()[0]
+    assert initial.text == ""
+    assert initial.timestamp_result is None
+    processor.reset()
+    with pytest.raises(RuntimeError, match="expired"):
+        initial.text
+    generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
+    retained = []
+    for _ in range(2):
+        generator.generate_next_token()
+        for previous, expected_text in retained:
+            assert previous.text == expected_text
+        expected = plain.decode(int(generator.get_next_tokens()[0]))
+        processor.process_next()
+        for previous, _ in retained:
+            with pytest.raises(RuntimeError, match="expired"):
+                previous.text
+            with pytest.raises(RuntimeError, match="expired"):
+                previous.timestamp_result
+        retained.clear()
+        results = processor.get_next_results()
+        assert len(results) == 1
+        result = results[0]
+        assert isinstance(result, og.ASRPostProcessorResult)
+        assert result.text == expected
+        assert result.timestamp_result is None
+        assert processor.get_next_results()[0].text == expected
+        with pytest.raises(AttributeError):
+            result.text = "cannot overwrite native text"
+        retained.append((result, expected))
+    del generator
+    processor.finalize()
+    with pytest.raises(RuntimeError, match="expired"):
+        result.text
+    processor.finalize()
+    final_result = processor.get_next_results()[0]
+    assert final_result.text == ""
+    processor.reset()
+    assert processor.get_next_results() == []
+    with pytest.raises(RuntimeError, match="expired"):
+        final_result.text
+    processor.finalize()
+    before_destruction = processor.get_next_results()[0]
+    copied_text = before_destruction.text
+    del processor
+    with pytest.raises(RuntimeError, match="expired"):
+        before_destruction.text
+    assert copied_text == ""
+
+
+@pytest.mark.parametrize("search", [{"batch_size": 2}, {"num_beams": 2}])
+def test_asr_postprocessor_rejects_multiple_sequences(test_data_path, search):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10, **search)
+    generator = og.Generator(model, params)
+    with pytest.raises(RuntimeError, match="batch_size=1 and num_beams=1"):
+        og.ASRPostProcessor(generator)
+
+
+def test_asr_postprocessor_uses_generators_model(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+    plain = tokenizer.create_stream()
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=10)
+    generator = og.Generator(model, params)
+    del model
+    processor = og.ASRPostProcessor(generator)
+    generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
+    generator.generate_next_token()
+    processor.process_next()
+    assert processor.get_next_results()[0].text == plain.decode(int(generator.get_next_tokens()[0]))
+
+
+def test_asr_postprocessor_rejects_null_generator():
+    with pytest.raises(TypeError):
+        og.ASRPostProcessor(None)
+
+
+def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):
+    # What is left after the prompt when generation stops on its first token; it used to SIGFPE.
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    tokenizer = og.Tokenizer(model_path)
+
+    assert tokenizer.decode(np.array([], dtype=np.int32)) == ""
+    assert tokenizer.decode(np.arange(4, dtype=np.int32)[4:]) == ""
+
+
+def test_telemetry_control():
+    og.disable_telemetry_events()
+    og.enable_telemetry_events()
 
 
 def test_log_callback(test_data_path):
@@ -59,7 +350,7 @@ def test_log_callback(test_data_path):
     og.set_log_options(enabled=True, generate_next_token=True)
     og.set_log_callback(_log_callback)
 
-    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
     model = og.Model(config)
 
@@ -86,7 +377,7 @@ def test_log_filename(test_data_path):
     with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as log_file:
         og.set_log_options(enabled=True, generate_next_token=True, filename=log_file.name)
 
-        model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+        model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
         config = og.Config(model_path)
         model = og.Model(config)
 
@@ -105,7 +396,7 @@ def test_log_filename(test_data_path):
     og.set_log_callback(None)
 
 
-def test_NamedTensors():
+def test_named_tensors():
     named_tensors = og.NamedTensors()
     named_tensors["input_ids"] = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
     named_tensors["attention_mask"] = np.array([[1, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32)
@@ -139,7 +430,7 @@ def test_NamedTensors():
     ),
 )
 def test_greedy_search(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     config = og.Config(model_path)  # Test using config vs path directly
     model = og.Model(config)
@@ -153,7 +444,7 @@ def test_greedy_search(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32))
 
     assert int(search_params.get_search_options()["max_length"]) == 10
-    assert search_params.get_search_options()["early_stopping"] == True
+    assert search_params.get_search_options()["early_stopping"]
     assert int(generator.token_count()) == 4
 
     while not generator.is_done():
@@ -176,6 +467,23 @@ def test_greedy_search(test_data_path, relative_model_path):
     assert int(generator.token_count()) == len(generator.get_sequence(0))
 
 
+def test_marian_batch_sequence_values(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "marian-batch-values")
+    model = og.Model(model_path)
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(batch_size=2)
+
+    generator = og.Generator(model, params)
+    generator.append_tokens(np.array([[5, 32000], [7, 8]], dtype=np.int32))
+    generated_start = generator.token_count()
+    generator.generate_next_token()
+
+    assert generated_start == 2
+    assert generator.get_sequence(0)[generated_start] == 2
+    assert generator.get_sequence(1)[generated_start] == 3
+
+
 @pytest.mark.parametrize(
     "relative_model_path",
     (
@@ -189,7 +497,7 @@ def test_greedy_search(test_data_path, relative_model_path):
     ),
 )
 def test_rewind_cuda(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     model = og.Model(model_path)
 
@@ -203,10 +511,23 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     while not generator.is_done():
         generator.generate_next_token()
 
-    assert generator.get_sequence(0) is not None
+    expected_sequence = np.copy(generator.get_sequence(0))
+    rewind_length = 3
+    boundary_prefix = expected_sequence[: rewind_length + 1]
+    control = og.Generator(model, search_params)
+    control.append_tokens(boundary_prefix[np.newaxis, :])
+    control_logits = np.copy(control.get_logits())
 
-    generator.rewind_to(3)
+    generator.rewind_to(rewind_length)
+    actual_logits = np.copy(generator.get_logits())
+    assert np.allclose(control_logits, actual_logits, rtol=0, atol=1e-6)
+    assert np.array_equal(boundary_prefix, generator.get_sequence(0))
 
+    control.generate_next_token()
+    generator.generate_next_token()
+    assert np.array_equal(control.get_sequence(0), generator.get_sequence(0))
+
+    generator.rewind_to(rewind_length)
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
@@ -246,7 +567,7 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     ([Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]),
 )
 def test_rewind(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     model = og.Model(model_path)
 
@@ -266,22 +587,306 @@ def test_rewind(test_data_path, relative_model_path):
 
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
-    generator.rewind_to(3)
+    rewind_length = 3
+    boundary_prefix = expected_sequence[: rewind_length + 1]
+    control = og.Generator(model, search_params)
+    control.append_tokens(boundary_prefix[np.newaxis, :])
+    control_logits = np.copy(control.get_logits())
 
+    generator.rewind_to(rewind_length)
+    actual_logits = np.copy(generator.get_logits())
+    assert np.allclose(control_logits, actual_logits, rtol=0, atol=1e-6)
+    assert np.array_equal(boundary_prefix, generator.get_sequence(0))
+
+    control.generate_next_token()
+    generator.generate_next_token()
+    assert np.array_equal(control.get_sequence(0), generator.get_sequence(0))
+
+    generator.rewind_to(rewind_length)
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
 
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
+    generator.rewind_to(0)
+    with pytest.raises(RuntimeError, match="no prior state"):
+        generator.get_logits()
+    assert len(generator.get_sequence(0)) == 0
+
+    generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
+    while not generator.is_done():
+        generator.generate_next_token()
+    assert np.array_equal(expected_sequence, generator.get_sequence(0))
+
+
+def test_rewind_into_full_prompt(test_data_path):
+    model = og.Model(os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"))
+    search_params = og.GeneratorParams(model)
+    search_params.set_search_options(do_sample=False, max_length=10)
+    generator = og.Generator(model, search_params)
+    prompt = np.array([0, 0, 195, 731, 731, 114, 114, 114, 114, 114], dtype=np.int32)
+    generator.append_tokens(prompt[np.newaxis, :])
+    assert generator.is_done()
+    generator.rewind_to(9)
+
+    # Replaying the last prompt token fills the sequence again, so the token sampled after it is not added.
+    generator.generate_next_token()
+    assert generator.is_done()
+    assert np.array_equal(prompt, generator.get_sequence(0))
+
+
+@pytest.mark.parametrize("stop_at_eos", [False, True])
+@pytest.mark.parametrize(
+    "relative_model_path",
+    [Path("hf-internal-testing") / "tiny-random-gpt2-fp32", Path("hf-internal-testing") / "tiny-random-lfm2-fp32"],
+)
+def test_append_tokens_after_generation(test_data_path, relative_model_path, stop_at_eos):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
+    prompt = np.array([[0, 0, 195, 731]], dtype=np.int32)
+
+    def new_generator(model):
+        search_params = og.GeneratorParams(model)
+        search_params.set_search_options(do_sample=False, max_length=20)
+        return og.Generator(model, search_params)
+
+    config = og.Config(model_path)
+    if stop_at_eos:
+        # The third greedy token becomes a stop token, which ends the search without joining the sequence.
+        probe = new_generator(og.Model(model_path))
+        probe.append_tokens(prompt)
+        for _ in range(3):
+            probe.generate_next_token()
+        config.overlay(json.dumps({"model": {"eos_token_id": int(probe.get_sequence(0)[-1])}}))
+    model = og.Model(config)
+
+    generator = new_generator(model)
+    generator.append_tokens(prompt)
+    if stop_at_eos:
+        while not generator.is_done():
+            generator.generate_next_token()
+    else:
+        for _ in range(3):
+            generator.generate_next_token()
+    generator.append_tokens(np.array([[52, 64]], dtype=np.int32))
+
+    # The last generated token, unless it stopped the search, must reach the model before the appended ones.
+    control = new_generator(model)
+    control.append_tokens(generator.get_sequence(0)[np.newaxis, :])
+    assert np.allclose(control.get_logits(), generator.get_logits(), rtol=0, atol=1e-6)
+
+
+def test_append_tokens_after_generation_with_guidance(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+    pattern = r"[0-9]{8}"
+    prompt = np.array([[0, 0, 195, 731]], dtype=np.int32)
+
+    def new_generator(guidance):
+        search_params = og.GeneratorParams(model)
+        search_params.set_search_options(do_sample=False, max_length=20)
+        if guidance:
+            search_params.set_guidance("regex", pattern)
+        return og.Generator(model, search_params)
+
+    try:
+        generator = new_generator(guidance=True)
+    except RuntimeError as error:
+        if "guidance is unavailable" in str(error).lower():
+            pytest.skip("ONNX Runtime GenAI was built without guidance support")
+        raise
+    generator.append_tokens(prompt)
+    for _ in range(2):
+        generator.generate_next_token()
+    generator.append_tokens(np.array([tokenizer.encode("7")], dtype=np.int32))
+
+    control = new_generator(guidance=False)
+    control.append_tokens(generator.get_sequence(0)[np.newaxis, :])
+    assert np.allclose(control.get_logits(), generator.get_logits(), rtol=0, atol=1e-6)
+
+    # The grammar has to count the last generated token too, or the answer comes out too long.
+    while not generator.is_done():
+        generator.generate_next_token()
+    answer = tokenizer.decode(generator.get_sequence(0)[prompt.shape[1] :])
+    assert re.fullmatch(pattern, answer), answer
+
+
+def _new_ff_tokens_generator(test_data_path, device, pattern):
+    # The CUDA copies of the tiny GPT-2 model have no tokenizer files, which guidance needs.
+    config = og.Config(os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"))
+    config.clear_providers()
+    if device != "cpu":
+        config.append_provider(device)
+    model = og.Model(config)
+    search_params = og.GeneratorParams(model)
+    search_params.set_search_options(do_sample=False, max_length=10)
+    search_params.set_guidance("regex", pattern, enable_ff_tokens=True)
+    try:
+        generator = og.Generator(model, search_params)
+    except RuntimeError as error:
+        if "guidance is unavailable" in str(error).lower():
+            pytest.skip("ONNX Runtime GenAI was built without guidance support")
+        raise
+    generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
+    # The first step picks the digit; committing it to the grammar forces the words after it.
+    generator.generate_next_token()
+    return og.Tokenizer(model), generator
+
+
+ff_tokens_devices = ["cpu", "cuda"] if og.is_cuda_available() else ["cpu"]
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+@pytest.mark.parametrize("next_call", ["generate_next_token", "get_logits"])
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        # The forced words run past max_length.
+        r"[0-9] to the and of in is on that for it",
+        # The forced words fill the sequence, and the grammar still wants a digit after them.
+        r"[0-9] to the and of in[0-9]",
+    ],
+)
+def test_guidance_ff_tokens_stop_at_max_length(test_data_path, device, next_call, pattern):
+    tokenizer, generator = _new_ff_tokens_generator(test_data_path, device, pattern)
+    getattr(generator, next_call)()
+    assert generator.is_done()
+    sequence = generator.get_sequence(0)
+    assert len(sequence) == 10
+    assert re.fullmatch(r"[0-9] to the and of in", tokenizer.decode(sequence[4:]))
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+def test_guidance_ff_tokens_leave_no_room_for_append(test_data_path, device):
+    _, generator = _new_ff_tokens_generator(test_data_path, device, r"[0-9] to the and of in is on that for it")
+    # The append first runs the digit, and the words the grammar forces after it fill the sequence.
+    with pytest.raises(RuntimeError, match="exceeds max length"):
+        generator.append_tokens(np.array([[52]], dtype=np.int32))
+    assert generator.is_done()
+    assert len(generator.get_sequence(0)) == 10
+
+
+def _new_sliding_window_generator(directory, test_data_path, device, max_length, pattern=None):
+    # slide_inputs, as in Qualcomm AI Hub exports, pads every input to whole windows, here of 4 tokens.
+    source = Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"
+    config = json.loads((source / "genai_config.json").read_text())
+    vocab_size = config["model"]["vocab_size"]
+    window = {"window_size": 4, "slide_inputs": True}
+    config["model"].update(type="llama", decoder={"filename": "model.onnx", "sliding_window": window})
+    (directory / "genai_config.json").write_text(json.dumps(config))
+    for name in ("tokenizer.json", "tokenizer_config.json"):
+        shutil.copy(source / name, directory)
+    # The logits ignore the input and pick token 0 unless guidance masks it.
+    graph = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node("Shape", ["input_ids"], ["input_shape"]),
+            onnx.helper.make_node("Concat", ["input_shape", "vocab_size"], ["logits_shape"], axis=0),
+            onnx.helper.make_node("Expand", ["row", "logits_shape"], ["logits"]),
+        ],
+        "sliding_window",
+        [onnx.helper.make_tensor_value_info("input_ids", onnx.TensorProto.INT32, ["batch", "sequence"])],
+        [onnx.helper.make_tensor_value_info("logits", onnx.TensorProto.FLOAT, ["batch", "sequence", vocab_size])],
+        [
+            onnx.helper.make_tensor("row", onnx.TensorProto.FLOAT, [vocab_size], np.eye(1, vocab_size)[0]),
+            onnx.helper.make_tensor("vocab_size", onnx.TensorProto.INT64, [1], [vocab_size]),
+        ],
+    )
+    opset = [onnx.helper.make_opsetid("", 17)]
+    onnx.save(onnx.helper.make_model(graph, opset_imports=opset, ir_version=10), directory / "model.onnx")
+
+    model_config = og.Config(os.fspath(directory))
+    model_config.clear_providers()
+    if device != "cpu":
+        model_config.append_provider(device)
+    model = og.Model(model_config)
+    search_params = og.GeneratorParams(model)
+    search_params.set_search_options(do_sample=False, max_length=max_length)
+    if pattern:
+        search_params.set_guidance("regex", pattern, enable_ff_tokens=True)
+    try:
+        return og.Tokenizer(model), og.Generator(model, search_params)
+    except RuntimeError as error:
+        if "guidance is unavailable" in str(error).lower():
+            pytest.skip("ONNX Runtime GenAI was built without guidance support")
+        raise
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+def test_sliding_window_append_counts_padding(tmp_path, test_data_path, device):
+    _, generator = _new_sliding_window_generator(tmp_path, test_data_path, device, 10)
+    with pytest.raises(RuntimeError, match="exceeds max length"):
+        generator.append_tokens(np.arange(1, 10, dtype=np.int32)[np.newaxis, :])  # padded to 12
+    assert len(generator.get_sequence(0)) == 0
+
+    generator.append_tokens(np.arange(1, 6, dtype=np.int32)[np.newaxis, :])  # padded to 8
+    while not generator.is_done():
+        generator.generate_next_token()
+    assert list(generator.get_sequence(0)[3:]) == [1, 2, 3, 4, 5, 0, 0]
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+@pytest.mark.parametrize("next_call", ["generate_next_token", "get_logits", "append_tokens"])
+@pytest.mark.parametrize(
+    "pattern,max_length,kept",
+    [
+        # The ten forced words pad to 12 with 7 slots left, so one window of four words is kept.
+        (r"[0-9] to the and of in is on that for it", 12, " to the and of"),
+        # " in" is dropped, so the digit the grammar wants after it must not be generated.
+        (r"[0-9] to the and of in[0-9]", 12, " to the and of"),
+        # With 3 slots left no window fits, and the append fails before the last token runs.
+        (r"[0-9] to the and of in is on that for it", 8, ""),
+    ],
+    ids=["ten-words", "words-then-digit", "no-window-left"],
+)
+def test_guidance_ff_tokens_stop_at_padded_max_length(
+    tmp_path, test_data_path, device, next_call, pattern, max_length, kept
+):
+    tokenizer, generator = _new_sliding_window_generator(tmp_path, test_data_path, device, max_length, pattern)
+    generator.append_tokens(np.array([[1, 2, 3, 4]], dtype=np.int32))
+    generator.generate_next_token()
+    if next_call == "append_tokens":
+        with pytest.raises(RuntimeError, match="exceeds max length"):
+            generator.append_tokens(np.array([[1]], dtype=np.int32))
+    else:
+        getattr(generator, next_call)()
+    sequence = generator.get_sequence(0)
+    if next_call != "generate_next_token":
+        # Dropped forced words end the generation like a stop token, so one more step adds nothing.
+        assert not generator.is_done()
+        generator.generate_next_token()
+        assert len(generator.get_sequence(0)) == len(sequence)
+    assert generator.is_done()
+    assert len(sequence) <= max_length
+    assert re.fullmatch("[0-9]" + kept, tokenizer.decode(sequence[4:]))
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+def test_guidance_append_counts_padding_before_running_last_token(tmp_path, test_data_path, device):
+    pattern = r"[0-9] to the and of in is on that for it"
+    _, generator = _new_sliding_window_generator(tmp_path, test_data_path, device, 12, pattern)
+    generator.append_tokens(np.array([[1, 2, 3, 4]], dtype=np.int32))
+    generator.generate_next_token()
+    # Five tokens pad to 8, which does not fit after 5, so the last token and its forced words stay out.
+    with pytest.raises(RuntimeError, match="exceeds max length"):
+        generator.append_tokens(np.arange(1, 6, dtype=np.int32)[np.newaxis, :])
+    assert len(generator.get_sequence(0)) == 5
+
+
+@pytest.mark.parametrize("device", ff_tokens_devices)
+def test_guidance_ff_tokens_fit_with_padding(tmp_path, test_data_path, device):
+    pattern = r"[0-9] to the and of in is on that for it"
+    tokenizer, generator = _new_sliding_window_generator(tmp_path, test_data_path, device, 20, pattern)
+    generator.append_tokens(np.array([[1, 2, 3, 4]], dtype=np.int32))
+    while not generator.is_done():
+        generator.generate_next_token()
+    # The ten forced words fill three windows after two pad tokens.
+    sequence = generator.get_sequence(0)
+    assert len(sequence) == 17
+    assert tokenizer.decode(sequence[7:]) == " to the and of in is on that for it"
+
 
 # Test Model Loading with No Chat Template
-
-
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 @pytest.mark.parametrize("batch", [True, False])
 def test_tokenizer_encode_decode(device, phi2_for, batch):
@@ -308,10 +913,6 @@ def test_tokenizer_encode_decode(device, phi2_for, batch):
 
 
 # Test Chat Template Supported Model
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_phi3_chat_template(device, phi3_for):
     model_path = phi3_for(device)
@@ -324,14 +925,10 @@ def test_phi3_chat_template(device, phi3_for):
     try:
         tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
     except Exception as e:
-        assert False, f"Error while trying to apply chat template: {e}"
+        raise AssertionError(f"Error while trying to apply chat template: {e}") from e
 
 
 # Test Chat Template Unsupported Model with Template String Override
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_phi2_chat_template(device, phi2_for):
     model_path = phi2_for(device)
@@ -347,13 +944,9 @@ def test_phi2_chat_template(device, phi2_for):
     try:
         tokenizer.apply_chat_template(template_str=template_string, messages=messages, add_generation_prompt=True)
     except Exception as e:
-        assert False, f"Error while trying to override chat template: {e}"
+        raise AssertionError(f"Error while trying to override chat template: {e}") from e
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_stream(device, phi2_for):
     model = og.Model(phi2_for(device))
@@ -375,10 +968,6 @@ def test_stream(device, phi2_for):
         assert decoded_string == prompt
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_batching(device, phi2_for):
     if device == "dml":
@@ -400,14 +989,10 @@ def test_batching(device, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_e2e(device, phi2_for):
     model = og.Model(phi2_for(device))
@@ -429,14 +1014,10 @@ def test_e2e(device, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 @pytest.mark.parametrize("wrapper_bytes_function", [lambda x: x, bytearray, memoryview])
 def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
@@ -462,7 +1043,7 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
-    for i in range(len(prompts)):
+    for _i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
 
@@ -479,7 +1060,7 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     ),
 )
 def test_model_device_type(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path[0])
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path[0])
 
     model = og.Model(model_path)
 
@@ -501,7 +1082,7 @@ def test_model_device_type(test_data_path, relative_model_path):
     ),
 )
 def test_get_output(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
     model = og.Model(model_path)
 
@@ -547,10 +1128,6 @@ def test_get_output(test_data_path, relative_model_path):
     assert np.allclose(logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3)
 
 
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
 @pytest.mark.parametrize("device", devices)
 def test_hidden_states(qwen_for, device):
     model = og.Model(qwen_for(device))
@@ -619,10 +1196,10 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
 
     _split(
         Path(phi2_for("cuda")) / "model.onnx",
-        Path(test_data_path) / relative_model_path,
+        Path(test_data_path) / "models" / relative_model_path,
     )
 
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
 
@@ -656,10 +1233,10 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
         assert equal
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
-def test_vision_preprocessing(test_data_path, relative_model_path, relative_image_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_phi3v_preprocessing(test_data_path, relative_model_path, relative_image_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -671,10 +1248,10 @@ def test_vision_preprocessing(test_data_path, relative_model_path, relative_imag
     _ = processor(prompt, images=images)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
-def test_vision_preprocessing_load_image_from_bytes(test_data_path, relative_model_path, relative_image_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_phi3v_preprocessing_load_image_from_bytes(test_data_path, relative_model_path, relative_image_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -689,13 +1266,13 @@ def test_vision_preprocessing_load_image_from_bytes(test_data_path, relative_mod
     _ = processor(prompt, images=images)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("phi3-v")])
 @pytest.mark.parametrize(
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
 )
-def test_vision_preprocessing_multiple_images(test_data_path, relative_model_path, relative_image_paths):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_phi3v_preprocessing_multiple_images(test_data_path, relative_model_path, relative_image_paths):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -714,16 +1291,12 @@ def test_vision_preprocessing_multiple_images(test_data_path, relative_model_pat
 
 
 @pytest.mark.parametrize("device", devices)
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="ONNX is not available on ARM64",
-)
 @pytest.mark.parametrize("multiple_adapters", [True, False])
 def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
     def _prepare_adapter_model(test_data_path):
         phi2_model_path = phi2_for(device)
         relative_model_path = "multiple_adapters" if multiple_adapters else "adapters"
-        adapter_model_path = os.fspath(Path(test_data_path) / relative_model_path)
+        adapter_model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
         if os.path.exists(adapter_model_path):
             shutil.rmtree(adapter_model_path)
 
@@ -840,10 +1413,6 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
 
 
 @pytest.mark.parametrize("device", devices)
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="ONNX is not available on ARM64",
-)
 @pytest.mark.parametrize(
     "extra_inputs",
     [("num_logits_to_keep", True), ("onnx::Neg_67", True), ("abcde", False)],
@@ -852,7 +1421,7 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
     def _prepare_model(test_data_path):
         phi2_model_path = phi2_for(device)
         relative_model_path = "preset_extra_inputs"
-        extra_inputs_model_path = os.fspath(Path(test_data_path) / relative_model_path)
+        extra_inputs_model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
 
         shutil.copytree(phi2_model_path, extra_inputs_model_path, dirs_exist_ok=True)
 
@@ -898,6 +1467,8 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
 
     if device == "dml":
         pytest.skip("EP DML does not support preset extra inputs")
+    if device == "cuda" and not extra_inputs[1]:
+        pytest.skip("Missing-input error handling is covered by non-CUDA EPs")
 
     model_path, valid_model = _prepare_model(test_data_path)
     model = og.Model(model_path)
@@ -924,10 +1495,10 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
             generator.generate_next_token()
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
 @pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
-def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_whisper_preprocessing(test_data_path, relative_model_path, relative_audio_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -941,10 +1512,10 @@ def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio
     _ = processor(prompts, audios=audios)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
 @pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
-def test_audio_preprocessing_single_prompt(test_data_path, relative_model_path, relative_audio_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_whisper_preprocessing_single_prompt(test_data_path, relative_model_path, relative_audio_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -957,13 +1528,13 @@ def test_audio_preprocessing_single_prompt(test_data_path, relative_model_path, 
     _ = processor(prompt, audios=audios)
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_model_path", [Path("whisper")])
 @pytest.mark.parametrize(
     "relative_audio_paths",
     [[Path("audios") / "1272-141231-0002.mp3"], [Path("audios") / "jfk.flac"]],
 )
-def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path, relative_audio_paths):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+def test_whisper_preprocessing_multiple_audios(test_data_path, relative_model_path, relative_audio_paths):
+    model_path = os.fspath(Path(test_data_path) / "models" / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
@@ -979,9 +1550,29 @@ def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path
     _ = processor(prompts, audios=audios)
 
 
-def test_streaming_asr_create(nemotron_speech_model_path):
-    """Test that Generator + StreamingProcessor can be created from a nemotron_speech model."""
-    model = og.Model(nemotron_speech_model_path)
+@pytest.mark.parametrize("opener", ["images", "audios"])
+def test_open_keeps_short_paths_alive(test_data_path, tmp_path, opener):
+    # The paths are copied into a vector first and only then turned into char pointers: a short
+    # string keeps its characters inside the string object, so taking the pointer as the vector
+    # grows leaves the earlier entries pointing at moved-from memory.
+    source = Path(test_data_path) / ("images/cars.jpg" if opener == "images" else "audios/jfk.flac")
+    suffix = source.suffix
+    short_dir = tmp_path / "s"
+    short_dir.mkdir()
+    paths = []
+    for index in range(4):
+        path = short_dir / f"{index}{suffix}"
+        shutil.copy(source, path)
+        paths.append(os.fspath(path))
+
+    opened = (og.Images if opener == "images" else og.Audios).open(*paths)
+
+    assert opened is not None
+
+
+def test_streaming_asr_create(asr_speech_model_path):
+    """Test that Generator + StreamingProcessor can be created from a streaming ASR model."""
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
     assert processor is not None
     params = og.GeneratorParams(model)
@@ -991,9 +1582,8 @@ def test_streaming_asr_create(nemotron_speech_model_path):
 
 def _load_streaming_config(model_path):
     """Read sample_rate and chunk_samples from genai_config.json."""
-    import json
     config_path = os.path.join(model_path, "genai_config.json")
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         config = json.load(f)
     return config["model"]["sample_rate"], config["model"]["chunk_samples"]
 
@@ -1018,10 +1608,10 @@ def _decode_inputs(generator, inputs, tokenizer_stream=None):
     return text
 
 
-def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
+def test_streaming_asr_transcribe_silence(asr_speech_model_path):
     """Test transcribing a chunk of silence (all zeros) does not crash."""
-    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
-    model = og.Model(nemotron_speech_model_path)
+    sample_rate, chunk_samples = _load_streaming_config(asr_speech_model_path)
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
@@ -1034,10 +1624,10 @@ def test_streaming_asr_transcribe_silence(nemotron_speech_model_path):
     assert isinstance(text, str)
 
 
-def test_streaming_asr_flush(nemotron_speech_model_path):
+def test_streaming_asr_flush(asr_speech_model_path):
     """Test that flush processes remaining buffered audio."""
-    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
-    model = og.Model(nemotron_speech_model_path)
+    sample_rate, chunk_samples = _load_streaming_config(asr_speech_model_path)
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
@@ -1049,10 +1639,10 @@ def test_streaming_asr_flush(nemotron_speech_model_path):
     _decode_inputs(generator, mel)
 
 
-def test_streaming_asr_sine_wave(nemotron_speech_model_path):
+def test_streaming_asr_sine_wave(asr_speech_model_path):
     """Test transcribing a synthetic sine wave (non-trivial mel features)."""
-    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
-    model = og.Model(nemotron_speech_model_path)
+    sample_rate, chunk_samples = _load_streaming_config(asr_speech_model_path)
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
@@ -1076,67 +1666,23 @@ def test_streaming_asr_sine_wave(nemotron_speech_model_path):
     assert isinstance(transcript, str)
 
 
-def test_streaming_asr_config_model_type(nemotron_speech_model_path):
-    """Test that a nemotron_speech model reports the correct type."""
-    model = og.Model(nemotron_speech_model_path)
-    assert model.type == "nemotron_speech"
+# Expected model "type" reported by each ASR streaming model's genai_config.json.
+_ASR_MODEL_TYPES = {
+    "nemotron-speech-streaming": "nemotron_speech",
+    "moonshine-streaming-small": "streaming_enc_dec_asr",
+    "moonshine-streaming-tiny": "streaming_enc_dec_asr",
+}
 
 
-def test_streaming_asr_vad_set_get_option(nemotron_speech_model_path):
-    """Test that VAD can be controlled via set_option/get_option on StreamingProcessor."""
-    model = og.Model(nemotron_speech_model_path)
-    processor = og.StreamingProcessor(model)
-
-    # Default: VAD disabled
-    assert processor.get_option("use_vad") == "false"
-
-    # Set and get min_silence_chunks
-    processor.set_option("silence_duration_ms", "1000")
-    assert processor.get_option("silence_duration_ms") == "1000"
-
-    # Enable VAD if silero model is available
-    vad_path = os.path.join(nemotron_speech_model_path, "silero_vad.onnx")
-    if os.path.exists(vad_path):
-        processor.set_option("use_vad", "true")
-        assert processor.get_option("use_vad") == "true"
-
-        processor.set_option("vad_threshold", "0.8")
-        assert processor.get_option("use_vad") == "true"
-
-        # Disable
-        processor.set_option("use_vad", "false")
-        assert processor.get_option("use_vad") == "false"
-
-
-def test_streaming_asr_vad_consecutive_silence(nemotron_speech_model_path):
-    """Test that VAD uses consecutive silence logic — doesn't drop until min_silence_chunks exceeded."""
-    vad_path = os.path.join(nemotron_speech_model_path, "silero_vad.onnx")
-    if not os.path.exists(vad_path):
-        pytest.skip("silero_vad.onnx not found in model dir")
-
-    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
-    model = og.Model(nemotron_speech_model_path)
-    processor = og.StreamingProcessor(model)
-    processor.set_option("use_vad", "true")
-    processor.set_option("silence_duration_ms", "1000")  # ~2 chunks at 560ms each
-
-    silence = np.zeros(chunk_samples, dtype=np.float32)
-
-    # First 2 silence chunks should still be processed
-    mel1 = processor.process(silence)
-    assert mel1 is not None  # Chunk 1: processed (1 consecutive)
-
-    mel2 = processor.process(silence)
-    assert mel2 is not None  # Chunk 2: processed (2 consecutive)
-
-    # Third silence chunk should be dropped
-    mel3 = processor.process(silence)
-    assert mel3 is None  # Chunk 3: dropped (> min_silence_chunks)
+def test_streaming_asr_config_model_type(asr_speech_model_path):
+    """Test that a streaming ASR model reports the correct type."""
+    model = og.Model(asr_speech_model_path)
+    expected_type = _ASR_MODEL_TYPES[os.path.basename(asr_speech_model_path)]
+    assert model.type == expected_type
 
 
 def _word_error_rate(reference: str, hypothesis: str) -> float:
     """Compute Word Error Rate (WER) using edit distance on word sequences."""
-    import re
 
     def normalize(text):
         text = re.sub(r"[^\w\s]", "", text.lower())
@@ -1158,10 +1704,18 @@ def _word_error_rate(reference: str, hypothesis: str) -> float:
     return d[len(r)][len(h)] / max(len(r), 1)
 
 
-def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_data_path):
+# Per-model word-error-rate thresholds for the transcription-quality test.
+_ASR_WER_THRESHOLDS = {
+    "nemotron-speech-streaming": 0.15,
+    "moonshine-streaming-small": 0.2,
+    "moonshine-streaming-tiny": 0.25,
+}
+
+
+def test_streaming_asr_transcription_quality(asr_speech_model_path, test_data_path):
     """Test that transcription of a known audio file has acceptable WER."""
     try:
-        import soundfile as sf
+        sf = importlib.import_module("soundfile")
     except ImportError:
         pytest.skip("soundfile not installed")
         return
@@ -1174,17 +1728,18 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     audio, sr = sf.read(audio_path, dtype="float32")
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
-    sample_rate, chunk_samples = _load_streaming_config(nemotron_speech_model_path)
+    sample_rate, chunk_samples = _load_streaming_config(asr_speech_model_path)
     if sr != sample_rate:
         try:
-            import scipy.signal
+            scipy_signal = importlib.import_module("scipy.signal")
+
             num_samples = int(len(audio) * sample_rate / sr)
-            audio = scipy.signal.resample(audio, num_samples).astype(np.float32)
+            audio = scipy_signal.resample(audio, num_samples).astype(np.float32)
         except ImportError:
             pytest.skip(f"Audio is {sr}Hz and scipy not available for resampling")
 
     # Transcribe using Generator + StreamingProcessor
-    model = og.Model(nemotron_speech_model_path)
+    model = og.Model(asr_speech_model_path)
     processor = og.StreamingProcessor(model)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
@@ -1207,8 +1762,83 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
     )
 
     wer = _word_error_rate(reference, transcript)
-    assert wer < 0.15, (
-        f"WER too high: {wer:.1%}\n"
+    threshold = _ASR_WER_THRESHOLDS[os.path.basename(asr_speech_model_path)]
+    assert wer < threshold, (
+        f"WER too high: {wer:.1%} (threshold {threshold:.1%})\n"
         f"  Reference:  {reference}\n"
         f"  Hypothesis: {transcript.lower()}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Graph capture tests
+# ---------------------------------------------------------------------------
+# Note: Graph capture tests use separate fixtures (qwen_graph_for) that resolve
+# to models stored under "-graph" aliases. This keeps them isolated from regular
+# unit tests (test_hidden_states, test_tokenizer_encode_decode, etc.), which use
+# different fixtures (phi4_for, qwen_for) and thus won't accidentally run on
+# graph-capture-enabled models.
+#
+# Graph capture requires expensive recompilation and model generation, so we only
+# build and test it on supported EPs (CUDA, DML, WebGPU). CPU does not support it.
+
+
+@pytest.mark.graph_capture
+@pytest.mark.parametrize("device", devices)
+def test_qwen_graph_capture_output_consistency(qwen_graph_for, device):
+    """Verify that Qwen generates deterministically with graph capture across multiple runs."""
+    if device not in {"cuda", "webgpu"}:
+        # TODO: fix this for DML
+        pytest.skip(f"Graph capture is not supported for Qwen-2.5 on {device}.")
+
+    model = og.Model(qwen_graph_for(device))
+
+    tokenizer = og.Tokenizer(model)
+    prompt = "The quick brown fox"
+    input_ids = tokenizer.encode(prompt)
+    input_array = np.array([input_ids], dtype=np.int32)
+
+    def _run():
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=20)
+        generator = og.Generator(model, params)
+        generator.append_tokens(input_array)
+        while not generator.is_done():
+            generator.generate_next_token()
+        return list(generator.get_sequence(0))
+
+    run1 = _run()
+    run2 = _run()
+    assert run1 == run2, "Qwen graph capture model produced different outputs across two identical greedy runs"
+
+
+@pytest.mark.graph_capture
+@pytest.mark.parametrize("device", devices)
+def test_phi4_graph_capture_output_consistency(phi4_graph_for, device):
+    """Verify that Phi-4-mini generates deterministically with graph capture across multiple runs.
+
+    Graph capture CI is currently unstable on DML, so this test is restricted to WebGPU.
+    CUDA is excluded because If nodes break CUDA graph capture for Phi-4-mini.
+    """
+    if device not in {"webgpu"}:
+        # TODO: re-enable DML once graph-capture CI becomes stable on DML.
+        pytest.skip(f"Graph capture is not supported for Phi-4 mini on {device}.")
+    model = og.Model(phi4_graph_for(device))
+
+    tokenizer = og.Tokenizer(model)
+    prompt = "The quick brown fox"
+    input_ids = tokenizer.encode(prompt)
+    input_array = np.array([input_ids], dtype=np.int32)
+
+    def _run():
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=20)
+        generator = og.Generator(model, params)
+        generator.append_tokens(input_array)
+        while not generator.is_done():
+            generator.generate_next_token()
+        return list(generator.get_sequence(0))
+
+    run1 = _run()
+    run2 = _run()
+    assert run1 == run2, "Phi-4-mini graph capture model produced different outputs across two identical greedy runs"

@@ -73,6 +73,12 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <stdexcept>
 
 #include "onnxruntime_c_api.h"
+#if ORT_API_VERSION >= 31
+#define ORT_GENAI_HAS_MODEL_PACKAGE 1
+#else
+#define ORT_GENAI_HAS_MODEL_PACKAGE 0
+#endif
+
 #include "../span.h"
 #include "../logging.h"
 #include "env_utils.h"
@@ -123,6 +129,7 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
+inline uint32_t api_version{};
 
 /// <summary>
 /// This returns a reference to the ORT C Model Editor API. Used if building or augmenting a model at runtime.
@@ -178,6 +185,27 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
   return ort_lib_handle;
 }
 
+// RTLD_NOLOAD is a dlfcn extension available on Linux and macOS, but not on every POSIX platform.
+// Platforms without it continue through the existing dlopen fallback below.
+#if (defined(__linux__) || defined(MACOS_USE_DLOPEN)) && defined(RTLD_NOLOAD)
+inline void* GetLoadedDynamicLibraryIfExists(const std::string& path) {
+  LOG_INFO("Attempting to reuse loaded library %s", path.c_str());
+  dlerror();
+  void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+  if (!ort_lib_handle) {
+    dlerror();
+    return nullptr;
+  }
+
+#if defined(RTLD_DI_ORIGIN)
+  char pathname[PATH_MAX];
+  dlinfo(ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
+  LOG_INFO("Reusing loaded native library at %s", pathname);
+#endif
+  return ort_lib_handle;
+}
+#endif
+
 inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
   if (ort_api_base_fn == nullptr) {
     throw std::runtime_error("OrtGetApiBase not found");
@@ -194,6 +222,7 @@ inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
   for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
     api = ort_api_base->GetApi(i);
     if (api) {
+      api_version = i;
       LOG_INFO("ORT API Version %d was found.", i);
       break;
     }
@@ -251,6 +280,20 @@ inline void InitApi() {
   }
 
 #if defined(__linux__)
+#if defined(RTLD_NOLOAD)
+  if (ort_lib_handle == nullptr) {
+    // Reuse any ORT image already loaded by the host before resolving a new path. In particular,
+    // a host may depend on the versioned SONAME while the unversioned sibling is also present.
+    // Loading the sibling first would create a second ORT environment that cannot see EPs the host
+    // registered with the original image.
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.so");
+  }
+
+  if (ort_lib_handle == nullptr) {
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.so.1");
+  }
+#endif
+
   if (ort_lib_handle == nullptr) {
     // For Android and NuGet Linux package, the file name is libonnxruntime.so
     // "libonnxruntime4j_jni.so" is also an option on Android if we have issues
@@ -264,6 +307,16 @@ inline void InitApi() {
 #endif
 
 #if defined(MACOS_USE_DLOPEN)
+#if defined(RTLD_NOLOAD)
+  if (ort_lib_handle == nullptr) {
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.dylib");
+  }
+
+  if (ort_lib_handle == nullptr) {
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.1.dylib");
+  }
+#endif
+
   if (ort_lib_handle == nullptr) {
     ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.dylib");
   }
@@ -285,6 +338,7 @@ inline void InitApi() {
   api = ort_api_base_fn()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
+  api_version = ORT_API_VERSION;
 #endif  // defined(__linux__) || defined(MACOS_USE_DLOPEN)
 
   LOG_INFO("ORT Version: %s. %s", ort_api_base_fn()->GetVersionString(), api->GetBuildInfoString());
@@ -403,6 +457,9 @@ struct Abstract {
  */
 struct Allocator : OrtAllocator {
   static Allocator& GetWithDefaultOptions();  ///< ::OrtAllocator default instance that is owned by Onnxruntime
+  /// Wraps the internal allocator owned by `session` (forwards to OrtApi::CreateAllocator). The returned Allocator
+  /// becomes invalid when `session` is destroyed -- callers must ensure the Allocator is destroyed before the
+  /// OrtSession.
   static std::unique_ptr<Allocator> Create(const OrtSession& session, const OrtMemoryInfo& memory_info);
 
   void* Alloc(size_t size);
@@ -473,6 +530,7 @@ struct OrtEpDevice {
   std::string Name() const;
   std::string Vendor() const;
   const OrtHardwareDevice* Device() const;
+  const OrtMemoryInfo* GetMemoryInfo(OrtDeviceMemoryType memory_type) const;  ///< Wraps OrtApi::EpDevice_MemoryInfo
 
   Ort::Abstract make_abstract;
 };
@@ -500,6 +558,15 @@ struct OrtEnv {
   OrtEnv& DisableTelemetryEvents();  ///< Wraps OrtApi::DisableTelemetryEvents
 
   OrtEnv& CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info, const OrtArenaCfg& arena_cfg);  ///< Wraps OrtApi::CreateAndRegisterAllocator
+
+  /// \brief Get an EP-advertised shared allocator matching mem_info (e.g. HOST_ACCESSIBLE), or
+  /// nullptr if none exists. Wraps OrtApi::GetSharedAllocator. The returned allocator is owned by
+  /// the OrtEnv — do NOT delete it.
+  Ort::Allocator* GetSharedAllocator(const OrtMemoryInfo& mem_info) const;
+
+  /// \brief Release an EP-advertised shared allocator matching ep_device + mem_type. Wraps
+  /// OrtApi::ReleaseSharedAllocator. A no-op (success) when no matching shared allocator exists.
+  void ReleaseSharedAllocator(const OrtEpDevice* ep_device, OrtDeviceMemoryType mem_type);
 
   /// \brief Copy tensors between devices. Wraps OrtApi::CopyTensors
   /// \param src_tensors Array of source OrtValue tensors
@@ -611,6 +678,8 @@ struct OrtSessionOptions {
   OrtSessionOptions& SetInterOpNumThreads(int inter_op_num_threads);                              ///< Wraps OrtApi::SetInterOpNumThreads
   OrtSessionOptions& SetGraphOptimizationLevel(GraphOptimizationLevel graph_optimization_level);  ///< Wraps OrtApi::SetSessionGraphOptimizationLevel
 
+  OrtSessionOptions& SetDeterministicCompute(bool value);
+
   OrtSessionOptions& EnableCpuMemArena();   ///< Wraps OrtApi::EnableCpuMemArena
   OrtSessionOptions& DisableCpuMemArena();  ///< Wraps OrtApi::DisableCpuMemArena
 
@@ -634,13 +703,14 @@ struct OrtSessionOptions {
 
   OrtSessionOptions& DisablePerSessionThreads();  ///< Wraps OrtApi::DisablePerSessionThreads
 
+  OrtSessionOptions& AddFreeDimensionOverrideByName(const char* dim_name, int64_t dim_value);                                                   ///< Wraps OrtApi::AddFreeDimensionOverrideByName
   OrtSessionOptions& AddConfigEntry(const char* config_key, const char* config_value);                                                          ///< Wraps OrtApi::AddSessionConfigEntry
+  bool HasConfigEntry(const char* config_key) const;                                                                                            ///< Wraps OrtApi::HasSessionConfigEntry
   OrtSessionOptions& AddInitializer(const char* name, const OrtValue& ort_val);                                                                 ///< Wraps OrtApi::AddInitializer
   OrtSessionOptions& AddExternalInitializers(const std::vector<std::string>& names, const std::vector<std::unique_ptr<OrtValue>>& ort_values);  ///< Wraps OrtApi::AddExternalInitializers
 
   OrtSessionOptions& AppendExecutionProvider_CUDA(const OrtCUDAProviderOptions& provider_options);               ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_CUDA
   OrtSessionOptions& AppendExecutionProvider_CUDA_V2(const OrtCUDAProviderOptionsV2& provider_options);          ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_CUDA_V2
-  OrtSessionOptions& AppendExecutionProvider_ROCM(const OrtROCMProviderOptions& provider_options);               ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_ROCM
   OrtSessionOptions& AppendExecutionProvider_OpenVINO(const OrtOpenVINOProviderOptions& provider_options);       ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_OpenVINO
   OrtSessionOptions& AppendExecutionProvider_TensorRT(const OrtTensorRTProviderOptions& provider_options);       ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_TensorRT
   OrtSessionOptions& AppendExecutionProvider_TensorRT_V2(const OrtTensorRTProviderOptionsV2& provider_options);  ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_TensorRT
@@ -785,6 +855,10 @@ struct OrtSession {
   void Run(_In_opt_ const OrtRunOptions* run_options, const OrtIoBinding&);  ///< Wraps OrtApi::RunWithBinding
 
   void SetEpDynamicOptions(_In_opt_ const char* const* keys, const char* const* values, size_t kv_len);
+
+#if ORT_API_VERSION >= 27
+  void ReleaseCapturedGraph(int graph_annotation_id);  ///< Wraps OrtApi::SessionReleaseCapturedGraph (ORT 1.27+)
+#endif
 
   static void operator delete(void* p) { Ort::api->ReleaseSession(reinterpret_cast<OrtSession*>(p)); }
   Ort::Abstract make_abstract;
@@ -1451,10 +1525,83 @@ struct OrtOp {
  *
  */
 struct OrtLoraAdapter {
-  static std::unique_ptr<OrtLoraAdapter> Create(const ORTCHAR_T* adapter_file_path, OrtAllocator& allocator);  ///< Wraps OrtApi::CreateOrtLoraAdapter
+  static std::unique_ptr<OrtLoraAdapter> Create(const ORTCHAR_T* adapter_file_path,
+                                                OrtAllocator* allocator = nullptr);  ///< Wraps OrtApi::CreateOrtLoraAdapter
 
   static void operator delete(void* p) { Ort::api->ReleaseLoraAdapter(reinterpret_cast<OrtLoraAdapter*>(p)); }
   Ort::Abstract make_abstract;
 };
+
+#if ORT_GENAI_HAS_MODEL_PACKAGE
+
+struct OrtModelPackageComponentContext;
+
+namespace Ort {
+
+const OrtModelPackageApi& GetModelPackageApi();
+
+}  // namespace Ort
+
+/** \brief Model Package Options
+ *
+ * Captures the EP configuration from an OrtSessionOptions for use during variant selection.
+ * Wraps OrtModelPackageOptions and its associated release entry.
+ */
+struct OrtModelPackageOptions {
+  static std::unique_ptr<OrtModelPackageOptions> Create(const OrtEnv& env, const OrtSessionOptions& session_options);
+
+  static void operator delete(void* p) {
+    Ort::GetModelPackageApi().ReleaseModelPackageOptions(reinterpret_cast<OrtModelPackageOptions*>(p));
+  }
+  Ort::Abstract make_abstract;
+};
+
+/** \brief Model Package Context
+ *
+ * Parses a model package's manifest and per-component metadata and exposes read-only
+ * inspection APIs. Wraps OrtModelPackageContext.
+ */
+struct OrtModelPackageContext {
+  static std::unique_ptr<OrtModelPackageContext> Create(const ORTCHAR_T* package_root);
+
+  std::vector<std::string> GetComponentNames() const;
+  std::vector<std::string> GetVariantNames(const char* component_name) const;
+  /// Returns the EP name declared for a (component, variant) pair, or an empty string when
+  /// the variant does not declare an EP.
+  std::string GetVariantEpName(const char* component_name, const char* variant_name) const;
+
+  /// Resolves a path reference from the package to an on-disk path using the model_package
+  /// rules: a "sha256:<hex>[/tail]" content-addressed shared-asset reference (honoring
+  /// manifest overrides), or a plain relative path resolved against `base_dir` (empty
+  /// base_dir falls back to the package root). When `must_exist` is true the resolved path
+  /// must exist on disk.
+  std::string ResolveStringRef(const std::string& base_dir, const std::string& input,
+                               bool must_exist) const;
+
+  std::unique_ptr<OrtModelPackageComponentContext> SelectComponent(
+      const char* component_name, const OrtModelPackageOptions& options) const;
+
+  static void operator delete(void* p) {
+    Ort::GetModelPackageApi().ReleaseModelPackageContext(reinterpret_cast<OrtModelPackageContext*>(p));
+  }
+  Ort::Abstract make_abstract;
+};
+
+/** \brief Model Package Component Context
+ *
+ * Represents a component whose variant has been selected. The only accessor onnxruntime-genai
+ * consumes is the selected variant's folder path.
+ */
+struct OrtModelPackageComponentContext {
+  std::basic_string<ORTCHAR_T> GetSelectedVariantFolderPath() const;
+
+  static void operator delete(void* p) {
+    Ort::GetModelPackageApi().ReleaseModelPackageComponentContext(
+        reinterpret_cast<OrtModelPackageComponentContext*>(p));
+  }
+  Ort::Abstract make_abstract;
+};
+
+#endif  // ORT_GENAI_HAS_MODEL_PACKAGE
 
 #include "onnxruntime_inline.h"
