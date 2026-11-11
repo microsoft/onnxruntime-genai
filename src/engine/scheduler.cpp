@@ -351,10 +351,16 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   std::shared_ptr<Request> preparation_request;
   std::shared_ptr<MediaItem> preparation_item;
   StepPlanningResult deferred_preparation;
+  // First queued image whose admission probe failed for capacity. Preemption may reclaim for it
+  // when nothing else can execute; otherwise idle residents could block it permanently.
+  std::optional<RequestStepPlan> deferred_media_admission;
+  std::shared_ptr<MediaItem> deferred_media_item;
+  StepPlanningResult deferred_media_result;
 
   const auto add_candidate = [&candidates, cache_query_token_cap, max_draft_token_count,
                               &preparation_request, &preparation_item,
-                              &deferred_preparation, &plan, this](
+                              &deferred_preparation, &deferred_media_admission,
+                              &deferred_media_item, &deferred_media_result, &plan, this](
                                  const std::shared_ptr<Request>& request,
                                  bool newly_admitted) {
     const auto snapshot = request->Snapshot();
@@ -424,6 +430,12 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
             if (!resources.executable) {
               if (!deferred_preparation.unserviceable_request_id)
                 deferred_preparation = resources;
+              if (preemption_enabled_ && resources.capacity_deferred &&
+                  !resources.unserviceable_request_id && !deferred_media_admission) {
+                deferred_media_admission = entry;
+                deferred_media_item = span.item;
+                deferred_media_result = resources;
+              }
               return;
             }
           }
@@ -472,9 +484,45 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     result.preparation_item = std::move(preparation_item);
     return result;
   };
+  // Encoding cannot release decoder capacity, so it waits for any ready preparation or
+  // executable work. Only then may preemption reclaim capacity for a deferred image admission.
+  // Like decoder-step preemption, validated suspensions are published during planning; the
+  // image is then encoded and admitted by a later step as the pending beneficiary.
+  const auto reclaim_for_media = [&]() -> std::optional<StepPlanningResult> {
+    if (!deferred_media_admission || preparation_item) return std::nullopt;
+    // An earlier reclamation's beneficiary must be served before more Requests are suspended.
+    if (const auto pending = preemption_beneficiary_.lock();
+        pending && IsExecutable(pending->status_) &&
+        pending->CurrentTurnId() == preemption_beneficiary_turn_id_) {
+      return std::nullopt;
+    }
+    StepPlan reclaim_plan;
+    reclaim_plan.transaction_id = plan.transaction_id;
+    reclaim_plan.scheduled_request_limit = 1;
+    auto reclaim_result = deferred_media_result;
+    const auto victims = PlanPreemption(
+        reclaim_plan, std::span<const RequestStepPlan>{&*deferred_media_admission, 1},
+        reclaim_result);
+    if (victims.empty()) return std::nullopt;
+    for (const auto& request : victims) {
+      cache_manager_->ValidateRewind(request);
+    }
+    for (const auto& request : victims) {
+      cache_manager_->CommitPreemption(request);
+    }
+    preemption_beneficiary_ = deferred_media_admission->request;
+    preemption_beneficiary_turn_id_ = deferred_media_admission->request->CurrentTurnId();
+    preparation_request = deferred_media_admission->request;
+    preparation_item = deferred_media_item;
+    auto result = prepare_media();
+    result.capacity_deferred = true;
+    return result;
+  };
   if (candidates.empty() && preparation_item) return prepare_media();
-  if (candidates.empty() && deferred_preparation.outcome.kind != StepOutcomeKind::NoWork)
+  if (candidates.empty() && deferred_preparation.outcome.kind != StepOutcomeKind::NoWork) {
+    if (auto reclaimed = reclaim_for_media()) return *std::move(reclaimed);
     return deferred_preparation;
+  }
 
   std::vector<DecodeFirstBudgetCandidate> budget_candidates;
   budget_candidates.reserve(candidates.size());
@@ -548,6 +596,10 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     if (preparation_item && !result.unserviceable_request_id &&
         (result.outcome.kind == StepOutcomeKind::CapacityDeferred || result.outcome.kind == StepOutcomeKind::NoWork))
       return prepare_media();
+    if (!result.unserviceable_request_id &&
+        result.outcome.kind == StepOutcomeKind::CapacityDeferred) {
+      if (auto reclaimed = reclaim_for_media()) return *std::move(reclaimed);
+    }
     return result;
   }
 

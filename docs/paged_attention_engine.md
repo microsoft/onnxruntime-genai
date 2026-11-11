@@ -2543,6 +2543,14 @@ or its Turn is canceled, closed, or replaced. This avoids immediately returning 
 to the victim on the caller's next `Run()`. This is an internal planner preference, not application
 priority, and does not add an execution-capacity retry loop.
 
+A queued image Request whose features are missing is not a decoder-step candidate until encoded,
+and encoding cannot release decoder capacity. If its admission probe is capacity-deferred, no
+other preparation is ready, and no other work can execute, the same victim policy and release
+probe run for that one-token admission alone. Validated suspensions are published, the image
+becomes the pending beneficiary, and `PlanStep()` returns its preparation; a later step admits it.
+While an earlier beneficiary remains pending, no further image reclamation occurs. Runnable text
+work still takes priority over image preparation, as described under media inputs.
+
 ### Replay and observable behavior
 
 Replay follows the existing chunk and global query-token budgets. Intermediate chunks do not
