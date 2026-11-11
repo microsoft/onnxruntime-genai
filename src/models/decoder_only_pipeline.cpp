@@ -362,6 +362,11 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
   }
 }
 
+size_t DecoderOnlyPipelineState::GetPromptChunkSize(const std::vector<ExtraInput>*) const {
+  const auto& window = model_.config_->model.decoder.sliding_window;
+  return window && window->slide_inputs ? static_cast<size_t>(window->window_size) : 0;
+}
+
 DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                 DeviceSpan<int32_t> next_indices) {
   DurationTrace trace{"DecoderOnlyPipelineState::Run"};
@@ -372,8 +377,10 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
   // It is true only for the prompt processing part when the provided tokens are more than 1.
   first_run_ = next_tokens.size() > 1;
   size_t num_chunks{1};
-  if (first_run_ && model_.config_->model.decoder.sliding_window.has_value()) {
-    int window_size = model_.config_->model.decoder.sliding_window->window_size;
+  // Cache-only windows still require pipeline iterations without chunking the input tokens.
+  const auto& window = model_.config_->model.decoder.sliding_window;
+  const auto window_size = first_run_ && window ? static_cast<size_t>(window->window_size) : 0;
+  if (first_run_ && window_size) {
     num_chunks = (next_tokens.size() + window_size - 1) / window_size;
   }
 
@@ -386,7 +393,7 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
       UpdateKeyValueCache(next_indices, total_length);
       position_inputs_->Update(next_tokens, total_length, static_cast<int>(input_ids_->GetShape()[1]));
       logits_.Update(WrapTensor<int32_t>(*model_.p_device_inputs_, *input_ids_->Get()),
-                     static_cast<int>(input_ids_->GetShape()[1]));
+                     static_cast<int>(input_ids_->GetShape()[1]), false, i + 2 == num_chunks);
     }
   }
 
@@ -436,8 +443,12 @@ void DecoderOnlyPipelineState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tok
     recurrent_state_->Update();
   }
 
-  auto next_windowed_tokens = WrapTensor<int32_t>(*model_.p_device_inputs_, *input_ids_->Get());
-  logits_.Update(next_windowed_tokens, new_length);
+  if (model_.config_->model.decoder.sliding_window.has_value()) {
+    auto next_windowed_tokens = WrapTensor<int32_t>(*model_.p_device_inputs_, *input_ids_->Get());
+    logits_.Update(next_windowed_tokens, new_length, false, next_tokens.size() <= new_length);
+  } else {
+    logits_.Update(next_tokens, new_length);
+  }
 }
 
 OrtValue* DecoderOnlyPipelineState::GetOutput(const char* name) {

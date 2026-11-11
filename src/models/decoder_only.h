@@ -55,6 +55,7 @@ struct DecoderOnly_State : State {
                         bool all_tokens_valid);
 
   void RewindTo(size_t index) override;
+  size_t GetPromptChunkSize(const std::vector<ExtraInput>* pending_inputs = nullptr) const override;
   void ValidateRewindTo(size_t index) const override;
 
   void SnapshotState(size_t position) override;
@@ -78,7 +79,8 @@ struct DecoderOnly_State : State {
   DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
                                     DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid);
 
-  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length,
+                           bool all_tokens_valid, bool is_final_chunk);
 
   const DecoderOnly_Model& model_;
 

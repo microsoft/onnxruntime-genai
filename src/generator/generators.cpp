@@ -20,7 +20,9 @@
 #include "models/model.h"
 #include "models/model_type.h"
 #include "models/decoder_only.h"
+#include "models/speculative_decoding.h"
 #include "models/io/kv_cache.h"
+#include "models/io/logits.h"
 #include "models/io/position_inputs.h"
 #include "decoding/decoding_strategy.h"
 #include "decoding/n_gram_decoding_strategy.h"
@@ -669,6 +671,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
 
   InitializePhi3RopeThreshold(params);
+  if ((rope_context_threshold_ || phi3_rope_threshold_) && RequiresPromptValidation())
+    throw std::runtime_error("Runtime last-token indices do not support rotary-cache replay");
   InitializeSamplingMethod(params);
   strategy_ = MakeDecodingStrategy(*this);
   LogGeneratorCreate(params);
@@ -768,6 +772,54 @@ void Generator::ThrowIfAppendExceedsMaxLength(size_t input_ids_count) {
     throw std::runtime_error("input_ids size (" + std::to_string(input_ids_count) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
 }
 
+bool Generator::RequiresPromptValidation() const {
+  if (const auto* model = dynamic_cast<const SpeculativeDecodingModel*>(model_.get()))
+    return model->target_model().session_info_.HasInput("last_token_indices") ||
+           model->draft_model().session_info_.HasInput("last_token_indices");
+  return model_->session_info_.HasInput("last_token_indices");
+}
+
+void Generator::ValidatePromptBeforeAppend(cpu_span<const int32_t> input_ids, bool pad_to_window) const {
+  if (!RequiresPromptValidation())
+    return;
+  const size_t physical_size = pad_to_window || model_->config_->model.type == "decoder-pipeline"
+                                   ? PaddedInputIdsSize(input_ids.size())
+                                   : input_ids.size();
+  std::vector<int32_t> padded;
+  if (physical_size != input_ids.size()) {
+    if (!pad_to_window)
+      throw std::invalid_argument("Windowed device prompts require complete padded windows");
+    padded.assign(physical_size, model_->config_->model.pad_token_id);
+    const auto& window = *model_->config_->model.decoder.sliding_window;
+    std::copy(input_ids.begin(), input_ids.end(),
+              padded.begin() + (window.alignment == "left" ? 0 : physical_size - input_ids.size()));
+    input_ids = padded;
+  }
+
+  const auto validate = [&](const State& state) {
+    if (!state.model_.session_info_.HasInput("last_token_indices"))
+      return;
+    const auto batch_size = static_cast<size_t>(state.params_->search.batch_size);
+    if (input_ids.size() % batch_size)
+      throw std::invalid_argument("Last-token indices require complete prompt token rows");
+    std::span<const int32_t> validation_tokens = input_ids;
+    size_t sequence_length = input_ids.size() / batch_size;
+    const size_t chunk_size = state.GetPromptChunkSize(set_extra_inputs_ ? &extra_inputs_ : nullptr);
+    if (batch_size == 1 && chunk_size > 0 && sequence_length > chunk_size) {
+      const size_t offset = (sequence_length - 1) / chunk_size * chunk_size;
+      validation_tokens = validation_tokens.subspan(offset, validation_tokens.size() - offset);
+      sequence_length -= offset;
+    }
+    LastTokenIndices(validation_tokens, batch_size, 1, sequence_length, state.model_.config_->model.pad_token_id);
+  };
+  if (auto* state = dynamic_cast<SpeculativeDecodingState*>(state_.get())) {
+    validate(state->target_state());
+    validate(state->draft_state());
+  } else {
+    validate(*state_);
+  }
+}
+
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   DurationTrace trace{"Generator::AppendTokens"};
 
@@ -783,6 +835,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     // Support for continuous decoding should be based on the type of device used for KV cache
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
+
+  ValidatePromptBeforeAppend(input_ids, true);
 
   std::string_view append_input_modality = transducer_state_ ? "audio" : "text";
   if (generation_telemetry_.BeginAppend()) {
@@ -826,7 +880,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     search_->AppendTokens(input_ids_device);
   } else {
     search_->AppendTokens(input_ids_device);
-    ComputeLogits(input_ids_device);
+    ComputeLogits(input_ids_device, /*is_prompt=*/true);
   }
 
   generation_telemetry_.CompleteAppend(
@@ -848,6 +902,9 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
+  if (RequiresPromptValidation())
+    ValidatePromptBeforeAppend(input_ids.CopyDeviceRangeToCpu(), false);
+
   if (set_extra_inputs_) {
     state_->SetExtraInputs(extra_inputs_);
     set_extra_inputs_ = false;
@@ -863,7 +920,7 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   }
   search_->AppendTokens(input_ids);
   computed_logits_ = false;
-  ComputeLogits(input_ids);
+  ComputeLogits(input_ids, /*is_prompt=*/true);
 }
 
 void Generator::RunGeneratedToken() {
@@ -935,7 +992,7 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
   }
 }
 
-void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
+void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens, bool is_prompt) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
@@ -944,7 +1001,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
 
-  auto logits = RunWithRopeCache(next_tokens);
+  auto logits = RunWithRopeCache(next_tokens, is_prompt);
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpValues(stream, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
@@ -963,11 +1020,18 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
       // process fast-forward tokens
       std::span<int32_t> forced_tokens_span{ff_tokens};
       auto forced_tokens = AllocateInputIdsOnDevice(forced_tokens_span);
-      search_->AppendTokens(forced_tokens);
-
-      std::span<int32_t> new_next_token_span{ff_tokens};
-      auto new_next_token = AllocateInputIdsOnDevice(new_next_token_span);
-      logits = RunWithRopeCache(new_next_token);
+      const auto& window = model_->config_->model.decoder.sliding_window;
+      const size_t chunk_size = window && window->slide_inputs ? static_cast<size_t>(window->window_size)
+                                                               : forced_tokens.size();
+      for (size_t offset = 0; offset < forced_tokens.size(); offset += chunk_size) {
+        auto chunk = forced_tokens.subspan(offset, std::min(chunk_size, forced_tokens.size() - offset));
+        search_->AppendTokens(chunk);
+        const size_t selection_length = window && window->slide_inputs && window->alignment == "left" &&
+                                                offset + chunk.size() > ff_tokens.size()
+                                            ? ff_tokens.size() - offset
+                                            : 0;
+        logits = RunWithRopeCache(chunk, false, selection_length);
+      }
       if (g_log.enabled && g_log.model_logits) {
         auto& stream_ = Log("model_logits");
         DumpValues(stream_, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
@@ -985,17 +1049,24 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   computed_logits_ = true;
 }
 
-DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens) {
+DeviceSpan<float> Generator::RunWithRopeCache(DeviceSpan<int32_t> next_tokens, bool is_prompt, size_t input_selection_length) {
   const int length = search_->GetSequenceLength();
   const bool replay = rope_context_threshold_ != 0 && rope_cache_length_ > 0 &&
                       (rope_cache_length_ >= rope_context_threshold_) != (length >= rope_context_threshold_);
   if (replay) {
+    if (input_selection_length) {
+      if (input_selection_length > next_tokens.size() || next_tokens.size() > static_cast<size_t>(length))
+        throw std::invalid_argument("Logit selection extent exceeds the current input length");
+      // The explicit extent is relative to the incoming suffix, not replayed history.
+      input_selection_length += static_cast<size_t>(length) - next_tokens.size();
+    }
     // Rebuild only model state: search, sampling, guidance and usage already contain these tokens.
     state_->RewindTo(0);
     next_tokens = search_->GetSequence(0);
     next_tokens.CopyDeviceToCpu();
   }
 
+  State::PromptInputScope prompt_scope(*state_, !replay && is_prompt, input_selection_length);
   auto logits = replay ? static_cast<DecoderOnly_State&>(*state_).Run(length, next_tokens, search_->GetNextIndices(), true)
                        : state_->Run(length, next_tokens, search_->GetNextIndices());
   rope_cache_length_ = length;

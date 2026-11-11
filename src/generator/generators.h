@@ -190,9 +190,11 @@ struct Generator : LeakChecked<Generator> {
   void LogGeneratorCreate(const GeneratorParams& params);
   size_t PaddedInputIdsSize(size_t input_ids_count) const;
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
-  void ComputeLogits(DeviceSpan<int32_t> next_tokens);
+  void ComputeLogits(DeviceSpan<int32_t> next_tokens, bool is_prompt = false);
   void RunGeneratedToken();
-  DeviceSpan<float> RunWithRopeCache(DeviceSpan<int32_t> next_tokens);
+  DeviceSpan<float> RunWithRopeCache(DeviceSpan<int32_t> next_tokens, bool is_prompt = false, size_t input_selection_length = 0);
+  bool RequiresPromptValidation() const;
+  void ValidatePromptBeforeAppend(cpu_span<const int32_t> input_ids, bool pad_to_window) const;
   int rope_cache_length_{};
   int rope_context_threshold_{};
   void ThrowIfAppendExceedsMaxLength(size_t input_ids_count);

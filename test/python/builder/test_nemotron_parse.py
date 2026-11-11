@@ -733,17 +733,22 @@ class NemotronParseBuilderTests(TestCase):
 
     @requires_cpu_tensor_scatter
     def test_unified_decoder_matches_reference_for_prefill_and_decode(self):
-        self.check_unified_decoder_matches_reference(padded=False)
+        for runtime_indices in (False, True):
+            with self.subTest(runtime_indices=runtime_indices):
+                self.check_unified_decoder_matches_reference(padded=False, runtime_indices=runtime_indices)
 
     @requires_cpu_tensor_scatter
     def test_unified_decoder_matches_reference_with_padded_prefill(self):
-        self.check_unified_decoder_matches_reference(padded=True)
+        for runtime_indices in (False, True):
+            with self.subTest(runtime_indices=runtime_indices):
+                self.check_unified_decoder_matches_reference(padded=True, runtime_indices=runtime_indices)
 
-    def check_unified_decoder_matches_reference(self, padded):
+    def check_unified_decoder_matches_reference(self, padded, runtime_indices=False):
         torch.manual_seed(0)
         builder = _make_builder(
             io_dtype=nemotron_parse.ir.DataType.FLOAT,
             config=_make_builder_config(max_sequence_length=8),
+            runtime_last_token_indices=runtime_indices,
         )
         model = _TinyModel(builder.config).eval()
         input_ids = torch.tensor([[2, 3, 4, 1 if padded else 5]], dtype=torch.int64)
@@ -775,6 +780,8 @@ class NemotronParseBuilderTests(TestCase):
             "decoder_attention_mask": np.pad(attention_mask.numpy(), ((0, 0), (0, 4))),
             "cache_write_indices": np.array([0], dtype=np.int64),
         }
+        if runtime_indices:
+            feeds["last_token_indices"] = np.array([[[input_ids.shape[1] - 1 - int(padded)]]], dtype=np.int32)
         for layer_id, (_, _, cross_key, cross_value) in enumerate(reference_prefill_caches):
             cache = np.zeros((1, 2, 8, 4), dtype=np.float32)
             feeds[f"past_key_values.{layer_id}.key"] = cache.copy()
@@ -820,6 +827,8 @@ class NemotronParseBuilderTests(TestCase):
         feeds["decoder_input_ids"] = next_token.numpy()
         feeds["decoder_attention_mask"] = np.pad(full_attention_mask.numpy(), ((0, 0), (0, 3)))
         feeds["cache_write_indices"] = np.array([input_ids.shape[1]], dtype=np.int64)
+        if runtime_indices:
+            feeds["last_token_indices"] = np.zeros((1, 1, 1), dtype=np.int32)
         for layer_id in range(builder.config.decoder.decoder_layers):
             feeds[f"past_key_values.{layer_id}.key"] = prefill_outputs[f"present.{layer_id}.key"]
             feeds[f"past_key_values.{layer_id}.value"] = prefill_outputs[f"present.{layer_id}.value"]

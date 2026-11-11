@@ -384,6 +384,55 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options prune_lm_head=true
 ```
 
+For non-paged exports, add `runtime_last_token_indices=true` when prefill is
+chunked or the attention mask has a fixed capacity. This opt-in defaults to
+`false` and takes effect with `prune_lm_head=true` and an included LM head.
+It adds the reserved INT32 graph input `last_token_indices` with shape
+`[batch_size, 1, 1]`. GenAI supplies each batch/beam row's final valid index in
+the current token chunk, rather than deriving a chunk-local index from the
+full attention mask. Logits remain `[batch_size, 1, vocab_size]`; attention and
+KV-cache updates still process the entire chunk. Do not add this reserved input
+to the JSON decoder-input mapping.
+
+Runtime indices also select the requested row in decoders without an attention
+mask, and are emitted by the Nemotron Parse decoder's custom input setup.
+Padding-only intermediate chunks are permitted when their logits are discarded;
+for ordinary prefills, each final prompt chunk must contain a non-padding token
+in every row, even when the chunk contains only one token. Prompt validation
+precedes sequence and cache mutation, so a rejected append leaves the generator
+usable. Validation checks both speculative child decoders and uses the decoder's
+actual chunking eligibility, including physical sliding-window alignment padding.
+Multimodal or batch-beam prefills that run in a single pass validate that whole pass.
+CUDA chunk selection downloads only the current token range, not the entire
+prompt allocation for each chunk. Generated tokens treat PAD-ID tokens as valid, and every token remains in
+the KV cache. Ordinary one-token decode does not download tokens to the CPU to
+validate padding. For left-aligned sliding-window guidance, an explicit selection extent
+excludes synthetic trailing padding without excluding genuine forced PAD tokens.
+Selection is preserved across chunking and nested decoder states.
+
+Runtime-selected indices do not currently support explicit LongRoPE context
+selection or legacy Phi-family rotary-cache replay; the runtime rejects those
+combinations. Exports without the reserved input retain their existing replay
+behavior. LongRoPE-specific enhancements are outside this feature's scope.
+
+These runtime changes and the shared engine media-budget layout require
+device-interface version 24. Rebuild the CUDA
+add-on together with the runtime; older add-ons are rejected with an explicit
+version-mismatch error.
+
+The exported model requires a runtime built with `last_token_indices` support.
+For older runtimes, re-export with both `runtime_last_token_indices=false` and
+`prune_lm_head=false`. The runtime-index option cannot be combined with paged
+attention, which uses `logits_indices` instead.
+
+```bash
+# From a wheel containing this option:
+python -m onnxruntime_genai.models.builder -m Qwen/Qwen3-VL-2B-Instruct -o qwen3-vl -p fp16 -e cuda --extra_options prune_lm_head=true runtime_last_token_indices=true
+
+# From source, in src/python/py/models:
+python builder.py -m Qwen/Qwen3-VL-2B-Instruct -o qwen3-vl -p fp16 -e cuda --extra_options prune_lm_head=true runtime_last_token_indices=true
+```
+
 #### Include Last Hidden States Output
 
 This scenario is for when you want to include the last hidden states as an output to your ONNX model.

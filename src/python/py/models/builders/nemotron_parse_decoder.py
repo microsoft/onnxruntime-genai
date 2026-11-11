@@ -147,6 +147,14 @@ class NemotronParseDecoderComponent(Model):
                 [batch, self.cache_sequence_length],
             )
         )
+        if "last_token_indices" in self.input_names:
+            self.graph.inputs.append(
+                self.make_value(
+                    self.input_names["last_token_indices"],
+                    self.input_types["last_token_indices"],
+                    self.input_shapes["last_token_indices"],
+                )
+            )
         for layer_id in range(self.num_layers):
             for name, shape in (
                 (f"past_key_values.{layer_id}.key", head_shape),

@@ -204,20 +204,25 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   return Run(total_length, next_tokens, next_indices, false);
 }
 
+size_t DecoderOnly_State::GetPromptChunkSize(const std::vector<ExtraInput>*) const {
+  return first_run_ && params_->BatchBeamSize() == 1 ? params_->search.chunk_size.value_or(0) : 0;
+}
+
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                                          bool all_tokens_valid) {
   size_t num_tokens = next_tokens.size();
-  const auto& chunk_size_opt = params_->search.chunk_size;
 
   if (rope_context_length_)
     *rope_context_length_->GetTensorMutableData<int64_t>() = total_length;
   const bool replaying_rope_cache = rope_context_length_ && num_tokens == static_cast<size_t>(total_length);
-  if ((first_run_ || replaying_rope_cache) && chunk_size_opt.has_value() &&
-      chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
-    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value(), all_tokens_valid);
+  const size_t chunk_size = replaying_rope_cache ? params_->search.chunk_size.value_or(0)
+                            : first_run_         ? GetPromptChunkSize()
+                                                 : 0;
+  if (chunk_size > 0 && num_tokens > chunk_size) {
+    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size, all_tokens_valid);
   }
 
-  UpdateInputsOutputs(next_tokens, next_indices, total_length);
+  UpdateInputsOutputs(next_tokens, next_indices, total_length, all_tokens_valid, true);
   if (engram_state_) {
     engram_state_->UpdateInputsOutputs(next_tokens);
     engram_state_->Run(total_length, next_tokens, next_indices);
@@ -267,19 +272,33 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   size_t num_tokens = next_tokens.size();
   size_t processed_tokens = 0;
   int length = total_length - static_cast<int>(num_tokens);
+  size_t last_prompt_token = num_tokens - 1;
+  DeviceSpan<float> saved_logits;
+  const size_t selection_length = InputSelectionLength();
+  if (selection_length > num_tokens)
+    throw std::invalid_argument("Logit selection extent exceeds the current input length");
+  if (selection_length) {
+    last_prompt_token = selection_length - 1;
+  }
 
   if (model_.config_->model.decoder.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.decoder.run_options.value());
   }
   while (processed_tokens < num_tokens) {
     size_t current_chunk_size = std::min(chunk_size, num_tokens - processed_tokens);
+    const bool last_chunk = processed_tokens + current_chunk_size == num_tokens;
+    const bool selected_chunk =
+        processed_tokens <= last_prompt_token && last_prompt_token < processed_tokens + current_chunk_size;
+    State::PromptInputScope chunk_scope(*this, IsPromptInput(),
+                                        selection_length && selected_chunk ? last_prompt_token - processed_tokens + 1 : 0);
 
     // Create subspans for current chunk
     auto chunk_tokens = next_tokens.subspan(processed_tokens, current_chunk_size);
     length = length + static_cast<int>(current_chunk_size);
 
     // Process this chunk - fills KV cache progressively
-    UpdateInputsOutputs(chunk_tokens, next_indices, length);
+    UpdateInputsOutputs(chunk_tokens, next_indices, length, all_tokens_valid,
+                        selection_length ? selected_chunk : last_chunk);
     if (engram_state_) {
       engram_state_->UpdateInputsOutputs(chunk_tokens);
       engram_state_->Run(length, chunk_tokens, next_indices);
@@ -290,12 +309,19 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
     // Graph capture is typically disabled during context phase chunking
     bool graph_capture_this_run = false;  // Disable graph capture during chunking
     State::Run(*model_.session_decoder_, graph_capture_this_run);
+    if (selection_length && selected_chunk) {
+      auto selected_logits = logits_.Get(all_tokens_valid);
+      if (last_chunk)
+        return selected_logits;
+      // Cache-only tail chunks must not replace logits from the selected chunk.
+      saved_logits = model_.p_device_logits_->Allocate<float>(selected_logits.size());
+      saved_logits.CopyFrom(selected_logits);
+    }
 
     processed_tokens += current_chunk_size;
   }
 
-  // Return logits from the last chunk for potential sampling
-  return logits_.Get(all_tokens_valid);
+  return saved_logits.empty() ? logits_.Get(all_tokens_valid) : saved_logits;
 }
 
 void DecoderOnly_State::ValidateRewindTo(size_t index) const {
@@ -362,7 +388,8 @@ void DecoderOnly_State::CropToAccepted(size_t new_length, size_t recurrent_posit
     indexer_cache_->CommitAcceptedPrefix(recurrent_position + 1);
 }
 
-void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
+void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length,
+                                            bool all_tokens_valid, bool is_final_chunk) {
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
 
@@ -400,7 +427,7 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
     hidden_states_output_->Update(static_cast<int>(new_length));
   if (recurrent_state_)
     recurrent_state_->SetForwardLength(static_cast<int>(new_length));
-  logits_.Update(next_tokens, new_length);
+  logits_.Update(next_tokens, new_length, all_tokens_valid, is_final_chunk);
 }
 
 }  // namespace Generators

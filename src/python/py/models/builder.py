@@ -209,6 +209,7 @@ def check_extra_options(
         "shared_embeddings",
         "hf_remote",
         "prune_lm_head",
+        "runtime_last_token_indices",
         "use_paged_attention",
         "windowed_kv_cache",
         "text_only",
@@ -1104,6 +1105,10 @@ def get_args():
                     For paged-attention models, gathers the final packed hidden state for each sequence so the
                     MatMul input is [B,H] instead of [num_tokens,H].
                     Ignored when exclude_lm_head is true.
+                runtime_last_token_indices = Use runtime-supplied chunk-local nonpad indices with a pruned LM head.
+                    Handles trailing padding in chunked prefill and continuation without inspecting a static mask.
+                    Requires an updated runtime supporting last_token_indices. Default is false.
+                    GenAI currently rejects this option with explicit or legacy rotary-cache replay.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
