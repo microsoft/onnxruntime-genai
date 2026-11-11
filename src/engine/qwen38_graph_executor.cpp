@@ -132,11 +132,12 @@ void Qwen38GraphSession::SavePrefix(std::span<const int32_t> tokens) {
     auto state = device_->CapturePrefix();
     if (!state) return;
     auto entry = PrefixEntry{std::vector<int32_t>{tokens.begin(), tokens.end()}, std::move(state)};
-    std::erase_if(prefixes_, [this](const PrefixEntry& existing) {
-      if (existing.state->IsResident()) return false;
-      ++prefix_metrics_.evictions;
-      return true;
-    });
+    prefixes_.erase(std::remove_if(prefixes_.begin(), prefixes_.end(), [this](const PrefixEntry& existing) {
+                      if (existing.state->IsResident()) return false;
+                      ++prefix_metrics_.evictions;
+                      return true;
+                    }),
+                    prefixes_.end());
     prefixes_.push_back(std::move(entry));
   } catch (const std::bad_alloc&) {
     ++prefix_metrics_.publication_refusals;

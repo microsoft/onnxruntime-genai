@@ -162,7 +162,9 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   std::shared_ptr<const Qwen38PrefixState> CapturePrefix() override {
     if (max_prefix_snapshots == 0) return nullptr;
     if (fail_capture_allocation) throw std::bad_alloc{};
-    std::erase_if(prefix_snapshots_, [](const auto& state) { return state.expired(); });
+    prefix_snapshots_.erase(std::remove_if(prefix_snapshots_.begin(), prefix_snapshots_.end(),
+                                           [](const auto& state) { return state.expired(); }),
+                            prefix_snapshots_.end());
     while (prefix_snapshots_.size() >= max_prefix_snapshots) {
       if (auto state = prefix_snapshots_.front().lock()) state->resident = false;
       prefix_snapshots_.erase(prefix_snapshots_.begin());

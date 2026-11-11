@@ -1863,7 +1863,8 @@ std::shared_ptr<const Qwen38PrefixState> Qwen38GraphEngine::CapturePrefix() {
     const auto& shape = tensor.shape;
     if (name == "past_position_ids") {
       add(tensor.ptr, tensor.Bytes(), {{0, 0, length * sizeof(int64_t)}});
-    } else if (index || name.ends_with(".key") || name.ends_with(".value")) {
+    } else if (index || (name.size() >= 4 && name.compare(name.size() - 4, 4, ".key") == 0) ||
+               (name.size() >= 6 && name.compare(name.size() - 6, 6, ".value") == 0)) {
       const size_t rows = static_cast<size_t>(shape.at(shape.size() - 2));
       const size_t row_bytes = static_cast<size_t>(shape.back()) * Ort::SizeOf(tensor.type);
       const size_t kept_rows = std::min(rows, index ? length / kQwen38IndexKeyRatio + 1 : length);
