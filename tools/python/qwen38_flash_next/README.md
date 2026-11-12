@@ -375,8 +375,15 @@ For safe weight-bank reuse, replace the checkpoint arguments with:
 ```
 
 The source must contain complete matching RC5 weight banks. Missing quantized
-banks still require real BF16 checkpoints; they are never invented. Reuse
-validates all six source positional tables, descriptors and recorded coverage.
+banks still require real BF16 checkpoints; they are never invented. With a
+checkpoint, banks are reused only if their recorded checkpoint fingerprint, a
+SHA-256 over the weight map and the complete contents of every shard, matches.
+Each reuse check rehashes the shards in parallel without a stat-based digest
+cache: writable memory mappings can change checkpoint bytes without updating
+file timestamps. Keep checkpoints unchanged throughout a package build.
+Banks fingerprinted by earlier builders, which hashed only parts of large
+shards, are rebuilt once. Reuse validates all six source positional tables,
+descriptors and recorded coverage.
 Legacy banks without positional provenance must match standard-RoPE mathematics.
 The builder then constructs new positional assets using `BinaryBlobWriter`,
 regenerates descriptors/pool metadata, and constructs the graphs without
@@ -457,4 +464,3 @@ unavailable. Broad long-context quality and exact DFlash2 speculative losslessne
 remain unproven; the known width-dependent discrepancy is deferred.
 The original 128K/256K VRAM estimator is not used as admission evidence for new
 explicit-capacity packages.
-

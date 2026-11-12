@@ -3447,7 +3447,7 @@ def build_rc5_package(
         skip_root.add(QMOE_BANK_METADATA_NAME)
 
         copied_suffixes = (".tsv",)
-        copied_names = ("weights_pool.txt",)
+        copied_names = ("weights_pool.txt", "bank_metadata.json")
 
         for p in sorted(base_pkg_resolved.iterdir()):
             if p.is_file() and p.name not in skip_root and not p.name.endswith(".lock"):

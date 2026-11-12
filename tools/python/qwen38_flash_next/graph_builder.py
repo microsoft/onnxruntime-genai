@@ -20,7 +20,7 @@ import numpy as np
 import onnx
 import torch
 from onnx import TensorProto, helper, numpy_helper
-from package_io import CheckpointTensorLoader
+from package_io import CheckpointTensorLoader, write_text_replacing
 from rope import DEFAULT_ROPE, DRAFT_NAMES, TARGET_NAMES, RopeConfig, dflash_rope, target_rope
 
 ALIGN = 4096
@@ -2683,7 +2683,7 @@ def save_bank_metadata_to_dir(
     eff_fp = checkpoint_fingerprint if checkpoint_fingerprint is not None else prev.get("checkpoint_fingerprint")
     if eff_fp is not None:
         metadata["checkpoint_fingerprint"] = eff_fp
-    meta_json.write_text(json.dumps(metadata, indent=2) + "\n")
+    write_text_replacing(meta_json, json.dumps(metadata, indent=2) + "\n")
 
 
 def sync_bank_metadata_from_models(pkg_dir: Path) -> None:
