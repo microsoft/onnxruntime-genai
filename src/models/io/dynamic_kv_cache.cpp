@@ -28,16 +28,16 @@ void DynamicKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
       const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
       current_shape[2] = (max_cache_length > 0) ? std::min(total_length, max_cache_length) : total_length;
 
-      presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
+      presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(layer_idx * 2), current_shape, type_);
       state_.outputs_[output_index_ + layer_idx * 2] = presents_[layer_idx * 2].get();
 
-      presents_[layer_idx * 2 + 1] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
+      presents_[layer_idx * 2 + 1] = OrtValue::CreateTensor(Allocator(layer_idx * 2 + 1), current_shape, type_);
       state_.outputs_[output_index_ + layer_idx * 2 + 1] = presents_[layer_idx * 2 + 1].get();
     }
   } else {
     shape_[2] = total_length;
     for (int i = 0; i < layer_count_ * 2; i++) {
-      presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
+      presents_[i] = OrtValue::CreateTensor(Allocator(i), shape_, type_);
       state_.outputs_[output_index_ + i] = presents_[i].get();
     }
   }
@@ -54,11 +54,7 @@ void DynamicKeyValueCache::RewindTo(size_t index) {
   if (index == 0) {
     for (int i = 0; i < layer_count_ * 2; i++) {
       pasts_[i] = nullptr;
-      if (!empty_pasts_.empty()) {
-        state_.inputs_[input_index_ + i] = empty_pasts_[i / 2].get();
-      } else {
-        state_.inputs_[input_index_ + i] = empty_past_.get();
-      }
+      state_.inputs_[input_index_ + i] = empty_pasts_[i].get();
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);
@@ -96,9 +92,9 @@ void DefaultKeyValueCacheBase::RewindPastTensorsTo(size_t index) {
       const auto present_shape = present.GetTensorTypeAndShapeInfo()->GetShape();
       const auto old_length_x_head_size = present_shape[2] * new_shape[3];
 
-      std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), new_shape, type_);
-      auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), *past, type_);
-      auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), present, type_);
+      std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(i), new_shape, type_);
+      auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(i), *past, type_);
+      auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(i), present, type_);
 
       for (int j = 0; j < batch_x_num_heads; j++) {
         auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -119,10 +115,10 @@ void DefaultKeyValueCacheBase::RewindPastTensorsTo(size_t index) {
 
     for (int i = 0; i < layer_count_ * 2; i++) {
       OrtValue& present = *presents_[i];
-      std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
+      std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(i), shape_, type_);
 
-      auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), *past, type_);
-      auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), present, type_);
+      auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(i), *past, type_);
+      auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(i), present, type_);
 
       for (int j = 0; j < batch_x_num_heads; j++) {
         auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);

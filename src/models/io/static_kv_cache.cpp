@@ -96,6 +96,11 @@ int GetWindowedKeyValueCacheSize(const Model& model, const Config::Search& searc
 
 namespace {
 
+std::string DescribeMemoryLocation(const OrtMemoryInfo& info) {
+  return info.GetAllocatorName() + ":" + std::to_string(info.GetDeviceId()) +
+         " (memory type " + std::to_string(info.GetMemoryType()) + ")";
+}
+
 std::vector<std::string> MakePastKeyValueInputNames(const Model& model) {
   std::vector<int> kv_layer_indices;
   const auto& key_template = model.config_->model.decoder.inputs.past_key_names;
@@ -142,6 +147,79 @@ bool ShouldUseSharedPastPresentKeyValueCache(State& state) {
         state.params_->search, past_present_share_buffer, "DefaultKeyValueCache");
   }
   return past_present_share_buffer;
+}
+
+void DefaultKeyValueCacheBase::ValidatePastPresentLocations(
+    const std::string& input_name, const std::string& output_name,
+    const OrtMemoryInfo& input, const OrtMemoryInfo& output) {
+  // Separate-buffer decode also reuses each present as the next past.
+  if (input.GetAllocatorName() != output.GetAllocatorName() ||
+      input.GetDeviceType() != output.GetDeviceType() ||
+      input.GetDeviceId() != output.GetDeviceId() ||
+      input.GetMemoryType() != output.GetMemoryType()) {
+    throw std::runtime_error("Dense KV cache locations are incompatible: '" + input_name + "' requires " +
+                             DescribeMemoryLocation(input) + ", but '" + output_name + "' is produced on " +
+                             DescribeMemoryLocation(output) + ". Cross-device cache updates are not supported.");
+  }
+}
+
+void DefaultKeyValueCacheBase::InitializeCacheAllocations(int kv_cache_quantization_bits) {
+  const auto device_type = model_.p_device_kvcache_->GetType();
+  if (!CanUseTopLevelDeviceKeyValueCachePolicy(model_) ||
+      (device_type != DeviceType::CPU && device_type != DeviceType::CUDA))
+    return;
+
+  const auto& session = model_.session_info_.GetInputSession(input_name_strings_.front());
+  const auto input_names = session.GetInputNames();
+  const auto output_names = session.GetOutputNames();
+  const auto input_locations = session.GetMemoryInfoForInputs();
+  const auto output_locations = session.GetMemoryInfoForOutputs();
+  std::unordered_map<std::string, const OrtMemoryInfo*> inputs, outputs;
+  for (size_t i = 0; i < input_names.size(); ++i)
+    inputs.emplace(input_names[i], input_locations[i]);
+  for (size_t i = 0; i < output_names.size(); ++i)
+    outputs.emplace(output_names[i], output_locations[i]);
+
+  bool has_cpu_cache = false;
+  for (size_t i = 0; i < input_name_strings_.size(); ++i) {
+    const auto input = inputs.find(input_name_strings_[i]);
+    const auto output = outputs.find(output_name_strings_[i]);
+    if (input == inputs.end() || output == outputs.end())
+      throw std::runtime_error("Dense KV cache pair '" + input_name_strings_[i] + "' / '" +
+                               output_name_strings_[i] + "' must belong to the same decoder session.");
+
+    ValidatePastPresentLocations(input->first, output->first, *input->second, *output->second);
+    const auto& location = *output->second;
+    DeviceInterface* device = nullptr;
+    if (location.GetAllocatorName() == "Cpu" &&
+        location.GetDeviceType() == OrtMemoryInfoDeviceType_CPU &&
+        location.GetDeviceId() == 0 && location.GetMemoryType() == OrtMemTypeDefault) {
+      device = GetDeviceInterface(DeviceType::CPU);
+      has_cpu_cache = true;
+    } else if (device_type == DeviceType::CUDA &&
+               location.GetAllocatorName() == "Cuda" &&
+               location.GetDeviceType() == OrtMemoryInfoDeviceType_GPU &&
+               location.GetMemoryType() == OrtMemTypeDefault &&
+               location.GetDeviceId() == model_.p_device_kvcache_->GetAllocator().GetInfo().GetDeviceId()) {
+      device = model_.p_device_kvcache_;
+    } else {
+      throw std::runtime_error("Unsupported dense KV cache location for '" + output->first + "': " +
+                               DescribeMemoryLocation(location));
+    }
+    cache_allocations_.push_back({input->second, output->second, device, nullptr});
+  }
+
+  if (has_cpu_cache && device_type == DeviceType::CUDA &&
+      (state_.params_->search.batch_size != 1 || state_.params_->search.num_beams != 1 ||
+       state_.params_->use_graph_capture || model_.config_->model.decoder.sliding_window ||
+       kv_cache_quantization_bits != 0)) {
+    throw std::runtime_error(
+        "CPU/CUDA dense KV colocation requires batch_size=1, num_beams=1, and unquantized, "
+        "non-windowed caches with graph capture disabled.");
+  }
+
+  for (auto& allocation : cache_allocations_)
+    allocation.allocator = Ort::Allocator::Create(session, *allocation.output_location);
 }
 
 DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
@@ -215,8 +293,6 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
     }
   }
 
-  empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
-
   // Auto-detect per-layer KV cache shape from ONNX session input shapes.
   // Models like Gemma 4 use a dual attention pattern: sliding-window layers are GQA
   // (e.g. num_kv_heads=8, head_dim=256) while global/full-attention layers are MQA
@@ -269,14 +345,6 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
             "DefaultKeyValueCacheBase: Detected per-layer KV shape variation "
             "(num_kv_heads/head_dim) across " +
                 std::to_string(layer_count_) + " KV cache layers");
-      }
-
-      // Create per-layer empty past tensors since the KV shape varies across layers
-      empty_pasts_.resize(layer_count_);
-      for (int i = 0; i < layer_count_; ++i) {
-        std::array<int64_t, 4> layer_empty_shape = layer_shapes_[i];
-        layer_empty_shape[2] = 0;  // sequence length = 0 for empty past
-        empty_pasts_[i] = OrtValue::CreateTensor(Allocator(), layer_empty_shape, type_);
       }
     }
   }
@@ -357,6 +425,9 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
     }
   }
 
+  InitializeCacheAllocations(kv_cache_quantization_bits);
+  empty_pasts_.reserve(layer_count_ * 2);
+
   try {
     // Allocate KV cache tensors - 2 per layer (key and value)
     // For per-layer shapes: alternates between key and value for each layer
@@ -369,26 +440,48 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
         tensor_shape = layer_shapes_[i / 2];
       }
 
+      auto empty_shape = tensor_shape;
+      empty_shape[2] = 0;
+      const auto empty = std::find_if(empty_pasts_.begin(), empty_pasts_.end(), [&](const auto& past) {
+        return past->GetTensorMemoryInfo() == Allocator(i).GetInfo() &&
+               past->GetTensorTypeAndShapeInfo()->GetShape() ==
+                   std::vector<int64_t>(empty_shape.begin(), empty_shape.end());
+      });
+      if (empty != empty_pasts_.end())
+        empty_pasts_.push_back(*empty);
+      else
+        empty_pasts_.push_back(OrtValue::CreateTensor(Allocator(i), empty_shape, type_));
+
       // Non-share-buffer caches start with a zero-length sequence dim; these
       // tensors are placeholders (Update() reallocates presents_ at the real
       // total_length before every Run), but some device allocators reject
       // zero-sized buffers. Let the active device policy clamp when needed.
-      if (Device().ShouldClampZeroLengthKeyValueCacheOutputPlaceholders()) {
+      if (Device(i).ShouldClampZeroLengthKeyValueCacheOutputPlaceholders()) {
         tensor_shape[2] = std::max<int64_t>(1, tensor_shape[2]);
       }
 
-      presents_.push_back(OrtValue::CreateTensor(Allocator(), tensor_shape, type_));
-      if (Device().ShouldZeroKeyValueCacheTensors()) {
-        ByteWrapTensor(Device(), *presents_.back()).Zero();
+      presents_.push_back(OrtValue::CreateTensor(Allocator(i), tensor_shape, type_));
+      if (Device(i).ShouldZeroKeyValueCacheTensors()) {
+        ByteWrapTensor(Device(i), *presents_.back()).Zero();
+      }
+      if (g_log.enabled && !cache_allocations_.empty()) {
+        const auto& allocation = cache_allocations_[i];
+        Log("info", "Dense KV cache '" + input_name_strings_[i] + "' / '" + output_name_strings_[i] +
+                        "': past=" + DescribeMemoryLocation(*allocation.input_location) +
+                        ", present=" + DescribeMemoryLocation(*allocation.output_location) +
+                        ", buffer=" + DescribeMemoryLocation(presents_.back()->GetTensorMemoryInfo()) +
+                        ", capacity=" + std::to_string(tensor_shape[2]) +
+                        ", bytes=" + std::to_string(presents_.back()->GetTensorTypeAndShapeInfo()->GetElementCount() * Ort::SizeOf(type_)) +
+                        ", shared=" + std::to_string(past_present_share_buffer_));
       }
     }
-  } catch (const Ort::Exception&) {
+  } catch (const Ort::Exception& e) {
     std::ostringstream oss;
     oss << "Could not allocate the key-value cache buffer of shape: ["
         << "batch_size (" << shape_[0] << "), num_key_value_heads ("
         << shape_[1] << "), max_length (" << shape_[2] << "), head_size ("
         << shape_[3] << ")] for " << layer_count_ << " layers. "
-        << "Try reducing the max_length requested or reducing the batch size.";
+        << "Try reducing the max_length requested or reducing the batch size. " << e.what();
     throw std::runtime_error(oss.str());
   }
 }
@@ -398,12 +491,7 @@ void DefaultKeyValueCacheBase::Add() {
   output_index_ = state_.outputs_.size();
 
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    // Use per-layer empty past when head_dim varies across layers
-    if (!empty_pasts_.empty()) {
-      state_.inputs_.push_back(empty_pasts_[i / 2].get());
-    } else {
-      state_.inputs_.push_back(empty_past_.get());
-    }
+    state_.inputs_.push_back(empty_pasts_[i].get());
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -435,10 +523,10 @@ void DefaultKeyValueCacheBase::PickPastState(DeviceSpan<int32_t> beam_indices_de
   auto block_size_per_beam = tensor_shape[1] * tensor_shape[2] * tensor_shape[3];
 
   OrtValue& present_value = *presents_[index];
-  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor(Allocator(), tensor_shape, type_);
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor(Allocator(index), tensor_shape, type_);
 
-  auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<ScoreType>(Device(), *past_value, type_);
-  auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<ScoreType>(Device(), present_value, type_);
+  auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<ScoreType>(Device(index), *past_value, type_);
+  auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<ScoreType>(Device(index), present_value, type_);
 
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];

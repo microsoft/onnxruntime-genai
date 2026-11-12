@@ -806,6 +806,9 @@ struct OrtSession {
    */
   std::vector<std::string> GetOutputNames() const;
 
+  std::vector<const OrtMemoryInfo*> GetMemoryInfoForInputs() const;
+  std::vector<const OrtMemoryInfo*> GetMemoryInfoForOutputs() const;
+
   /** \brief Returns a copy of the overridable initializer name at then specified index.
    *
    * \param index must less than the value returned by GetOverridableInitializerCount()
