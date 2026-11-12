@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 """Flexible component-level precision configuration and post-build ONNX/package transformer
-for Qwen3.8-Flash-Next RC5 packages built by `build_package.py`.
+for Qwen3.8-Flash-Next RC5 packages built by `build_package.py` and GGUF packages built by `build_package_gguf.py`.
 
 Supports independent control over:
   - `--precision-profile {default,fp32,fp32_fp16kv}`: preset combinations
