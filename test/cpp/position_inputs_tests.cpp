@@ -697,6 +697,10 @@ TEST(PositionInputsCapacityTest, UsesExplicitCapacityAndRejectsOverflow) {
 
 struct WindowedPositionInputsTest : testing::TestWithParam<bool> {
   void Initialize(int context_length = 6, int window_size = 3) {
+    inputs.reset();
+    state.reset();
+    params.reset();
+    model.reset();
     model = std::make_shared<PositionTestModel>(GetParam(), 1, 1);
     model->config_->model.context_length = context_length;
     Config::Model::Decoder::SlidingWindow sw{};
@@ -768,6 +772,42 @@ TEST_P(WindowedPositionInputsTest, AllPadFirstWindowDoesNotOverflow) {
   EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{3}));
 }
 
+TEST_P(WindowedPositionInputsTest, MultipleAllPadWindowsPreserveZeroMaskAndStartPosition) {
+  Initialize(6, 3);
+  const auto& mask_name = model->config_->model.decoder.inputs.attention_mask;
+  const auto& pos_name = model->config_->model.decoder.inputs.position_ids;
+
+  Update({0, 0, 0, 0, 0, 0}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 0, 0, 0, 0, 0}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{0, 0, 0}));
+
+  Update({0, 0, 0, 0, 0, 0}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 0, 0, 0, 0, 0}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{0, 0, 0}));
+
+  Update({7}, 7, 1);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 0, 0, 0, 0, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{0}));
+}
+
+TEST_P(WindowedPositionInputsTest, PartiallyPaddedSecondWindowPreservesMaskAndPositions) {
+  Initialize(6, 3);
+  const auto& mask_name = model->config_->model.decoder.inputs.attention_mask;
+  const auto& pos_name = model->config_->model.decoder.inputs.position_ids;
+
+  Update({2, 3, 4, 5, 0, 0}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 0, 0, 1, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{0, 1, 2}));
+
+  Update({2, 3, 4, 5, 0, 0}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{1, 1, 1, 1, 0, 0}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{3, 0, 0}));
+
+  Update({7}, 7, 1);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{1, 1, 1, 0, 0, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{4}));
+}
+
 TEST_P(WindowedPositionInputsTest, ContextLengthEqualToWindowSizeDoesNotUnderflow) {
   Initialize(3, 3);
   const auto& mask_name = model->config_->model.decoder.inputs.attention_mask;
@@ -789,6 +829,9 @@ TEST_P(WindowedPositionInputsTest, RejectsInvalidWindowDimensionsAndShortInput) 
 
   Initialize(6, 3);
   EXPECT_THROW(Update({2, 3}, 2, 2), std::runtime_error);
+  EXPECT_THROW(Update({2, 3, 4, 5}, 4, 3), std::runtime_error);
+  Update({2, 3, 4, 5, 6, 7}, 6, 3);
+  EXPECT_THROW(Update({2, 3, 4}, 6, 3), std::runtime_error);
 }
 
 INSTANTIATE_TEST_SUITE_P(IntTypes, WindowedPositionInputsTest, testing::Bool());
@@ -851,6 +894,37 @@ TEST(LogitsAllPadTest, SlicesValidBoundsOnAllPadSequences) {
     // Batch 0 last non-pad token is pos=1; Batch 1 is all-pad and clamps to pos=0.
     EXPECT_FLOAT_EQ(sliced_cpu[0], 100.0f);
     EXPECT_FLOAT_EQ(sliced_cpu[vocab_size], 1000.0f);
+  }
+
+  // Left-aligned sliding_window only right-pads when slide_inputs is true.
+  for (bool slide_inputs : {false, true}) {
+    auto model_copy = CreateModel(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+    Config::Model::Decoder::SlidingWindow sw{};
+    sw.window_size = 3;
+    sw.alignment = "left";
+    sw.slide_inputs = slide_inputs;
+    model_copy->config_->model.decoder.sliding_window = sw;
+
+    auto params = std::make_shared<GeneratorParams>(*model_copy);
+    PositionTestState state{*params, *model_copy};
+    Logits logits{state};
+    logits.Add();
+
+    auto tokens = params->p_device->Allocate<int32_t>(3);
+    std::fill(tokens.CpuSpan().begin(), tokens.CpuSpan().end(), model_copy->config_->model.pad_token_id);
+    logits.Update(tokens, 3);
+
+    auto* raw_logits = state.outputs_[0]->GetTensorMutableData<float>();
+    for (size_t pos = 0; pos < 3; ++pos) {
+      for (size_t v = 0; v < vocab_size; ++v) {
+        raw_logits[pos * vocab_size + v] = static_cast<float>(pos * 100 + v);
+      }
+    }
+
+    auto sliced = logits.Get();
+    auto sliced_cpu = sliced.CopyDeviceToCpu();
+    ASSERT_EQ(sliced_cpu.size(), vocab_size);
+    EXPECT_FLOAT_EQ(sliced_cpu[0], slide_inputs ? 0.0f : 200.0f);
   }
 }
 
