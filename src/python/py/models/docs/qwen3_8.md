@@ -62,6 +62,9 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   it does not restore speculative decode state. Exact hits reuse the saved next-token prediction without an empty
   prefill. Partial hits ingest only the remaining suffix. `cached_prompt_tokens` counts reused tokens from the current
   turn's input, not retained earlier-turn history.
+  Separate dense-prefill checkpoints save the dense graph's populated state. They omit the idle, zero-initialized
+  decode KV/index buffers and recurrent banks: after restoration, `FastHandoff()` rebuilds those packed buffers from
+  the dense state before decoding. Unified prefill populates the packed buffers directly and must checkpoint them.
   The existing `max_snapshots` and `snapshot_cache` VRAM/RAM/disk limits bound checkpoint storage; without explicit
   tier budgets or a count, at most one device-resident checkpoint is retained. `max_snapshots: 0` disables publication.
   Native `device_memory_budget_bytes`, `device_memory_headroom_bytes`, and `gpu_utilization_factor`

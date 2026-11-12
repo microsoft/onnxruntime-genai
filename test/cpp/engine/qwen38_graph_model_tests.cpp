@@ -2489,7 +2489,7 @@ TEST(Qwen38DynamicBatchingConfigTest, DflashReservationScalesWithConfiguredBlock
   // Halving block_size to 128 halves the target bytes per block, so the same drafter buffers reserve 25 blocks (~double).
   EXPECT_EQ(ResolveQwen38DflashReservedBlocks(config, 128, 1), 25u);
 
-  EXPECT_TRUE(ApplyQwen38DynamicBatchingConfig(config));
+  EXPECT_TRUE(ApplyQwen38DynamicBatchingConfig(config).has_dynamic_batching_kv);
   EXPECT_EQ(config.model.context_length, 262144);
   EXPECT_EQ(config.model.qwen38_graph.kv_capacity, 262144 + kQwen38GraphIdMaxRows);
   EXPECT_EQ(config.search.max_length, 262144);
@@ -2515,7 +2515,7 @@ TEST(Qwen38DynamicBatchingConfigTest, SingleSlotDynamicBatchingPreservesPreceden
   config.engine.dynamic_batching->num_blocks = 128;
 
   EXPECT_EQ(ResolveQwen38MaxBatchSize(config), 1u);
-  EXPECT_TRUE(ApplyQwen38DynamicBatchingConfig(config));
+  EXPECT_TRUE(ApplyQwen38DynamicBatchingConfig(config).has_dynamic_batching_kv);
   EXPECT_FALSE(config.engine.dynamic_batching.has_value());
   // Even after dynamic_batching is cleared for the static Engine path, its single-slot choice overrides
   // qwen38_graph.max_batch_size, search.batch_size, and ORT_QWEN38_MAX_BATCH_SIZE.
@@ -2540,7 +2540,7 @@ TEST(Qwen38DynamicBatchingConfigTest, MaxScheduledTokensOnlyAppliesWhenPrefillCh
   explicit_chunk.engine.dynamic_batching.emplace();
   explicit_chunk.engine.dynamic_batching->max_batch_size = 2;
   explicit_chunk.engine.dynamic_batching->max_scheduled_tokens = 2048;
-  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(explicit_chunk));
+  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(explicit_chunk).has_dynamic_batching_kv);
   EXPECT_EQ(explicit_chunk.model.qwen38_graph.prefill.chunk, 8192);
 
   // When prefill.chunk is unset (0), max_scheduled_tokens supplies the prefill chunk.
@@ -2550,7 +2550,7 @@ TEST(Qwen38DynamicBatchingConfigTest, MaxScheduledTokensOnlyAppliesWhenPrefillCh
   unset_chunk.engine.dynamic_batching.emplace();
   unset_chunk.engine.dynamic_batching->max_batch_size = 2;
   unset_chunk.engine.dynamic_batching->max_scheduled_tokens = 2048;
-  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(unset_chunk));
+  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(unset_chunk).has_dynamic_batching_kv);
   EXPECT_EQ(unset_chunk.model.qwen38_graph.prefill.chunk, 2048);
 
   // Explicit search.chunk_size overrides prefill.chunk and is then cleared.
@@ -2561,7 +2561,7 @@ TEST(Qwen38DynamicBatchingConfigTest, MaxScheduledTokensOnlyAppliesWhenPrefillCh
   search_override.engine.dynamic_batching.emplace();
   search_override.engine.dynamic_batching->max_batch_size = 1;
   search_override.engine.dynamic_batching->max_scheduled_tokens = 2048;
-  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(search_override));
+  EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(search_override).has_dynamic_batching_kv);
   EXPECT_EQ(search_override.model.qwen38_graph.prefill.chunk, 4096);
   EXPECT_FALSE(search_override.search.chunk_size.has_value());
 }

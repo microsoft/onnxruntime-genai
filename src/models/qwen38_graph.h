@@ -38,7 +38,13 @@ namespace Generators {
 
 struct Qwen38GraphModel;
 
-std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Config& config);
+struct Qwen38ResolvedBatchingConfig {
+  std::optional<Config::Engine::DynamicBatching> batching;
+  size_t max_batch_size{1};
+  bool has_dynamic_batching_kv{};
+};
+
+std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Qwen38ResolvedBatchingConfig& resolved);
 
 bool Qwen38PrefixCheckpointEligible(bool dflash, const std::optional<Qwen38DflashPromptFeatures::Chunk>& saved,
                                     size_t context_window);
@@ -377,8 +383,8 @@ size_t ResolveQwen38DflashReservedBlocks(const Config& config, size_t block_size
 // `dflash2_max_snapshots`) and `search.chunk_size` onto `model.qwen38_graph.kv_capacity`, `model.context_length`,
 // `search.max_length`, and `model.qwen38_graph.prefill.chunk`. When `dynamic_batching` resolves to a single slot, records
 // that authoritative choice in `model.qwen38_graph.resolved_max_batch_size` before clearing `engine.dynamic_batching` for the
-// static Engine path. Returns true when `dynamic_batching.num_blocks` configured the KV capacity and context length.
-bool ApplyQwen38DynamicBatchingConfig(Config& config);
+// static Engine path. Returns owned batching settings and resolved limits for native initialization after normalization.
+Qwen38ResolvedBatchingConfig ApplyQwen38DynamicBatchingConfig(Config& config);
 
 // Size in bytes of one element of the dense prefill `logits` output. Only BFLOAT16 and FLOAT are supported; any other
 // type throws a std::runtime_error, so an exported graph with another logits type fails when the prefill is built
