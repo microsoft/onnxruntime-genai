@@ -227,7 +227,7 @@ class CheckpointAllocationDevice final : public DeviceInterface {
   }
   std::shared_ptr<void> AllocatePinnedHost(size_t bytes) override {
     ++host_allocations;
-    if (fail_host_allocation) {
+    if (fail_host_allocation || host_allocations == fail_host_allocation_number) {
       throw std::bad_alloc{};
     }
     void* memory = inner_.GetAllocator().Alloc(bytes);
@@ -236,6 +236,7 @@ class CheckpointAllocationDevice final : public DeviceInterface {
     });
   }
   void CopyDeviceToHost(void* host, const void* device, size_t bytes) override {
+    if (fail_download) throw std::runtime_error("Injected snapshot transfer failure.");
     downloaded_bytes += bytes;
     std::memcpy(host, device, bytes);
   }
@@ -247,6 +248,8 @@ class CheckpointAllocationDevice final : public DeviceInterface {
   size_t uploaded_bytes{};
   size_t host_allocations{};
   bool fail_host_allocation{};
+  size_t fail_host_allocation_number{};
+  bool fail_download{};
   bool opaque_buffer_handles{};
   size_t buffer_downloads{};
   size_t buffer_uploads{};
@@ -2744,6 +2747,46 @@ TEST(PrefixSnapshotCacheTest, ShrinkingDeviceMemoryCapDoesNotEvictLeasedStorageO
   EXPECT_TRUE(cache.SetDeviceMemoryLimit(0, cpu));
   EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
   EXPECT_EQ(cache.Used()[0], 0u);
+}
+
+TEST(PrefixSnapshotCacheTest, ShrinkingDeviceMemoryCapFallsBackOrEvictsWhenPinnedAllocationFails) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  for (size_t disk_bytes : {size_t{0}, size_t{16}}) {
+    SCOPED_TRACE(disk_bytes);
+    CheckpointAllocationDevice device{*cpu, true};
+    PrefixSnapshotCache cache{{16, 16, disk_bytes}, 1};
+    auto entry = MakeStorageEntry(cache, &device);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_EQ(entry->tier, PrefixSnapshotCache::Tier::Vram);
+    device.fail_host_allocation_number = device.host_allocations + 1;
+    ASSERT_TRUE(cache.SetDeviceMemoryLimit(0, &device));
+    if (disk_bytes) {
+      EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Resident);
+      EXPECT_EQ(entry->tier, PrefixSnapshotCache::Tier::Disk);
+      EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 0, 16}));
+      CheckStorageEntry(*entry);
+    } else {
+      EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Evicted);
+      EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 0, 0}));
+    }
+  }
+}
+
+TEST(PrefixSnapshotCacheTest, ShrinkingDeviceMemoryCapStillPropagatesTransferFailures) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, true};
+  PrefixSnapshotCache cache{{16, 16, 0}, 1};
+  auto entry = MakeStorageEntry(cache, &device);
+  ASSERT_NE(entry, nullptr);
+  device.fail_download = true;
+  EXPECT_THROW(cache.SetDeviceMemoryLimit(0, &device), std::runtime_error);
+  EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(entry->tier, PrefixSnapshotCache::Tier::Vram);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{16, 0, 0}));
+  device.fail_download = false;
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(0, &device));
+  EXPECT_EQ(entry->tier, PrefixSnapshotCache::Tier::Ram);
+  CheckStorageEntry(*entry);
 }
 
 TEST(PrefixSnapshotCacheTest, WebGpuReservationHonorsCountsAndPreservesTargetCapacity) {

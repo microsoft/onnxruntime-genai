@@ -389,6 +389,8 @@ bool PrefixSnapshotCache::MakeRoom(Tier tier, size_t bytes, DeviceInterface* dev
       if (MakeRoom(static_cast<Tier>(lower), victim->bytes, device)) {
         try {
           Move(*victim, static_cast<Tier>(lower), device);
+        } catch (const std::bad_alloc&) {
+          continue;
         } catch (const std::system_error& error) {
           if (static_cast<Tier>(lower) != Tier::Disk) throw;
           DisableDisk(error);
