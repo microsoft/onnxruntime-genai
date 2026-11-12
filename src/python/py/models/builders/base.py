@@ -204,7 +204,7 @@ class Model:
             },
         }
         # Initialize EP-specific expansions
-        self.make_ep_expansions_init(config)
+        self.make_ep_expansions_init()
 
         # Map all input names, types, and shapes
         self.input_names = {
@@ -543,7 +543,7 @@ class Model:
         # Zero lets the runtime choose the EP-specific number of positions retained beyond the window.
         self.context_length_attrs["window_kv_cache_slack"] = 0
 
-    def make_ep_expansions_init(self, config=None):
+    def make_ep_expansions_init(self):
         """
         Replace the current class's methods with the appropriate expansion class's methods.
 
@@ -561,7 +561,10 @@ class Model:
         elif self.ep == "webgpu":
             from .expansions import WebGPU
 
-            WebGPU.make_ep_expansions_init(self, config)
+            if self.extra_options.get("enable_webgpu_graph", False):
+                self.make_attention_mask_reformatting_for_gqa = (
+                    WebGPU.make_attention_mask_graph_capture_reformatting_for_gqa.__get__(self, self.__class__)
+                )
 
         else:
             return

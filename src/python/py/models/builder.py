@@ -1229,7 +1229,7 @@ def get_args():
                 enable_dml_graph = Enable DML graph capture during inference. Default is true.
                     If enabled, the model structure will be optimized for DML graph execution.
                     DML EP uses graph capture by default for best performance.
-                enable_webgpu_graph = Optimize the graph for WebGPU capture. Defaults to true for single-beam, full-attention GQA exports, omitting enableGraphCapture to use GenAI's runtime default; false for other layouts and config_only. Explicit true/false writes enableGraphCapture=1/0.
+                enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
                     If enabled, the model structure will be optimized for WebGPU graph execution.
                     This affects attention mask reformatting and position IDs handling.
                 use_qdq = Use the QDQ decomposition for ops.

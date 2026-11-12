@@ -43,7 +43,7 @@ def _load_base_module():
 
 def test_paged_attention_metadata_is_int32_triplet(monkeypatch):
     base = _load_base_module()
-    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self, config: None)
+    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
     config = types.SimpleNamespace(
         architectures=["TestModel"],
         hidden_act="silu",
@@ -67,7 +67,7 @@ def test_paged_attention_metadata_is_int32_triplet(monkeypatch):
 
 def test_context_length_uses_seq_length_without_max_position_embeddings(monkeypatch):
     base = _load_base_module()
-    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self, config: None)
+    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
     monkeypatch.setattr(base.Model, "make_inputs_init", lambda self: None)
     config = types.SimpleNamespace(
         architectures=["WhisperForConditionalGeneration"],
@@ -129,7 +129,7 @@ def test_make_outputs_init_accepts_custom_output_schema():
 
 def test_num_hidden_layers_truncates_configured_layer_types(monkeypatch):
     base = _load_base_module()
-    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self, config: None)
+    monkeypatch.setattr(base.Model, "make_ep_expansions_init", lambda self: None)
     monkeypatch.setattr(base.Model, "make_inputs_init", lambda self: None)
     config = types.SimpleNamespace(
         architectures=["TestModel"],
@@ -1283,7 +1283,9 @@ def test_webgpu_paged_attention_effective_block_budget(
     generated = {
         "engine": {
             "dynamic_batching": {
-                key: options[key] for key in ("num_blocks", "gpu_utilization_factor") if key in options
+                key: options[key]
+                for key in ("num_blocks", "gpu_utilization_factor")
+                if key in options
             }
         }
     }
@@ -1299,7 +1301,9 @@ def test_webgpu_paged_attention_effective_block_budget(
         ({"num_blocks": None}, "num_blocks.*must not contain null"),
     ],
 )
-def test_webgpu_paged_attention_rejects_runtime_removal_of_block_budget(monkeypatch, runtime_allocation, error):
+def test_webgpu_paged_attention_rejects_runtime_removal_of_block_budget(
+    monkeypatch, runtime_allocation, error
+):
     with pytest.raises(ValueError, match=error):
         effective = builder_module.normalize_builder_config(
             "fp16",
@@ -1307,7 +1311,9 @@ def test_webgpu_paged_attention_rejects_runtime_removal_of_block_budget(monkeypa
             {"use_paged_attention": "true", "num_blocks": "16"},
             runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
         )
-        _run_check_extra_options(monkeypatch, effective.extra_options, precision="fp16", execution_provider="webgpu")
+        _run_check_extra_options(
+            monkeypatch, effective.extra_options, precision="fp16", execution_provider="webgpu"
+        )
 
 
 def test_paged_attention_normalizes_engine_options(monkeypatch):

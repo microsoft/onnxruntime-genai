@@ -2,15 +2,9 @@
 # Licensed under the MIT License.
 
 import ast
-import json
 from pathlib import Path
-from types import SimpleNamespace
 
-import numpy as np
-import onnx_ir as ir
-import onnxruntime as ort
 import pytest
-from transformers import GenerationConfig
 
 from models.builders.base import Model
 from models.builders.expansions.standard import Standard
@@ -89,78 +83,6 @@ def test_webgpu_graph_capture_override_lives_in_webgpu(capture):
         WebGPU.make_attention_mask_graph_capture_reformatting_for_gqa.__module__ == "models.builders.expansions.webgpu"
     )
     assert not hasattr(Standard, "make_attention_mask_reformatting_for_gqa")
-
-
-def make_webgpu_default_model(extra_options=None, **config_options):
-    config = SimpleNamespace(
-        architectures=["LlamaForCausalLM"],
-        hidden_act="silu",
-        hidden_size=64,
-        intermediate_size=128,
-        max_position_embeddings=1024,
-        num_attention_heads=1,
-        num_hidden_layers=1,
-        num_key_value_heads=1,
-        vocab_size=16,
-        _name_or_path="test",
-        sliding_window=None,
-    )
-    for key, value in config_options.items():
-        setattr(config, key, value)
-    return Model(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "webgpu", None, extra_options or {})
-
-
-@pytest.mark.parametrize("capture", [None, False, True])
-def test_webgpu_default_exports_shared_capture_ready_mask(tmp_path, capture, monkeypatch):
-    model = make_webgpu_default_model({} if capture is None else {"enable_webgpu_graph": capture})
-    enabled = capture is not False
-    monkeypatch.setattr(model, "load_generation_config", lambda _: GenerationConfig())
-    monkeypatch.setattr(model, "resolve_special_token_ids", lambda config, kwargs: (1, 2, 0))
-    model.make_genai_config(SimpleNamespace(), {}, tmp_path)
-    config = json.loads((tmp_path / "genai_config.json").read_text())
-    assert config["search"]["past_present_share_buffer"]
-    options = config["model"]["decoder"]["session_options"]["provider_options"][0]["webgpu"]
-    if capture is None:
-        assert "enableGraphCapture" not in options
-    else:
-        assert options["enableGraphCapture"] == ("1" if enabled else "0")
-    model.input_names = {"attention_mask": "attention_mask"}
-    model.input_types = {"attention_mask": ir.DataType.INT64}
-    model.input_shapes = {"attention_mask": [1, 8]}
-    model.make_attention_mask_reformatting_for_gqa()
-    model.output_names = {key: model.mask_attrs[key] + "/output_0" for key in ("seqlens_k", "total_seq_len")}
-    model.output_types = dict.fromkeys(model.output_names, ir.DataType.INT32)
-    model.output_shapes = {"seqlens_k": [1], "total_seq_len": []}
-    model.make_inputs_and_outputs()
-    path = tmp_path / "mask.onnx"
-    model.save_onnx_model(model.model, path)
-    session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-    seqlens, total = session.run(None, {"attention_mask": np.array([[1, 1, 1, 0, 0, 0, 0, 0]], dtype=np.int64)})
-    np.testing.assert_array_equal(seqlens, [2])
-    assert total == (3 if enabled else 8)
-    assert (
-        model.make_attention_mask_reformatting_for_gqa.__func__
-        is WebGPU.make_attention_mask_graph_capture_reformatting_for_gqa
-    ) is enabled
-
-
-def test_webgpu_other_export_layouts_keep_capture_opt_in():
-    for options, config in (
-        ({"config_only": True}, {}),
-        ({"exclude_embeds": True}, {}),
-        ({"use_paged_attention": True}, {}),
-        ({}, {"num_beams": 2}),
-        ({}, {"sliding_window": 128}),
-        ({}, {"layer_types": ["linear_attention"]}),
-    ):
-        model = make_webgpu_default_model(options, **config)
-        assert model.ep_attrs["webgpu"]["enableGraphCapture"] == "0", (options, config)
-    for ep in ("cpu", "cuda", "dml", "trt-rtx"):
-        model = object.__new__(Model)
-        model.ep = ep
-        model.extra_options = {}
-        model.make_ep_expansions_init(SimpleNamespace())
-        assert "enable_webgpu_graph" not in model.extra_options
 
 
 @pytest.mark.parametrize(
