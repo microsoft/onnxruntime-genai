@@ -63,7 +63,8 @@ struct NemotronBoltModel : Model {
 };
 
 // The target owns dense attention K/V and eight recurrent-state rows. Only the drafter is paged.
-struct NemotronBoltState : State {
+// The first base keeps the execution lock alive through member and State destruction.
+struct NemotronBoltState : private std::unique_lock<std::mutex>, State {
   NemotronBoltState(const NemotronBoltModel& model, const GeneratorParams& params);
   ~NemotronBoltState() override;
   DeviceSpan<float> Run(int, DeviceSpan<int32_t>&, DeviceSpan<int32_t>) override;

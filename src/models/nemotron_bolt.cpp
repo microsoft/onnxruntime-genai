@@ -361,8 +361,10 @@ Tensor& NemotronBoltState::AddTensor(const std::string& name, bool input, Device
 }
 
 NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const GeneratorParams& params)
-    : State{params, model}, bolt_{model}, request_{std::make_unique<Request>(model, params.search.max_length)} {
-  std::lock_guard lock{bolt_.execution_mutex_};
+    : std::unique_lock<std::mutex>{model.execution_mutex_},
+      State{params, model},
+      bolt_{model},
+      request_{std::make_unique<Request>(model, params.search.max_length)} {
   const auto& info = model.session_info_;
   verify_inputs_span_ = model.p_device_->Allocate<int32_t>(2 * kBoltVerifyRows + 8);
   verify_inputs_span_.CpuSpan();
@@ -431,9 +433,12 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     Propose(8, 0, 1);
   }
   Reset();
+  unlock();
 }
 
-NemotronBoltState::~NemotronBoltState() = default;
+NemotronBoltState::~NemotronBoltState() {
+  lock();
+}
 
 DeviceSpan<float> NemotronBoltState::Run(int, DeviceSpan<int32_t>&, DeviceSpan<int32_t>) {
   throw std::runtime_error("nemotron_bolt uses native block decoding, not the logits search path");

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <functional>
 #include <filesystem>
+#include <future>
 
 #include "engine/engine.h"
 #include "models/nemotron_bolt.h"
@@ -346,6 +347,39 @@ TEST(NemotronBolt, PromptAtBudgetIsImmediatelyDone) {
 }
 
 // Optional real-graph correctness coverage. No models or GPU are needed for the tests above.
+TEST(NemotronBoltGPU, DestructionWaitsForSharedSessionExecution) {
+  const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
+  if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_TEST_MODEL to a native Bolt package";
+  auto model = std::dynamic_pointer_cast<NemotronBoltModel>(CreateModel(GetOrtEnv(), path));
+  ASSERT_NE(model, nullptr);
+  auto params = std::make_shared<GeneratorParams>(*model);
+  params->search.max_length = 16;
+  const std::vector<int32_t> prompt(8, 1010);
+  Generator survivor{*model, *params};
+  survivor.AppendTokens(prompt);
+  auto retiring = std::make_unique<Generator>(*model, *params);
+  retiring->AppendTokens(prompt);
+  std::promise<void> started;
+  auto ready = started.get_future();
+  std::unique_lock execution{model->execution_mutex_};
+  auto destroyed = std::async(std::launch::async, [generator = std::move(retiring), &started]() mutable {
+    started.set_value();
+    generator.reset();
+  });
+  ready.wait();
+  EXPECT_EQ(destroyed.wait_for(std::chrono::milliseconds{100}), std::future_status::timeout);
+  execution.unlock();
+  destroyed.get();
+  survivor.GenerateNextToken();
+  const auto sequence = survivor.GetSequence(0).CopyDeviceToCpu();
+  const std::vector<int32_t> expected(sequence.begin(), sequence.end());
+  Generator reference{*model, *params};
+  reference.AppendTokens(prompt);
+  reference.GenerateNextToken();
+  const auto actual = reference.GetSequence(0).CopyDeviceToCpu();
+  EXPECT_EQ((std::vector<int32_t>{actual.begin(), actual.end()}), expected);
+}
+
 TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
   const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
   if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_TEST_MODEL to a native Bolt package";
