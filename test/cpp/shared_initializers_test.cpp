@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include "models/model.h"
+#include "models/session_options.h"
 
 namespace {
 
@@ -49,10 +50,12 @@ std::unique_ptr<OrtSessionOptions> OptionsFor(Generators::Model& model) {
   return options;
 }
 
+// Built in, or registered as a plugin (e.g. engine_unit_tests --ep_dir), which GetAvailableProviders doesn't list.
 bool HasWebGpu() {
   Generators::GetOrtEnv();
   const auto providers = Ort::GetAvailableProviders();
-  return std::find(providers.begin(), providers.end(), "WebGpuExecutionProvider") != providers.end();
+  return std::find(providers.begin(), providers.end(), "WebGpuExecutionProvider") != providers.end() ||
+         !Generators::FindRegisteredEpDevices("WebGpuExecutionProvider").empty();
 }
 
 // rows.onnx and flat.onnx output their only initializer times input x ("table" float [2, 3] and "head"
