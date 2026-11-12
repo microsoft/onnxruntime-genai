@@ -18,7 +18,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             foreach (var name in new[] { "OgaASRPostProcessorAsPostProcessor", "OgaPostProcessorProcessNext",
                 "OgaPostProcessorFinalize", "OgaPostProcessorReset",
                 "OgaASRPostProcessorGetResult", "OgaASRPostProcessorResultGetTimestampResult",
-                "OgaASRPostProcessorTimestampResultGetTimestampRecord" })
+                "OgaASRPostProcessorTimestampResultGetTimestampRecord",
+                "OgaASRPostProcessorTimestampRecordGetSpeakerLabel" })
             {
                 var method = nativeMethods.GetMethod(name, BindingFlags.Public | BindingFlags.Static)!;
                 Assert.Equal(typeof(IntPtr), method.ReturnType);
@@ -39,6 +40,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.True(parameters[1].ParameterType.IsEnum);
             Assert.Equal(typeof(int), Enum.GetUnderlyingType(parameters[1].ParameterType));
             Assert.Equal(typeof(UIntPtr), parameters[2].ParameterType);
+        }
+
+        [Fact]
+        public void TimestampPresenceUsesOneByteMarshalling()
+        {
+            var nativeMethods = typeof(ASRPostProcessor).Assembly.GetType("Microsoft.ML.OnnxRuntimeGenAI.NativeMethods", true)!;
+            var method = nativeMethods.GetMethod("OgaASRPostProcessorTimestampRecordHasTimestamp", BindingFlags.Public | BindingFlags.Static)!;
+            Assert.Equal(typeof(bool), method.ReturnType);
+            Assert.Equal(UnmanagedType.I1, method.ReturnParameter.GetCustomAttribute<MarshalAsAttribute>()!.Value);
         }
 
         [Fact]

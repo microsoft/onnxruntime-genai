@@ -79,21 +79,33 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         private IntPtr Handle => _owner.GetResultHandle(_handle, _lifetime);
 
         public string Text => StringUtils.FromUtf8(NativeMethods.OgaASRPostProcessorTimestampRecordGetText(Handle));
-        public (long Start, long Stop) FrameInterval
+        public bool HasTimestamp => NativeMethods.OgaASRPostProcessorTimestampRecordHasTimestamp(Handle);
+        public string SpeakerLabel
+        {
+            get
+            {
+                var label = NativeMethods.OgaASRPostProcessorTimestampRecordGetSpeakerLabel(Handle);
+                return label == IntPtr.Zero ? null : StringUtils.FromUtf8(label);
+            }
+        }
+
+        public (long Start, long Stop)? FrameInterval
         {
             get
             {
                 var handle = Handle;
+                if (!NativeMethods.OgaASRPostProcessorTimestampRecordHasTimestamp(handle)) return null;
                 return (NativeMethods.OgaASRPostProcessorTimestampRecordGetStartFrame(handle),
                     NativeMethods.OgaASRPostProcessorTimestampRecordGetStopFrame(handle));
             }
         }
 
-        public (double Start, double Stop) TimeInterval
+        public (double Start, double Stop)? TimeInterval
         {
             get
             {
                 var handle = Handle;
+                if (!NativeMethods.OgaASRPostProcessorTimestampRecordHasTimestamp(handle)) return null;
                 return (NativeMethods.OgaASRPostProcessorTimestampRecordGetStartTime(handle),
                     NativeMethods.OgaASRPostProcessorTimestampRecordGetStopTime(handle));
             }

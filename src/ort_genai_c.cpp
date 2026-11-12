@@ -1358,10 +1358,14 @@ const OgaASRPostProcessorTimestampRecord* OGA_API_CALL OgaASRPostProcessorTimest
   }
 }
 const char* OGA_API_CALL OgaASRPostProcessorTimestampRecordGetText(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->text.c_str() : nullptr; }
-int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartFrame(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->frame_interval.first : 0; }
-int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopFrame(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->frame_interval.second : 0; }
-double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartTime(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->time_interval.first : 0; }
-double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopTime(const OgaASRPostProcessorTimestampRecord* record) { return record ? record->time_interval.second : 0; }
+bool OGA_API_CALL OgaASRPostProcessorTimestampRecordHasTimestamp(const OgaASRPostProcessorTimestampRecord* record) { return record && record->frame_interval.has_value(); }
+const char* OGA_API_CALL OgaASRPostProcessorTimestampRecordGetSpeakerLabel(const OgaASRPostProcessorTimestampRecord* record) {
+  return record && record->speaker_label ? record->speaker_label->c_str() : nullptr;
+}
+int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartFrame(const OgaASRPostProcessorTimestampRecord* record) { return record && record->frame_interval ? record->frame_interval->first : 0; }
+int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopFrame(const OgaASRPostProcessorTimestampRecord* record) { return record && record->frame_interval ? record->frame_interval->second : 0; }
+double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartTime(const OgaASRPostProcessorTimestampRecord* record) { return record && record->time_interval ? record->time_interval->first : 0; }
+double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopTime(const OgaASRPostProcessorTimestampRecord* record) { return record && record->time_interval ? record->time_interval->second : 0; }
 
 OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor* p, OgaTokenizerStream** out) {
   OGA_TRY
