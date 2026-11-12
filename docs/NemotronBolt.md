@@ -31,10 +31,12 @@ the CUDA provider and `enable_cuda_graph: "1"`. The legacy plugin provider's
 `min_num_runs_before_cuda_graph_capture: "2"` option is not supported by the
 built-in CUDA provider; do not carry it into that configuration.
 Set `ep.cuda.arena.use_cuda_mempool: "1"` in both session-options objects.
-For padded drafter replay, use an ORT API 32+ build implementing
-`session.paged_attention.skip_input_sanitizer` and explicitly set this session
-config entry to `"1"` in the drafter session. Without that explicit compatible
-policy, partial-row proposals remain unpadded and are not captured. Fixed-request
+On loaded ORT runtimes 1.32 or newer, native Bolt automatically defaults the drafter
+session config entry `session.paged_attention.skip_input_sanitizer` to `"1"`,
+enabling padded drafter replay. Explicit entries are preserved: set `"0"` to opt
+out. Older or unrecognized loaded runtimes keep partial-row proposals unpadded
+and uncaptured, even with an explicit `"1"`. This policy uses the loaded runtime
+version, not the build headers or negotiated API table. Fixed-request
 packing requires a windowed drafter; full-attention DSpark keeps its existing
 non-fixed execution path.
 Legacy custom-op graphs require their matching `custom_ops_library` or

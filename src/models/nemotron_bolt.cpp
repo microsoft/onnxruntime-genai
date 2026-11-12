@@ -144,21 +144,28 @@ std::unique_ptr<Config> CreateNemotronBoltDrafterConfig(const Config& config) {
   return drafter;
 }
 
+void ValidateNemotronBoltGraphCapture(const Config::SessionOptions& options, bool speculative) {
+  const bool capture = IsGraphCaptureEnabled(options);
+#if ORT_API_VERSION < 27
+  // Each generator captures fresh graph ids in model-owned sessions; releasing them needs ORT 27.
+  Require(!capture,
+          "ONNX Runtime API 27 or later is required to release captured graphs");
+#else
+  Require(!capture || Ort::api_version >= 27,
+          "ONNX Runtime API 27 or later is required to release captured graphs");
+#endif
+  Require(!speculative || capture, "enable_cuda_graph must be 1 for speculative decoding");
+}
+
 NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env)
     : Model{std::move(config)} {
   Require(config_->speculative.max_draft_tokens == 0 ||
               config_->speculative.max_draft_tokens == 7,
           "speculative.max_draft_tokens must be 0 or 7");
-#if ORT_API_VERSION < 27
-  // Each generator captures fresh graph ids in model-owned sessions; releasing them needs ORT 27.
-  Require(!IsGraphCaptureEnabled(config_->model.decoder.session_options),
-          "ONNX Runtime API 27 or later is required to release captured graphs");
-#endif
+  ValidateNemotronBoltGraphCapture(config_->model.decoder.session_options,
+                                   config_->speculative.max_draft_tokens != 0);
   Require(p_device_->GetType() == DeviceType::CUDA, "a CUDA execution provider is required");
   p_device_scoring_ = GetDeviceInterface(DeviceType::CPU);
-  Require(config_->speculative.max_draft_tokens == 0 ||
-              IsGraphCaptureEnabled(config_->model.decoder.session_options),
-          "enable_cuda_graph must be 1 for speculative decoding");
   Require(!config_->engine.dynamic_batching && !config_->engine.static_batching &&
               !config_->model.draft && !config_->model.mtp.IsEnabled() &&
               !config_->model.decoder.sliding_window,
@@ -225,6 +232,7 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
               d.main_aux_hidden_states == "aux_hidden_states",
           "a greedy LiLiCorr DFlash2 block8 drafter with anchor_row_index is required");
   auto drafter_config = CreateNemotronBoltDrafterConfig(*config_);
+  ValidateNemotronBoltGraphCapture(drafter_config->model.decoder.session_options, true);
   drafter_model_ = std::make_shared<Dflash2Model>(std::move(drafter_config), env);
   // The shared validator expects the Engine's packed 2-D auxiliary output. Present an equivalent
   // metadata view without changing the actual fixed-R8 target graph or its buffers.

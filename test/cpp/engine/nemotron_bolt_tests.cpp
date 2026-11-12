@@ -229,6 +229,28 @@ TEST(NemotronBolt, PublicSpeculativeSetterAllowsZeroOnlyForBolt) {
   }
 }
 
+TEST(NemotronBolt, ValidatesTargetOnlyAfterMergingConfiguration) {
+  const std::string base = R"({"speculative":{"max_draft_tokens":0},"model":{"type":"llama","context_length":16,"vocab_size":128}})";
+  const std::string bolt = R"({"model":{"type":"nemotron_bolt"}})";
+  Config config{fs::path{}, bolt, base};
+  EXPECT_EQ(config.speculative.max_draft_tokens, 0);
+  EXPECT_EQ(config.model.type, "nemotron_bolt");
+  EXPECT_THROW(OverlayConfig(config, R"({"model":{"type":"llama"}})"), std::runtime_error);
+  EXPECT_EQ(config.model.type, "nemotron_bolt");
+  EXPECT_NO_THROW(OverlayConfig(config, R"({"model":{"type":"llama"},"speculative":{"max_draft_tokens":7}})"));
+  EXPECT_EQ(config.model.type, "llama");
+  EXPECT_EQ(config.speculative.max_draft_tokens, 7);
+  EXPECT_THROW((Config{fs::path{}, R"({"model":{"type":"llama"}})",
+                       R"({"model":{"type":"nemotron_bolt","context_length":16},"speculative":{"max_draft_tokens":0}})"}),
+               std::runtime_error);
+  try {
+    OverlayConfig(config, R"({"speculative":{"max_draft_tokens":-1}})");
+    FAIL() << "Negative draft width was accepted";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("must be between 0 and 16"), std::string::npos);
+  }
+}
+
 TEST(NemotronBolt, PreservesDrafterOptimizerExclusions) {
   const std::string fusion = "GatherSliceToSplitFusion";
   for (const auto& [existing, expected] :
@@ -272,12 +294,74 @@ class NemotronBoltRuntimePolicyTest : public ::testing::Test {
   void SetUp() override {
     Ort::InitApi();
     saved_version_ = Ort::runtime_api_version;
+    saved_api_version_ = Ort::api_version;
   }
-  void TearDown() override { Ort::runtime_api_version = saved_version_; }
+  void TearDown() override {
+    Ort::runtime_api_version = saved_version_;
+    Ort::api_version = saved_api_version_;
+  }
 
  private:
   uint32_t saved_version_{};
+  uint32_t saved_api_version_{};
 };
+
+#if ORT_API_VERSION >= 27
+TEST_F(NemotronBoltRuntimePolicyTest, ReleaseWrapperRejectsOlderNegotiatedTables) {
+  Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, "{}"};
+  const auto path = config.ResolvePath(config.model.decoder.filename);
+  auto session = OrtSession::Create(GetOrtEnv(), path.c_str(), nullptr);
+  Ort::api_version = 26;
+  try {
+    session->ReleaseCapturedGraph(0);
+    FAIL() << "Release used an unsupported API table";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "ONNX Runtime API 27 or later is required to release captured graphs");
+  }
+}
+#endif
+
+TEST_F(NemotronBoltRuntimePolicyTest, RequiresSafeCaptureInBothProjectedSessions) {
+  Config config;
+  config.model.vocab_size = 128;
+  auto& drafter = config.model.dflash2;
+  drafter.filename = "drafter.onnx";
+  drafter.num_hidden_layers = drafter.num_key_value_heads = drafter.head_size = 1;
+  drafter.block_size = 8;
+  drafter.num_draft_tokens = 7;
+  drafter.selector_top_k = 1;
+  drafter.sliding_window = 8;
+  SetProviderOption(config, "cuda", "enable_cuda_graph", "1");
+  for (uint32_t version : {18u, 26u, 27u, 31u}) {
+    Ort::api_version = version;
+    for (const std::string override : {"", "0", "1"}) {
+      drafter.session_options.reset();
+      if (!override.empty()) {
+        drafter.session_options.emplace();
+        drafter.session_options->provider_options.push_back({"cuda", {{"enable_cuda_graph", override}}});
+      }
+      const auto projected = CreateNemotronBoltDrafterConfig(config);
+      const auto& target_options = config.model.decoder.session_options;
+      const auto& draft_options = projected->model.decoder.session_options;
+#if ORT_API_VERSION >= 27
+      if (version >= 27) {
+        EXPECT_NO_THROW(ValidateNemotronBoltGraphCapture(target_options, true));
+        if (override != "0") {
+          EXPECT_NO_THROW(ValidateNemotronBoltGraphCapture(draft_options, true));
+        } else {
+          EXPECT_THROW(ValidateNemotronBoltGraphCapture(draft_options, true), std::runtime_error);
+        }
+        continue;
+      }
+#endif
+      EXPECT_THROW(ValidateNemotronBoltGraphCapture(target_options, true), std::runtime_error);
+      EXPECT_THROW(ValidateNemotronBoltGraphCapture(draft_options, true), std::runtime_error);
+    }
+    Config::SessionOptions eager;
+    EXPECT_NO_THROW(ValidateNemotronBoltGraphCapture(eager, false));
+    EXPECT_THROW(ValidateNemotronBoltGraphCapture(eager, true), std::runtime_error);
+  }
+}
 
 TEST_F(NemotronBoltRuntimePolicyTest, PreservesLogicalDrafterLengthsAndExplicitSanitizerPolicy) {
   for (uint32_t version : {0u, 31u, 32u, 33u}) {
@@ -647,10 +731,9 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
 TEST(NemotronBoltGPU, RealPromptOrdinaryAndSpeculative) {
   const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
   const char* cases_path = std::getenv("ORTGENAI_BOLT_TEST_CASES");
-  if (!path || !cases_path)
-    GTEST_SKIP() << "Set ORTGENAI_BOLT_TEST_MODEL and ORTGENAI_BOLT_TEST_CASES";
   const char* output = std::getenv("ORTGENAI_BOLT_OUTPUT");
-  ASSERT_NE(output, nullptr);
+  if (!path || !cases_path || !output)
+    GTEST_SKIP() << "Set model, exact token fixtures and owned output path";
   std::ifstream input{cases_path};
   ASSERT_TRUE(input);
   nlohmann::json fixtures;

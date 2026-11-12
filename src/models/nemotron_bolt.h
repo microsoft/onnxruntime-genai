@@ -15,6 +15,7 @@ struct NemotronBoltTestAccess;
 inline constexpr size_t kBoltVerifyRows = 8;
 
 void ValidateNemotronBoltSearch(const GeneratorParams& params);
+void ValidateNemotronBoltGraphCapture(const Config::SessionOptions& options, bool speculative);
 std::unique_ptr<Config> CreateNemotronBoltDrafterConfig(const Config& config);
 size_t NemotronBoltAcceptedPrefix(std::span<const int32_t> drafts,
                                   std::span<const int64_t> predictions);

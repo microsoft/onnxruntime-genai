@@ -3135,9 +3135,10 @@ struct Speculative_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "max_draft_tokens") {
       int k = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (k < (allow_target_only_ ? 0 : kMinK) || k > kMaxDraftTokens)
+      const int minimum = allow_target_only_ ? 0 : kMinK;
+      if (k < minimum || k > kMaxDraftTokens)
         throw std::runtime_error(
-            "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
+            "speculative.max_draft_tokens must be between " + std::to_string(minimum) + " and " +
             std::to_string(kMaxDraftTokens) + " Got: " + std::to_string(k) + ".");
       v_.max_draft_tokens = k;
     } else if (name == "ngram_size") {
@@ -4034,12 +4035,6 @@ void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_vie
 struct Root_Element : JSON::Element {
   explicit Root_Element(Config& config) : config_{config} {}
 
-  void OnComplete(bool) override {
-    // The speculative object may precede model.type in JSON.
-    if (config_.speculative.max_draft_tokens == 0 && config_.model.type != "nemotron_bolt")
-      throw std::runtime_error("speculative.max_draft_tokens must be between 1 and 16. Got: 0.");
-  }
-
   void OnValue(std::string_view /*name*/, JSON::Value /*value*/) override {
     // No top-level scalar values currently supported
   }
@@ -4074,6 +4069,12 @@ struct RootObject_Element : JSON::Element {
 
   JSON::Element& t_;
 };
+
+void ValidateSpeculativeConfig(const Config& config) {
+  // Model type and draft width may be supplied by different documents.
+  if (config.speculative.max_draft_tokens == 0 && config.model.type != "nemotron_bolt")
+    throw std::runtime_error("speculative.max_draft_tokens must be between 1 and 16. Got: 0.");
+}
 
 void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config,
                  std::optional<std::string_view> memory_json) {
@@ -4110,6 +4111,7 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
       throw std::runtime_error(oss.str());
     }
   }
+  ValidateSpeculativeConfig(config);
   ValidateRuntimeProfiles(config);
 }
 
@@ -4216,6 +4218,7 @@ void OverlayConfig(Config& config, std::string_view json) {
   RootObject_Element element{root};
   JSON::Parse(element, json);
   RefreshEngramProviders(candidate);
+  ValidateSpeculativeConfig(candidate);
   ValidateRuntimeProfiles(candidate);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
   ValidateTimestampConfiguration(candidate.model);
