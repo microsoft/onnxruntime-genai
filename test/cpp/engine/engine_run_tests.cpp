@@ -38,6 +38,9 @@
 #include "engine/scheduled_requests.h"
 #include "decoding/speculative_sampling.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/processor.h"
+#include "models/preprocessing/qwen2_5_vl_image_processor.h"
+#include "models/utils.h"
 
 namespace Generators {
 namespace test {
@@ -189,6 +192,12 @@ class ScopedFailingCheckpointDevice final : public DeviceInterface {
 
 class NativeTensorReference {
  public:
+  static NativeTensorReference Calibration(const std::filesystem::path& path, bool compare) {
+    auto calibration_path = path;
+    calibration_path += ".calibration";
+    return NativeTensorReference{calibration_path, compare};
+  }
+
   NativeTensorReference(const std::filesystem::path& path, bool compare)
       : compare_{compare} {
     if (compare) {
@@ -325,6 +334,178 @@ class NativeCaptureExecutor : public ModelExecutor {
   size_t step_{};
 };
 
+class PackedStepCaptureExecutor : public ModelExecutor {
+ public:
+  PackedStepCaptureExecutor(std::shared_ptr<Model> model,
+                            std::unique_ptr<ModelExecutor> executor,
+                            NativeTensorReference& reference, int32_t teacher_token)
+      : model_{std::move(model)}, executor_{std::move(executor)}, reference_{reference}, teacher_token_{teacher_token} {}
+
+  void Decode(ScheduledRequests& requests, ExecutionContext& context) override {
+    if (requests.size() != 1)
+      throw std::runtime_error("Packed calibration capture requires one request.");
+    model_->p_device_->Synchronize();
+    const std::string prefix = "step/" + std::to_string(step_++);
+    std::vector<std::string_view> state_names;
+    for (const auto& binding : context.fixed_state_bindings) {
+      state_names.push_back(binding.input_name);
+      reference_.Tensor(*model_, prefix + "/pre/" + binding.input_name, *binding.input);
+    }
+    executor_->Decode(requests, context);
+    model_->p_device_->Synchronize();
+    State& state = EngineRunTestAccess::DecoderState(requests);
+    std::string layout;
+    for (size_t index = 0; index < state.inputs_.size(); ++index) {
+      const auto name = std::string_view{state.input_names_[index]};
+      if (std::find(state_names.begin(), state_names.end(), name) == state_names.end())
+        reference_.Tensor(*model_, prefix + "/feed/" + std::string{name}, *state.inputs_[index]);
+      layout += std::string{name} + " device=" +
+                std::to_string(state.inputs_[index]->GetTensorMemoryInfo().GetDeviceType()) + "\n";
+    }
+    OrtValue* logits = nullptr;
+    for (size_t index = 0; index < state.outputs_.size(); ++index) {
+      const auto name = std::string_view{state.output_names_[index]};
+      reference_.Tensor(*model_, prefix + "/post/" + std::string{name}, *state.outputs_[index]);
+      for (size_t input = 0; input < state.inputs_.size(); ++input)
+        if (state.outputs_[index]->GetTensorMutableData<uint8_t>() ==
+            state.inputs_[input]->GetTensorMutableData<uint8_t>())
+          layout += std::string{name} + " aliases=" + state.input_names_[input] + "\n";
+      if (name == model_->config_->model.decoder.outputs.logits)
+        logits = state.outputs_[index];
+    }
+    reference_.Record(prefix + "/layout",
+                      {reinterpret_cast<const uint8_t*>(layout.data()), layout.size()});
+    if (!logits || logits->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+      throw std::runtime_error("Teacher-forced capture requires FLOAT logits.");
+    if (requests[0]->IsChunkComplete()) {
+      const auto info = logits->GetTensorTypeAndShapeInfo();
+      const size_t vocabulary = static_cast<size_t>(info->GetShape().back());
+      if (teacher_token_ < 0 || static_cast<size_t>(teacher_token_) >= vocabulary)
+        throw std::runtime_error("Teacher token is outside the vocabulary.");
+      auto forced = model_->p_device_->WrapMemory<float>(
+          {logits->GetTensorMutableData<float>(), info->GetElementCount()});
+      auto cpu = forced.CpuSpan();
+      std::fill(cpu.begin(), cpu.end(), 0.0f);
+      for (size_t row = 0; row < cpu.size() / vocabulary; ++row)
+        cpu[row * vocabulary + teacher_token_] = 1.0f;
+      forced.CopyCpuToDevice();
+      model_->p_device_->Synchronize();
+    }
+  }
+
+ private:
+  std::shared_ptr<Model> model_;
+  std::unique_ptr<ModelExecutor> executor_;
+  NativeTensorReference& reference_;
+  int32_t teacher_token_;
+  size_t step_{};
+};
+
+TEST(EngineNativeCaptureTest, PackedImageContinuationCalibrationTrace) {
+  const char* model_path = std::getenv("GENAI_NATIVE_CAPTURE_MODEL");
+  const char* reference_path = std::getenv("GENAI_NATIVE_CAPTURE_REFERENCE");
+  const char* image_path = std::getenv("GENAI_NATIVE_CAPTURE_IMAGE");
+  if (!model_path || !*model_path || !reference_path || !*reference_path || !image_path || !*image_path)
+    GTEST_SKIP() << "Set native capture model, reference and image paths for real calibration validation.";
+  auto config = CreateConfig(GetOrtEnv(), model_path);
+  const char* overlay = std::getenv("GENAI_NATIVE_CAPTURE_CONFIG_OVERLAY");
+  if (overlay && *overlay)
+    OverlayConfig(*config, overlay);
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  Tokenizer tokenizer{*model->config_};
+  const auto teacher = tokenizer.Encode("x");
+  ASSERT_EQ(teacher.size(), 1u);
+  ASSERT_EQ(std::find(model->config_->model.eos_token_id.begin(),
+                      model->config_->model.eos_token_id.end(), teacher[0]),
+            model->config_->model.eos_token_id.end());
+  const char* compare = std::getenv("GENAI_NATIVE_CAPTURE_COMPARE");
+  auto reference = NativeTensorReference::Calibration(reference_path, compare && std::string_view{compare} == "1");
+  auto dependencies = Engine::CreateDependencies(model);
+  ASSERT_FALSE(dependencies.mtp_model_executor);
+  dependencies.model_executor = std::make_unique<PackedStepCaptureExecutor>(
+      model, std::move(dependencies.model_executor), reference, teacher[0]);
+  auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+  auto request = CreateEngineRequest(engine, 512);
+  const std::array<const char*, 1> paths{image_path};
+  auto images = LoadImages(paths);
+  std::string prompt;
+  while (tokenizer.Encode(prompt.c_str()).size() < 250)
+    prompt += "x ";
+  prompt += "<|vision_start|><|image_pad|><|vision_end|>\nDescribe the image.";
+  const std::array<std::string, 3> prompts{prompt, "\nExplain the code.", "\nCheck this image: <|vision_start|><|image_pad|><|vision_end|>"};
+  for (size_t turn = 0; turn < prompts.size(); ++turn) {
+    TurnOptions options;
+    options.do_sample = false;
+    options.max_generated_tokens = 3;
+    const auto turn_id = request->BeginTurn(prompts[turn], options, turn == 1 ? nullptr : images.get());
+    ASSERT_EQ(turn_id, turn + 1);
+    size_t tokens = 0;
+    bool finished = false;
+    size_t runs = 0;
+    while (engine->HasPendingRequests()) {
+      ASSERT_LT(runs++, 2048u);
+      const auto event = RunOne(*engine);
+      ASSERT_FALSE(event.flags & EngineEventFlagFailed);
+      if (event.flags & EngineEventFlagToken) {
+        EXPECT_EQ(event.token, teacher[0]);
+        ++tokens;
+      }
+      if (event.flags & EngineEventFlagTurnFinished)
+        finished = true;
+    }
+    ASSERT_TRUE(finished);
+    EXPECT_EQ(tokens, 3u);
+  }
+  EXPECT_EQ(engine->GetSpeculativeStats().draft_forward_passes, 0u);
+  engine->CloseRequest(request);
+  reference.Finish();
+}
+
+TEST(EngineNativeCaptureTest, Bf16PixelsUseSourceNearestEvenRounding) {
+  const char* model_path = std::getenv("GENAI_NATIVE_CAPTURE_MODEL");
+  const char* image_path = std::getenv("GENAI_NATIVE_CAPTURE_IMAGE");
+  if (!model_path || !*model_path || !image_path || !*image_path)
+    GTEST_SKIP() << "Set native capture model and image paths for actual pixel conversion validation.";
+  auto config = CreateConfig(GetOrtEnv(), model_path);
+  const char* overlay = std::getenv("GENAI_NATIVE_CAPTURE_CONFIG_OVERLAY");
+  if (overlay && *overlay)
+    OverlayConfig(*config, overlay);
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(
+      CreateModel(GetOrtEnv(), std::move(config)));
+  ASSERT_TRUE(model);
+  ASSERT_TRUE(model->vision_);
+  LingImageProcessor float_processor{*model->config_, model->session_info_};
+  LingImageProcessor bf16_processor{*model->config_, model->vision_->session_info};
+  const std::array<const char*, 1> paths{image_path};
+  auto images = LoadImages(paths);
+  const Tokenizer tokenizer{*model->config_};
+  const std::string prompt = "<|vision_start|><|image_pad|><|vision_end|>";
+  const Payload payload{prompt, {}, images.get(), nullptr};
+  const auto floating = float_processor.Process(tokenizer, payload);
+  const auto bf16 = bf16_processor.Process(tokenizer, payload);
+  const auto& input = *floating->at(std::string{Config::Defaults::PixelValuesName});
+  const auto& actual = *bf16->at(std::string{Config::Defaults::PixelValuesName});
+  ASSERT_EQ(input.GetType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  ASSERT_EQ(actual.GetType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  ASSERT_EQ(input.GetShape(), actual.GetShape());
+  const auto count = input.GetElementCount();
+  const auto* source = input.GetData<float>();
+  const auto* converted = actual.GetData<uint16_t>();
+  size_t mismatches = 0;
+  for (size_t index = 0; index < count; ++index) {
+    const float value = source[index];
+    ASSERT_TRUE(std::isfinite(value));
+    const uint16_t truncated = Float32ToBFloat16(value);
+    const uint16_t adjacent = static_cast<uint16_t>(truncated + 1u);
+    const float truncated_distance = std::abs(value - BFloat16ToFloat32(truncated));
+    const float adjacent_distance = std::abs(value - BFloat16ToFloat32(adjacent));
+    const uint16_t expected = truncated_distance < adjacent_distance || (truncated_distance == adjacent_distance && (truncated & 1u) == 0) ? truncated : adjacent;
+    if (converted[index] != expected)
+      ++mismatches;
+  }
+  EXPECT_EQ(mismatches, 0u);
+}
+
 TEST(EngineNativeCaptureTest, StreamedBytesDetectMismatch) {
   const auto path = std::filesystem::temp_directory_path() /
                     ("genai-native-reference-" + std::to_string(std::random_device{}()) + ".bin");
@@ -345,6 +526,43 @@ TEST(EngineNativeCaptureTest, StreamedBytesDetectMismatch) {
     EXPECT_THROW(reference.Record("tensor", changed), std::runtime_error);
   }
   std::filesystem::remove(path);
+}
+
+TEST(EngineNativeCaptureTest, CalibrationReferencePreservesLifecycleAndComparison) {
+  const auto path = std::filesystem::temp_directory_path() /
+                    ("genai-native-reference-" + std::to_string(std::random_device{}()) + ".bin");
+  auto calibration_path = path;
+  calibration_path += ".calibration";
+  const std::array<uint8_t, 3> lifecycle{1, 2, 3};
+  const std::array<uint8_t, 3> calibration{4, 5, 6};
+  {
+    NativeTensorReference reference{path, false};
+    reference.Record("tensor", lifecycle);
+    reference.Finish();
+  }
+  EXPECT_THROW(NativeTensorReference::Calibration(path, true), std::runtime_error);
+  EXPECT_FALSE(std::filesystem::exists(calibration_path));
+  {
+    auto reference = NativeTensorReference::Calibration(path, false);
+    reference.Record("tensor", calibration);
+    reference.Finish();
+  }
+  {
+    NativeTensorReference reference{path, true};
+    EXPECT_NO_THROW(reference.Record("tensor", lifecycle));
+    EXPECT_NO_THROW(reference.Finish());
+  }
+  {
+    auto reference = NativeTensorReference::Calibration(path, true);
+    EXPECT_NO_THROW(reference.Record("tensor", calibration));
+    EXPECT_NO_THROW(reference.Finish());
+  }
+  {
+    auto reference = NativeTensorReference::Calibration(path, true);
+    EXPECT_THROW(reference.Record("tensor", lifecycle), std::runtime_error);
+  }
+  std::filesystem::remove(path);
+  std::filesystem::remove(calibration_path);
 }
 
 size_t NativeCaptureCount(const char* value, size_t fallback) {
@@ -4911,6 +5129,95 @@ TEST_F(EngineRunTest, HybridShortPrefixDoesNotStrandLongerCheckpoint) {
   EXPECT_EQ(metrics->duplicate_registrations, 0u);
   EXPECT_EQ(metrics->hash_collisions, 0u);
   EXPECT_EQ(metrics->retention_refusals, 0u);
+}
+
+TEST_F(EngineRunTest, HybridPrefixRebuildsAfterUnrelatedRequestEvictsItsLastCheckpoint) {
+  for (const bool fail_capture : {false, true}) {
+    SCOPED_TRACE(fail_capture);
+    model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/4);
+    auto& batching = *model_->config_->engine.dynamic_batching;
+    batching.block_size = 4;
+    batching.max_batch_size = 1;
+    batching.num_blocks = 16;
+    batching.prefix_caching = true;
+    ScopedFailingCheckpointDevice device{*model_};
+    auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+    const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+    const std::array<int32_t, 5> unrelated_prompt{20, 21, 22, 23, 24};
+    engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+      ASSERT_EQ(context.plan->requests.size(), 1u);
+      const auto& entry = context.plan->requests.front();
+      for (const auto& binding : context.fixed_state_bindings) {
+        ExpectFixedInputRow(
+            binding, 0, static_cast<float>(entry.target_cache_slots - entry.unprocessed_token_count));
+        FillFixedOutputRow(binding, 0, static_cast<float>(entry.target_cache_slots));
+      }
+    });
+    const auto finish = [&](const std::shared_ptr<Request>& request) {
+      EngineEvent event;
+      for (size_t step = 0; step < 4 && !request->IsTurnComplete(); ++step) {
+        event = RunOne(*engine.engine);
+      }
+      EXPECT_TRUE(request->IsTurnComplete());
+      EXPECT_EQ(event.request, request);
+      EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+      EXPECT_EQ(engine.cache->FixedStateSnapshot()->checkpoint_count, 1u);
+      return event;
+    };
+
+    auto first = CreateRequestWithPrompt(
+        engine.engine, std::span<const int32_t>{prompt}.first(5));
+    EXPECT_EQ(finish(first).usage.cached_prompt_tokens, 0u);
+    first->Close();
+
+    auto unrelated = CreateRequestWithPrompt(engine.engine, unrelated_prompt);
+    EXPECT_EQ(finish(unrelated).usage.cached_prompt_tokens, 0u);
+    EXPECT_EQ(engine.engine->PrefixCacheStats()->registered_blocks, 2u);
+    EXPECT_EQ(engine.engine->PrefixCacheStats()->evictions, 0u);
+    unrelated->Close();
+
+    auto rebuild = CreateRequestWithPrompt(engine.engine, prompt);
+    engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+      ASSERT_EQ(context.plan->requests.size(), 1u);
+      const auto& entry = context.plan->requests.front();
+      if (entry.target_cache_slots == 4) {
+        EXPECT_TRUE(!entry.prefix_match || entry.prefix_match->Empty());
+        if (fail_capture) {
+          device.FailNextWrapWhen([rebuild] {
+            return rebuild->ProcessedSequenceLength() == 4;
+          });
+        }
+      }
+      for (const auto& binding : context.fixed_state_bindings) {
+        ExpectFixedInputRow(
+            binding, 0, static_cast<float>(entry.target_cache_slots - entry.unprocessed_token_count));
+        FillFixedOutputRow(binding, 0, static_cast<float>(entry.target_cache_slots));
+      }
+    });
+    EXPECT_EQ(finish(rebuild).usage.cached_prompt_tokens, 0u);
+    EXPECT_EQ(device.FailureCount(), fail_capture ? 1u : 0u);
+    EXPECT_EQ(engine.engine->PrefixCacheStats()->publication_refusals, fail_capture ? 1u : 0u);
+    rebuild->Close();
+
+    auto repeat = CreateRequestWithPrompt(engine.engine, prompt);
+    engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+      ASSERT_EQ(context.plan->requests.size(), 1u);
+      const auto& entry = context.plan->requests.front();
+      ASSERT_NE(entry.prefix_match, nullptr);
+      ASSERT_NE(entry.prefix_match->fixed_state_checkpoint, nullptr);
+      EXPECT_EQ(entry.prefix_match->token_count, 8u);
+      EXPECT_EQ(entry.prefix_match->blocks.size(), 2u);
+      EXPECT_EQ(entry.unprocessed_token_count, 1u);
+      for (const auto& binding : context.fixed_state_bindings) {
+        ExpectFixedInputRow(binding, 0, 8.0f);
+        FillFixedOutputRow(binding, 0, 9.0f);
+      }
+    });
+    EXPECT_EQ(finish(repeat).usage.cached_prompt_tokens, 8u);
+    EXPECT_EQ(engine.engine->PrefixCacheStats()->duplicate_registrations, 0u);
+    EXPECT_EQ(engine.engine->PrefixCacheStats()->hash_collisions, 0u);
+    repeat->Close();
+  }
 }
 
 TEST_F(EngineRunTest, HybridBranchBetweenCheckpointsPublishesItsLongerSuffix) {

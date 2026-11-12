@@ -16,6 +16,8 @@ namespace Generators::CUDAExecutionProvider {
 // a non-numeric value or trailing text and std::out_of_range below -1.
 size_t ParseArenaOptionValue(std::string_view key, const std::string& value);
 
+bool IsProviderBridgeAvailable();
+
 // The provider options that decide which GPU the shared GenAI stream is bound to before the EP is registered.
 // `selected_plugin_device_id` is std::nullopt when no plugin EP device is registered, so the provider-bridge EP serves the
 // session; otherwise it is the CUDA id the selected plugin device reports, which may be empty. A session that names no

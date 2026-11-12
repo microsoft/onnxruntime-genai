@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "ep/cuda/session_options.h"
+#include "models/env_utils.h"
 #include "models/session_options.h"
 
 namespace Generators::test {
@@ -30,6 +31,70 @@ std::string SelectionError(const std::vector<std::string>& ids, const std::optio
 }
 
 }  // namespace
+
+#if USE_CUDA
+class CudaBridgeProbeTest : public testing::Test {
+ protected:
+  const OrtApi* saved_api{};
+  OrtApi test_api{};
+  inline static bool available{};
+
+  static OrtStatus* ORT_API_CALL Create(OrtCUDAProviderOptionsV2** out) noexcept {
+    static int sentinel;
+    *out = reinterpret_cast<OrtCUDAProviderOptionsV2*>(&sentinel);
+    return nullptr;
+  }
+  static void ORT_API_CALL Release(OrtCUDAProviderOptionsV2*) noexcept {}
+
+  static OrtStatus* ORT_API_CALL Update(OrtCUDAProviderOptionsV2*, const char* const* keys,
+                                        const char* const* values, size_t count) noexcept {
+    EXPECT_EQ(count, 1u);
+    if (count != 1) return nullptr;  // Empty updates cannot establish provider availability.
+    EXPECT_STREQ(keys[0], "device_id");
+    EXPECT_STREQ(values[0], "0");
+    return available ? nullptr : Ort::api->CreateStatus(ORT_FAIL, "Provider bridge unavailable");
+  }
+
+  void SetUp() override {
+    saved_api = Ort::api;
+    test_api = *saved_api;
+    test_api.CreateCUDAProviderOptions = Create;
+    test_api.ReleaseCUDAProviderOptions = Release;
+    test_api.UpdateCUDAProviderOptions = Update;
+    Ort::api = &test_api;
+  }
+  void TearDown() override { Ort::api = saved_api; }
+};
+
+TEST_F(CudaBridgeProbeTest, LoadableBridgeIsAvailable) {
+  available = true;
+  EXPECT_TRUE(CUDAExecutionProvider::IsProviderBridgeAvailable());
+}
+
+TEST_F(CudaBridgeProbeTest, MissingBridgeAllowsPluginFallback) {
+  available = false;
+  EXPECT_FALSE(CUDAExecutionProvider::IsProviderBridgeAvailable());
+}
+
+TEST(CudaProviderRegistrationTest, AvailableBridgeDoesNotAutoRegisterAPlugin) {
+  if (!GetEnv("ORT_CUDA_PLUGIN_EP_PATH").empty()) {
+    GTEST_SKIP() << "The caller explicitly requested plugin registration";
+  }
+  if (!FindRegisteredEpDevices("CUDAExecutionProvider").empty()) {
+    GTEST_SKIP() << "CUDA is already registered as a plugin";
+  }
+  if (!CUDAExecutionProvider::IsProviderBridgeAvailable())
+    GTEST_SKIP() << "A CUDA provider bridge is unavailable";
+
+  auto session_options = OrtSessionOptions::Create();
+  session_options->AddConfigEntry("ep.cuda.gated_delta_net_bf16_precision", "bf16");
+  Config config;
+  ProviderOptions provider_options;
+  provider_options.name = "cuda";
+  ASSERT_NE(CUDAExecutionProvider::AppendExecutionProvider(*session_options, provider_options, config), nullptr);
+  EXPECT_TRUE(FindRegisteredEpDevices("CUDAExecutionProvider").empty());
+}
+#endif
 
 class CudaDeviceMetadataTest : public testing::Test {
  protected:

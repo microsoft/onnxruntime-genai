@@ -8,6 +8,7 @@ import importlib
 import json
 import os
 import sys
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -22,28 +23,25 @@ from onnx.reference import ReferenceEvaluator
 from onnxruntime.capi._pybind_state import get_all_operator_schema
 from safetensors.torch import save_file
 from transformers import PretrainedConfig
+from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLVisionConfig
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
 sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "models"))
 
 import builder
+from builder_config import COMPONENT_EXPORTER_OWNED_FILES
 from builders import bailing
 from builders.bailing import BailingMoeV3Model
+from builders.bailing_vl import BailingVLModel, BailingVLTextModel, BailingVLVisualModel
+from builders.expansions.standard import Standard
+from builders.qwen3_8.vision import save_image_processor
 from loaders import bailing as bailing_loader
 from loaders.bailing import BailingModel
 from loaders.base import QuantizedDecoderLayer, QuantizedExperts, TensorModule
+from loaders.vision import load_bailing_visual
 
 
-def _model(
-    tmp_path,
-    *,
-    dtype=ir.DataType.FLOAT,
-    precision=None,
-    ep="cpu",
-    quant_method=None,
-    layer_group_size=4,
-    config_options=None,
-    **options,
-):
+def _config(**overrides):
     config = PretrainedConfig(
         architectures=["BailingMoeV3ForCausalLM"],
         _name_or_path="test/bailing",
@@ -60,13 +58,509 @@ def _model(
         head_dim=64,
         rope_theta=10000.0,
     )
+    config.update(overrides)
+    return config
+
+
+def _model(
+    tmp_path,
+    *,
+    dtype=ir.DataType.FLOAT,
+    precision=None,
+    ep="cpu",
+    quant_method=None,
+    layer_group_size=4,
+    config_options=None,
+    model_class=BailingMoeV3Model,
+    config_overrides=None,
+    **options,
+):
+    config = _config(**(config_overrides or {}))
     if layer_group_size is not None:
         config.layer_group_size = layer_group_size
     for name, value in (config_options or {}).items():
         setattr(config, name, value)
     if quant_method:
         config.quantization_config = {"quant_method": quant_method}
-    return BailingMoeV3Model(config, dtype, precision or dtype, ep, str(tmp_path / "cache"), options)
+    return model_class(config, dtype, precision or dtype, ep, str(tmp_path / "cache"), options)
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+def test_ling_composite_normalizes_decoder_without_losing_native_fp8_metadata(tmp_path, text_only):
+    text = _config(q_lora_rank=None)
+    config = PretrainedConfig(
+        _name_or_path="test/ling-vl",
+        text_config=text.to_dict(),
+        vision_config={"out_hidden_size": 4096},
+        tie_word_embeddings=False,
+        mrope_section=[8, 12, 12],
+        quantization_config={
+            "quant_method": "fp8",
+            "weight_block_size": [128, 128],
+            "modules_to_not_convert": ["gate"],
+        },
+    )
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "exclude_embeds": not text_only, "text_only": text_only},
+    )
+    decoder = model.decoder
+    assert decoder.config.quantization_config == config.quantization_config
+    assert decoder.config.quantization_config is not config.quantization_config
+    assert decoder.config.name_or_path == "test/ling-vl"
+    assert decoder.mla_attrs["q_lora_rank"] is None
+    assert not decoder.config.tie_word_embeddings
+    assert decoder.rope_attrs["interleaved"] == 1
+    assert decoder.rope_attrs["op_type"] == ("RotaryEmbedding" if text_only else "MRotaryEmbedding")
+    assert decoder.model_type == ("bailing_hybrid" if text_only else "bailing_moe_v3_vl")
+    assert "mrope_section" not in config.text_config
+    assert model.config.vision_config.out_hidden_size == 4096
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+def test_ling_composite_component_loading_preserves_decoder_authentication(tmp_path, monkeypatch, text_only):
+    config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "exclude_embeds": not text_only, "text_only": text_only, "hf_token": False},
+    )
+    model.decoder.make_model = Mock()
+    model.decoder.save_processing = Mock()
+    load_visual = Mock()
+    save_processor = Mock()
+    monkeypatch.setattr("builders.bailing_vl.load_bailing_visual", load_visual)
+    monkeypatch.setattr("builders.bailing_vl.BailingVLVisualModel", Mock())
+    monkeypatch.setattr("builders.bailing_vl.save_image_processor", save_processor)
+
+    model.make_model(str(tmp_path))
+    model.save_processing(str(tmp_path), {}, str(tmp_path))
+
+    model.decoder.make_model.assert_called_once_with(str(tmp_path))
+    model.decoder.save_processing.assert_called_once_with(str(tmp_path), {}, str(tmp_path))
+    if text_only:
+        load_visual.assert_not_called()
+        save_processor.assert_not_called()
+    else:
+        load_visual.assert_called_once()
+        assert load_visual.call_args.kwargs["token"] is False
+        save_processor.assert_called_once_with(str(tmp_path), {}, str(tmp_path), False)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"use_paged_attention": False},
+        {"exclude_embeds": False},
+        {"text_only": True},
+        {"dflash2_path": "drafter"},
+        {"filename": "vision.onnx"},
+    ],
+)
+def test_ling_composite_rejects_unsupported_component_contracts(tmp_path, options):
+    config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
+    with pytest.raises(ValueError, match="Ling"):
+        BailingVLModel(
+            config,
+            ir.DataType.BFLOAT16,
+            ir.DataType.BFLOAT16,
+            "cuda",
+            str(tmp_path),
+            {"use_paged_attention": True, "exclude_embeds": True, **options},
+        )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "./vision.onnx",
+        "./embedding.onnx",
+        "nested/../vision.onnx",
+        "vision.onnx.data",
+        "./embedding.onnx.data",
+        "vision.onnx.saving",
+        "embedding.onnx.data.bak",
+        "absolute-vision",
+        "../decoder.onnx",
+        "nested/../../decoder.onnx",
+    ],
+)
+def test_ling_component_destinations_reject_aliases_before_writing(tmp_path, filename):
+    if filename == "absolute-vision":
+        filename = str(tmp_path / "vision.onnx")
+    config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "exclude_embeds": True, "filename": filename},
+    )
+    (tmp_path / "nested").mkdir()
+    existing = {
+        name: name.encode()
+        for name in ("model.onnx", "embedding.onnx", "embedding.onnx.data", "vision.onnx", "vision.onnx.data")
+    }
+    for name, content in existing.items():
+        (tmp_path / name).write_bytes(content)
+    model.decoder.save_model = Mock()
+    model.vision = Mock()
+
+    with pytest.raises(ValueError, match="conflicts|escapes"):
+        model.save_model(tmp_path)
+
+    model.decoder.save_model.assert_not_called()
+    model.vision.save_model.assert_not_called()
+    assert {name: (tmp_path / name).read_bytes() for name in existing} == existing
+
+
+@pytest.mark.parametrize("filename", ["decoder.onnx", "nested/decoder.onnx"])
+def test_ling_component_destinations_reject_symlinks_before_writing(tmp_path, filename):
+    config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "exclude_embeds": True, "filename": filename},
+    )
+    (tmp_path / "nested").mkdir()
+    original = tmp_path / "vision.onnx.data"
+    original.write_bytes(b"existing vision weights")
+    (tmp_path / f"{filename}.data").symlink_to(original)
+    model.decoder.save_model = Mock()
+    model.vision = Mock()
+
+    with pytest.raises(ValueError, match="symlink"):
+        model.save_model(tmp_path)
+
+    model.decoder.save_model.assert_not_called()
+    model.vision.save_model.assert_not_called()
+    assert original.read_bytes() == b"existing vision weights"
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        *sorted(COMPONENT_EXPORTER_OWNED_FILES),
+        "./genai_config.json",
+        "nested/../tokenizer.json",
+        "processor_config.json/model",
+    ],
+)
+def test_ling_component_destinations_preserve_exporter_owned_files(tmp_path, filename, text_only):
+    config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {
+            "use_paged_attention": True,
+            "exclude_embeds": not text_only,
+            "text_only": text_only,
+            "filename": filename,
+        },
+    )
+    (tmp_path / "nested").mkdir()
+    existing = {name: name.encode() for name in COMPONENT_EXPORTER_OWNED_FILES}
+    for name, content in existing.items():
+        (tmp_path / name).write_bytes(content)
+    model.decoder.save_model = Mock()
+    if not text_only:
+        model.vision = Mock()
+
+    with pytest.raises(ValueError, match="conflicts|not a directory"):
+        model.save_model(tmp_path)
+
+    model.decoder.save_model.assert_not_called()
+    if model.vision is not None:
+        model.vision.save_model.assert_not_called()
+    assert {name: (tmp_path / name).read_bytes() for name in existing} == existing
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+@pytest.mark.parametrize("filename", ["model.onnx", "./decoder.onnx", "nested/decoder.onnx"])
+def test_ling_distinct_component_destinations_preserve_save_order(tmp_path, filename, text_only):
+    config = PretrainedConfig(text_config=_config(), vision_config=PretrainedConfig(), mrope_section=[8, 12, 12])
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {
+            "use_paged_attention": True,
+            "exclude_embeds": not text_only,
+            "text_only": text_only,
+            "filename": filename,
+        },
+    )
+    (tmp_path / "nested").mkdir()
+    saves = Mock()
+    model.decoder.save_model = saves.decoder
+    if not text_only:
+        model.vision = SimpleNamespace(save_model=saves.vision)
+
+    model.save_model(tmp_path)
+
+    assert [call[0] for call in saves.mock_calls] == (["decoder"] if text_only else ["decoder", "vision"])
+    saves.decoder.assert_called_once_with(tmp_path)
+    if not text_only:
+        saves.vision.assert_called_once_with(tmp_path)
+
+
+@pytest.mark.parametrize("moe_quant_type", [None, "int4", "int8"])
+def test_ling_compressed_tensors_policy_matches_integer_expert_emission(tmp_path, monkeypatch, moe_quant_type):
+    config = PretrainedConfig(
+        model_type="bailing_moe_v3_vl",
+        text_config=_config(num_experts=2, num_experts_per_tok=1, n_group=1),
+        vision_config=PretrainedConfig(),
+        mrope_section=[8, 12, 12],
+        quantization_config={"quant_method": "compressed-tensors"},
+    )
+    monkeypatch.setattr(builder, "get_hf_details", lambda *args: {"hf_config": config})
+    options = ["use_paged_attention=true", "exclude_embeds=true", "qmoe_weights_prepacked=0"]
+    if moe_quant_type is not None:
+        options.append(f"moe_quant_type={moe_quant_type}")
+    parsed = builder.parse_extra_options("test/ling", "", str(tmp_path), "int4", "cuda", str(tmp_path), options)
+    model = BailingVLModel(config, ir.DataType.BFLOAT16, ir.DataType.INT4, "cuda", str(tmp_path), parsed).decoder
+    save_file(
+        {
+            "model.word_embeddings.weight": torch.ones(32, 128, dtype=torch.bfloat16),
+            "model.norm.weight": torch.ones(128, dtype=torch.bfloat16),
+            "lm_head.weight": torch.ones(32, 128, dtype=torch.bfloat16),
+            "gate_up.weight_packed": torch.full((256, 16), 0x76543210, dtype=torch.int32),
+            "gate_up.weight_scale": torch.ones(256, 4),
+            "down.weight_packed": torch.full((128, 16), 0x76543210, dtype=torch.int32),
+            "down.weight_scale": torch.ones(128, 4),
+        },
+        tmp_path / "model.safetensors",
+    )
+    weights = model.load_weights(str(tmp_path))
+    try:
+        experts = SimpleNamespace(
+            gate_up_proj=weights.make_linear_module("gate_up").weight.repeat(2, 1, 1),
+            down_proj=weights.make_linear_module("down").weight.repeat(2, 1, 1),
+        )
+        model.make_interleaved_swiglu_moe_preprocessing(2, SimpleNamespace(experts=experts), model.intermediate_size)
+    finally:
+        weights.close()
+    names = model.make_moe_expert_names(2)
+    model.make_moe_op(
+        "/experts",
+        root_input="hidden",
+        router_probs="router",
+        weight1=names["gate_up_weight"],
+        scales1=names["gate_up_scales"],
+        weight2=names["down_weight"],
+        scales2=names["down_scales"],
+    )
+    node = model.values["/experts/output_0"].producer()
+    bits = 8 if moe_quant_type == "int8" else 4
+    assert node.op_type == "QMoE"
+    assert node.attributes["expert_weight_bits"].as_int() == bits
+    assert "quant_type" not in node.attributes
+    for key, elements in (("gate_up_weight", 2 * 256 * 128), ("down_weight", 2 * 128 * 128)):
+        tensor = model.graph.initializers[names[key]].const_value
+        assert tensor.dtype == ir.DataType.UINT8
+        assert tensor.nbytes == elements * bits // 8
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+def test_ling_raw_configuration_preserves_source_activation_default(tmp_path, text_only):
+    text = _config().to_dict()
+    del text["hidden_act"]
+    config = {
+        "architectures": ["BailingMoeV3VLForConditionalGeneration"],
+        "model_type": "bailing_moe_v3_vl",
+        "text_config": text,
+        "vision_config": {"out_hidden_size": 4096},
+        "mrope_section": [8, 12, 12],
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    model = BailingVLModel(
+        BailingVLModel.load_config(str(tmp_path)),
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        {"use_paged_attention": True, "exclude_embeds": not text_only, "text_only": text_only},
+    )
+    assert model.decoder.config.hidden_act == "silu"
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+def test_ling_raw_configuration_preserves_nested_untied_embeddings(tmp_path, monkeypatch, text_only):
+    config = {
+        "architectures": ["BailingMoeV3VLForConditionalGeneration"],
+        "model_type": "bailing_moe_v3_vl",
+        "text_config": _config(tie_word_embeddings=False).to_dict(),
+        "vision_config": {"out_hidden_size": 4096},
+        "mrope_section": [8, 12, 12],
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr(builder.AutoTokenizer, "from_pretrained", Mock(return_value=Mock(get_vocab=dict)))
+    options = builder.parse_extra_options(
+        str(tmp_path),
+        "",
+        str(tmp_path / "output"),
+        "bf16",
+        "cuda",
+        str(tmp_path / "cache"),
+        ["use_paged_attention=true", f"exclude_embeds={not text_only}", f"text_only={text_only}"],
+    )
+    model = BailingVLModel(
+        options["hf_details"]["hf_config"],
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path / "cache"),
+        options,
+    )
+    assert not options["shared_embeddings"]
+    assert not model.decoder.config.tie_word_embeddings
+    assert not model.decoder.tied_unquantized_embeddings
+
+
+def test_ling_vision_rejects_unsupported_context_extension(tmp_path):
+    with pytest.raises(ValueError, match="Ling vision context extension"):
+        _model(
+            tmp_path,
+            model_class=BailingVLTextModel,
+            dtype=ir.DataType.BFLOAT16,
+            ep="cuda",
+            use_paged_attention=True,
+            paged_block_size=16,
+            config_overrides={
+                "max_position_embeddings": 256,
+                "original_max_position_embeddings": 128,
+                "mrope_section": [8, 12, 12],
+            },
+        )
+
+
+@pytest.mark.parametrize(("text_only", "context_length"), [(False, 64), (False, 128), (True, 256)])
+def test_ling_context_limits_preserve_supported_exports(tmp_path, text_only, context_length):
+    model = _model(
+        tmp_path,
+        model_class=BailingVLTextModel,
+        dtype=ir.DataType.BFLOAT16,
+        ep="cuda",
+        use_paged_attention=True,
+        paged_block_size=16,
+        text_only=text_only,
+        config_overrides={
+            "max_position_embeddings": context_length,
+            "original_max_position_embeddings": 128,
+            "mrope_section": [8, 12, 12],
+        },
+    )
+    if text_only:
+        assert model.rope_attrs["op_type"] == "RotaryEmbedding"
+    else:
+        assert model.rope_attrs["position_start"] == -128
+        assert model.rope_attrs["cache_length"] == 128 + context_length
+
+
+def test_ling_raw_configuration_and_image_processor_assets(tmp_path):
+    config = {
+        "architectures": ["BailingMoeV3VLForConditionalGeneration"],
+        "model_type": "bailing_moe_v3_vl",
+        "text_config": {"hidden_size": 2560},
+        "vision_config": {"out_hidden_size": 4096},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    loaded = BailingVLModel.load_config(str(tmp_path))
+    assert loaded.text_config == config["text_config"]
+    assert loaded.name_or_path == str(tmp_path)
+    (tmp_path / "preprocessor_config.json").write_text(
+        json.dumps(
+            {
+                "min_pixels": 4096,
+                "max_pixels": 4194304,
+                "patch_size": 16,
+                "temporal_patch_size": 2,
+                "merge_size": 2,
+                "image_mean": [0.48145466, 0.4578275, 0.40821073],
+                "image_std": [0.26862954, 0.26130258, 0.27577711],
+            }
+        )
+    )
+    save_image_processor(str(tmp_path), {}, str(tmp_path), None)
+    processor = json.loads((tmp_path / "processor_config.json").read_text())["processor"]
+    operations = {transform["operation"]["type"]: transform["operation"] for transform in processor["transforms"]}
+    assert operations["Resize"]["attrs"]["min_pixels"] == 4096
+    assert operations["Resize"]["attrs"]["max_pixels"] == 4194304
+    assert operations["PatchImage"]["attrs"] == {"patch_size": 16, "temporal_patch_size": 2, "merge_size": 2}
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+@pytest.mark.parametrize("capture", [None, False, True])
+def test_ling_composite_config_preserves_component_and_position_contracts(tmp_path, text_only, capture):
+    (tmp_path / "generation_config.json").write_text(json.dumps({"eos_token_id": 2, "pad_token_id": 0}))
+    config = PretrainedConfig(
+        _name_or_path=str(tmp_path),
+        text_config=_config(bos_token_id=1, eos_token_id=2, pad_token_id=0),
+        vision_config={"patch_size": 16, "spatial_merge_size": 2, "out_hidden_size": 4096},
+        mrope_section=[8, 12, 12],
+        image_token_id=29,
+        vision_start_token_id=30,
+    )
+    markers = {"<tool_call>": 24, "</tool_call>": 25, "<think>": 26, "</think>": 27}
+    builder.add_special_token_ids(config, SimpleNamespace(get_vocab=lambda: markers))
+    options = {"use_paged_attention": True, "exclude_embeds": not text_only, "text_only": text_only}
+    if capture is not None:
+        options["enable_cuda_graph"] = capture
+    model = BailingVLModel(
+        config,
+        ir.DataType.BFLOAT16,
+        ir.DataType.BFLOAT16,
+        "cuda",
+        str(tmp_path),
+        options,
+    )
+    model.decoder.make_inputs_and_outputs()
+    model.make_genai_config(config, {}, str(tmp_path))
+    saved = json.loads((tmp_path / "genai_config.json").read_text())["model"]
+    for name, token in (
+        ("bot_token_id", "<tool_call>"),
+        ("eot_token_id", "</tool_call>"),
+        ("bor_token_id", "<think>"),
+        ("eor_token_id", "</think>"),
+    ):
+        assert saved[name] == markers[token]
+    assert saved["type"] == ("bailing_hybrid" if text_only else "bailing_moe_v3_vl")
+    assert saved["decoder"]["session_options"]["provider_options"][0]["cuda"]["use_tf32"] == "0"
+    assert saved["decoder"]["session_options"]["provider_options"][0]["cuda"]["enable_cuda_graph"] == (
+        "1" if (text_only if capture is None else capture) else "0"
+    )
+    assert ("session.use_device_allocator_for_initializers" in saved["decoder"]["session_options"]) == (not text_only)
+    assert model.decoder.input_shapes["position_ids"] == (["num_tokens"] if text_only else [3, "num_tokens"])
+    if text_only:
+        assert "vision" not in saved
+        assert "embedding" not in saved
+    else:
+        assert saved["decoder"]["session_options"]["session.use_device_allocator_for_initializers"] == "1"
+        assert saved["image_token_id"] == 29
+        assert saved["vision"]["patch_size"] == 16
+        assert saved["vision"]["outputs"] == {"image_features": "image_features"}
+        assert saved["embedding"]["inputs"] == {"input_ids": "input_ids"}
+        assert saved["embedding"]["outputs"] == {"inputs_embeds": "inputs_embeds"}
+        assert saved["decoder"]["inputs"]["inputs_embeds"] == "inputs_embeds"
+        with pytest.raises(RuntimeError, match="make_model"):
+            model.save_model(str(tmp_path))
 
 
 def _checkpoint(tmp_path, out_features=16, in_features=128):
@@ -246,6 +740,351 @@ def _mla_reference(model, attention, hidden, positions=None, attn_output=None):
     )
 
 
+def test_untied_bailing_checkpoint_requires_its_language_model_head(tmp_path):
+    _checkpoint(tmp_path)
+    with pytest.raises(ValueError, match="lm_head.weight"):
+        BailingModel(str(tmp_path), _config(tie_word_embeddings=False))
+
+
+@pytest.fixture
+def bailing_vision_checkpoint(tmp_path):
+    """Qwen-derived tiny tower with a Ling-shaped merger/projector, not a publisher-source oracle."""
+    config = Qwen3VLVisionConfig(
+        depth=1,
+        hidden_size=16,
+        intermediate_size=24,
+        num_heads=2,
+        patch_size=2,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        num_position_embeddings=16,
+        out_hidden_size=64,
+        deepstack_visual_indexes=[],
+    )
+    config._attn_implementation = "eager"
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(23)
+        visual = Qwen3VLVisionModel(config).eval()
+        visual.merger = torch.nn.Sequential(
+            OrderedDict(
+                norm=torch.nn.LayerNorm(16, eps=1e-6),
+                group=torch.nn.Unflatten(0, (-1, 4)),
+                flatten=torch.nn.Flatten(1),
+            )
+        )
+        projector = torch.nn.Sequential(torch.nn.Linear(64, 12), torch.nn.GELU(), torch.nn.Linear(12, 12)).eval()
+    tensors = {f"model.visual.{name}": tensor.contiguous() for name, tensor in visual.state_dict().items()}
+    tensors.update({f"linear_proj.{name}": tensor.contiguous() for name, tensor in projector.state_dict().items()})
+    save_file(tensors, tmp_path / "model.safetensors")
+    return config, visual, projector
+
+
+@pytest.mark.parametrize("grid", [(1, 2, 2), (1, 4, 6)])
+def test_ling_vision_checkpoint_and_projector_execute_after_reload(tmp_path, bailing_vision_checkpoint, grid):
+    config, reference, projector = bailing_vision_checkpoint
+    visual = load_bailing_visual(config, 12, str(tmp_path))
+    model = BailingVLVisualModel(config, visual, 12, ir.DataType.FLOAT)
+    model.save_model(str(tmp_path))
+    patches = torch.linspace(-1, 1, int(np.prod(grid)) * 24).reshape(-1, 24)
+    image_grid = torch.tensor([grid], dtype=torch.int64)
+    with torch.no_grad():
+        expected = projector(reference(patches, grid_thw=image_grid).pooler_output).numpy()
+    session = ort.InferenceSession(str(tmp_path / "vision.onnx"), providers=["CPUExecutionProvider"])
+    actual = session.run(None, {"pixel_values": patches.numpy(), "image_grid_thw": image_grid.numpy()})[0]
+
+    assert config.out_hidden_size == 64
+    assert actual.shape == (int(np.prod(grid)) // 4, 12)
+    assert (tmp_path / "vision.onnx.data").exists()
+    np.testing.assert_allclose(actual, expected, atol=2e-6, rtol=2e-5)
+
+
+@pytest.mark.parametrize("grid", [(1, 2, 2), (1, 4, 6)])
+def test_ling_bf16_vision_preserves_boundaries_with_fp16_arithmetic(tmp_path, bailing_vision_checkpoint, grid):
+    config, reference, projector = bailing_vision_checkpoint
+    visual = load_bailing_visual(config, 12, str(tmp_path))
+    model = BailingVLVisualModel(config, visual, 12, ir.DataType.BFLOAT16)
+    model.save_model(str(tmp_path))
+    patches = torch.linspace(-1, 1, int(np.prod(grid)) * 24).reshape(-1, 24).to(torch.bfloat16)
+    image_grid = torch.tensor([grid], dtype=torch.int64)
+    with torch.no_grad():
+        expected = projector(reference(patches.float(), grid_thw=image_grid).pooler_output).numpy()
+    session = ort.InferenceSession(str(tmp_path / "vision.onnx"), providers=["CPUExecutionProvider"])
+    output = torch.empty((int(np.prod(grid)) // 4, 12), dtype=torch.bfloat16)
+    binding = session.io_binding()
+    binding.bind_input("pixel_values", "cpu", 0, onnx.TensorProto.BFLOAT16, patches.shape, patches.data_ptr())
+    binding.bind_cpu_input("image_grid_thw", image_grid.numpy())
+    binding.bind_output("image_features", "cpu", 0, onnx.TensorProto.BFLOAT16, output.shape, output.data_ptr())
+    session.run_with_iobinding(binding)
+
+    assert session.get_inputs()[0].type == session.get_outputs()[0].type == "tensor(bfloat16)"
+    assert model.graph.initializers["visual.patch_embed.proj.weight"].dtype == ir.DataType.FLOAT16
+    np.testing.assert_allclose(output.float().numpy(), expected, atol=0.002, rtol=0.02)
+
+
+@pytest.mark.parametrize("key", ["linear_proj.0.weight", "model.visual.merger.norm.bias"])
+def test_ling_vision_rejects_missing_component_weights(tmp_path, bailing_vision_checkpoint, key):
+    from safetensors.torch import load_file  # noqa: PLC0415
+
+    config, _, _ = bailing_vision_checkpoint
+    tensors = load_file(tmp_path / "model.safetensors")
+    del tensors[key]
+    save_file(tensors, tmp_path / "model.safetensors")
+    with pytest.raises(ValueError, match=key):
+        load_bailing_visual(config, 12, str(tmp_path))
+
+
+@pytest.mark.parametrize("q_lora_rank", [None, 8])
+def test_mla_query_projection_executes_direct_and_lora_paths(tmp_path, q_lora_rank):
+    model = _model(tmp_path, config_overrides={"q_lora_rank": q_lora_rank})
+    generator = torch.Generator().manual_seed(7)
+    weight = torch.randn(384, q_lora_rank or 128, generator=generator) * 0.1
+    hidden = torch.randn(1, 3, 128, generator=generator)
+    model.graph.inputs.append(model.make_value("hidden", ir.DataType.FLOAT, [1, 3, 128]))
+    if q_lora_rank is None:
+        attention = SimpleNamespace(q_proj=TensorModule(weight=weight))
+        expected = hidden @ weight.T
+    else:
+        low_rank = torch.randn(q_lora_rank, 128, generator=generator) * 0.1
+        norm = torch.randn(q_lora_rank, generator=generator)
+        attention = SimpleNamespace(
+            q_a_proj=TensorModule(weight=low_rank),
+            q_a_layernorm=TensorModule(weight=norm),
+            q_b_proj=TensorModule(weight=weight),
+        )
+        expected = torch.nn.functional.rms_norm(hidden @ low_rank.T, [q_lora_rank], norm, eps=1e-6) @ weight.T
+    name = model.make_mla_query(3, attention, "hidden")
+    model.graph.outputs.append(model.values[f"{name}/output_0"])
+    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    actual = session.run(None, {"hidden": hidden.numpy()})[0]
+    np.testing.assert_allclose(actual, expected.numpy(), atol=2e-6, rtol=2e-5)
+
+
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_direct_query_loader_preserves_source_pair_order(tmp_path, multimodal):
+    query = torch.arange(384, dtype=torch.float32).reshape(-1, 1).expand(-1, 128).contiguous()
+    kv = torch.arange(80, dtype=torch.float32).reshape(-1, 1).expand(-1, 128).contiguous()
+    save_file(
+        {
+            "model.word_embeddings.weight": torch.ones(32, 128),
+            "model.norm.weight": torch.ones(128),
+            "model.layers.3.attention.q_proj.weight": query,
+            "model.layers.3.attention.kv_a_proj_with_mqa.weight": kv,
+        },
+        tmp_path / "model.safetensors",
+    )
+    config = PretrainedConfig(
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        q_lora_rank=None,
+        kv_lora_rank=16,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        mrope_section=[8, 12, 12] if multimodal else None,
+    )
+    weights = BailingModel(str(tmp_path), config)
+    try:
+        attention = weights.make_mla_attention("model.layers.3.attention")
+        torch.testing.assert_close(attention.q_proj.weight, query, rtol=0, atol=0)
+        torch.testing.assert_close(attention.kv_a_proj_with_mqa.weight, kv, rtol=0, atol=0)
+    finally:
+        weights.close()
+
+
+@pytest.mark.parametrize(
+    "text_only,text_coordinates,dtype,quantized",
+    [
+        (False, False, ir.DataType.FLOAT16, False),
+        (False, True, ir.DataType.FLOAT16, False),
+        (True, True, ir.DataType.FLOAT16, False),
+        (False, False, ir.DataType.BFLOAT16, False),
+        (False, True, ir.DataType.BFLOAT16, False),
+        (False, False, ir.DataType.FLOAT16, True),
+        (False, False, ir.DataType.BFLOAT16, True),
+    ],
+)
+def test_ling_packed_rotary_matches_adjacent_pairs_and_reuses_current_rows(
+    tmp_path, text_only, text_coordinates, dtype, quantized
+):
+    model = _model(
+        tmp_path,
+        model_class=BailingVLTextModel,
+        use_paged_attention=True,
+        dtype=dtype,
+        precision=ir.DataType.INT4 if quantized else dtype,
+        op_types_to_quantize=["MatMul", "Gather"],
+        ep="cuda",
+        text_only=text_only,
+        config_overrides={"q_lora_rank": None, "mrope_section": [8, 12, 12]},
+    )
+    position_shape = ["num_tokens"] if text_only else [3, "num_tokens"]
+    model.graph.inputs.append(model.make_value("position_ids", ir.DataType.INT64, position_shape))
+    positions = np.array(
+        [[1, 3, 5]] * 3 if text_coordinates else [[0, 3, 127], [-128, 4, 126], [127, -8, -127]], dtype=np.int64
+    )
+    feeds = {"position_ids": positions[0] if text_only else positions}
+    expected = []
+    for label, heads in (("query", 2), ("key", 1)):
+        shape = [3, heads, 64]
+        data = np.sin(np.arange(np.prod(shape), dtype=np.float32) * 0.03).reshape(shape).astype(np.float16)
+        if dtype == ir.DataType.BFLOAT16:
+            data = torch.from_numpy(data).bfloat16().float().numpy()
+        feeds[label] = data.astype(np.float32).reshape(3, -1)
+        input_shape = ["num_tokens", heads * 64]
+        model.graph.inputs.append(model.make_value(label, ir.DataType.FLOAT, input_shape))
+        model.make_cast(f"/{label}/Cast", label, dtype, input_shape)
+        output = model.make_mla_rope(f"/{label}/rotary", f"/{label}/Cast/output_0", heads, ["num_tokens"])
+        model.make_cast(f"/{label}/Result", output, ir.DataType.FLOAT, input_shape)
+        output = f"/{label}/Result/output_0"
+        model.graph.outputs.append(model.values[output])
+        owners = np.array([1, 2] * 12 + [0] * 8)
+        frequencies = 1 / 10000 ** (np.arange(32, dtype=np.float32) * 2 / 64)
+        angles = positions[owners, :].T.astype(np.float32) * frequencies
+        cos, sin = np.cos(angles).astype(np.float32)[:, None], np.sin(angles).astype(np.float32)[:, None]
+        values = data.astype(np.float32)
+        rotated = np.empty_like(values)
+        rotated[..., 0::2] = values[..., 0::2] * cos - values[..., 1::2] * sin
+        rotated[..., 1::2] = values[..., 1::2] * cos + values[..., 0::2] * sin
+        target_dtype = torch.bfloat16 if dtype == ir.DataType.BFLOAT16 else torch.float16
+        expected.append(torch.from_numpy(rotated).to(target_dtype).float().numpy().reshape(3, -1))
+    model.save_model(str(tmp_path))
+    serialized = onnx.load(tmp_path / model.filename, load_external_data=False)
+    if not text_only:
+        initializers = {tensor.name: tensor for tensor in serialized.graph.initializer}
+        assert initializers["cos_cache"].data_type == onnx.TensorProto.FLOAT
+        assert initializers["sin_cache"].data_type == onnx.TensorProto.FLOAT
+    session = ort.InferenceSession(str(tmp_path / model.filename), providers=["CPUExecutionProvider"])
+    actual = session.run(None, feeds)
+    for output, reference in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(output, reference, rtol=2e-3, atol=1e-3)
+    cache_gathers = [
+        node for node in model.graph if node.name.startswith("/model/rotary/packed/cos_") and node.op_type == "Gather"
+    ]
+    assert len(cache_gathers) == (0 if text_only else 3)
+
+
+@pytest.mark.parametrize("name", ["expert_swiglu_limit_list", "share_expert_swiglu_limit_list"])
+@pytest.mark.parametrize("limits", [[4], [0, 0, -4, 0], [0, 0, float("nan"), 0]])
+def test_invalid_expert_limits_rejected(tmp_path, name, limits):
+    with pytest.raises(ValueError, match=name):
+        _model(tmp_path, config_overrides={name: limits})
+
+
+def test_shared_expert_post_silu_limit_does_not_leak_between_layers(tmp_path):
+    model = _model(tmp_path, config_overrides={"share_expert_swiglu_limit_list": [0, 0, 4, 0]})
+    model.intermediate_size = 2
+    gate = torch.zeros(2, 128)
+    gate[:, 0] = torch.tensor([10, -10])
+    up = torch.zeros(2, 128)
+    up[:, 0] = torch.tensor([2, -10])
+    down = torch.zeros(128, 2)
+    down[:2, :2] = torch.eye(2)
+    mlp = SimpleNamespace(
+        gate_proj=TensorModule(weight=gate), up_proj=TensorModule(weight=up), down_proj=TensorModule(weight=down)
+    )
+    hidden = torch.zeros(1, 3, 128)
+    hidden[0, :, 0] = torch.tensor([1, 0.4, -1])
+    model.graph.inputs.append(model.make_value("hidden", ir.DataType.FLOAT, list(hidden.shape)))
+    for layer_id in (2, 3):
+        model.make_mlp_proj(layer_id, mlp, "hidden")
+        model.graph.outputs.append(model.values[model.mlp_attrs["output_0"]])
+    session = ort.InferenceSession(ir.to_proto(model.model).SerializeToString(), providers=["CPUExecutionProvider"])
+    clipped, unbounded = session.run(None, {"hidden": hidden.numpy()})
+    expected_gate = torch.nn.functional.silu(hidden @ gate.T)
+    expected_up = hidden @ up.T
+    expected_clipped = (expected_gate.clamp(max=4) * expected_up.clamp(-4, 4)) @ down.T
+    expected_unbounded = (expected_gate * expected_up) @ down.T
+    np.testing.assert_allclose(clipped, expected_clipped.numpy(), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(unbounded, expected_unbounded.numpy(), rtol=1e-6, atol=1e-6)
+    assert clipped[0, 0, 0] == 8
+
+
+@pytest.mark.parametrize(
+    ("dtype", "provider"),
+    [
+        (ir.DataType.BFLOAT16, "CUDAExecutionProvider"),
+        (ir.DataType.FLOAT16, "CUDAExecutionProvider"),
+        (ir.DataType.FLOAT16, "CPUExecutionProvider"),
+        (ir.DataType.FLOAT, "CUDAExecutionProvider"),
+        (ir.DataType.FLOAT, "CPUExecutionProvider"),
+    ],
+)
+def test_shared_clamps_execute_without_changing_activation_precision(tmp_path, dtype, provider):
+    model = _model(tmp_path, dtype=dtype)
+    torch_dtype = {
+        ir.DataType.BFLOAT16: torch.bfloat16,
+        ir.DataType.FLOAT16: torch.float16,
+        ir.DataType.FLOAT: torch.float32,
+    }[dtype]
+    values = torch.tensor([-12, -4.03125, -4, -3.984375, 0, 3.984375, 4, 4.03125, 12], dtype=torch_dtype)
+    gate = values.repeat_interleave(len(values)).contiguous()
+    up = values.repeat(len(values)).contiguous()
+    shape = list(gate.shape)
+    for name in ("gate", "up"):
+        model.graph.inputs.append(model.make_value(name, model.io_dtype, shape))
+    result = Standard.make_clipped_swiglu(model, "/clipped", "gate", "up", 4, shape)
+    model.graph.outputs.append(model.values[result])
+    model.graph.outputs.append(model.values["/clipped/SiLU/output_0"])
+    model.save_model(str(tmp_path))
+    session = kernel_session(model, provider)
+    inputs = session.io_binding()
+    inputs.bind_input("gate", "cpu", 0, int(dtype), shape, gate.data_ptr())
+    inputs.bind_input("up", "cpu", 0, int(dtype), shape, up.data_ptr())
+    output = torch.empty_like(gate)
+    activation = torch.empty_like(gate)
+    inputs.bind_output(result, "cpu", 0, int(dtype), shape, output.data_ptr())
+    inputs.bind_output("/clipped/SiLU/output_0", "cpu", 0, int(dtype), shape, activation.data_ptr())
+    session.run_with_iobinding(inputs)
+    # Isolate clipping from provider-specific low-precision SiLU and QuickGelu numerics.
+    expected = activation.clamp(max=4) * up.clamp(-4, 4)
+    torch.testing.assert_close(output, expected)
+    for name in ("/clipped/Sigmoid", "/clipped/SiLU"):
+        node = next(node for node in model.graph if node.name == name)
+        assert all(value.dtype == model.io_dtype for value in (*node.inputs, *node.outputs))
+    clips = [node for node in model.graph if node.op_type == "Clip"]
+    assert len(clips) == 2
+    clip_dtype = ir.DataType.FLOAT if dtype == ir.DataType.BFLOAT16 else dtype
+    assert all(node.inputs[0].dtype == node.outputs[0].dtype == clip_dtype for node in clips)
+    if dtype != ir.DataType.BFLOAT16:
+        assert not any(node.op_type == "Cast" for node in model.graph)
+
+
+@pytest.mark.parametrize(
+    ("precision", "quant_method"),
+    [(ir.DataType.BFLOAT16, None), (ir.DataType.BFLOAT16, "fp8"), (ir.DataType.INT4, None), (ir.DataType.INT8, None)],
+)
+@pytest.mark.parametrize("routed_limits", [None, [0, 0, 4, 0]])
+def test_routed_expert_clipping_is_per_call_and_preserves_unbounded_layers(
+    tmp_path, precision, quant_method, routed_limits
+):
+    model = _model(
+        tmp_path,
+        dtype=ir.DataType.BFLOAT16,
+        precision=precision,
+        ep="cuda",
+        quant_method=quant_method,
+        config_overrides={
+            "expert_swiglu_limit_list": routed_limits,
+            "share_expert_swiglu_limit_list": [0, 0, 0, 7],
+        },
+    )
+    model.make_mlp_proj = Mock()
+    model.mlp_attrs["output_0"] = "shared"
+    original_attrs = model.moe_attrs.copy()
+    for layer_id in (2, 3):
+        model.make_moe_subgraph(
+            layer_id, SimpleNamespace(shared_experts=None), "hidden", router_probs="router", output_scale="scale"
+        )
+        name = f"/model/layers.{layer_id}/moe/{model.moe_attrs['op_type']}/output_0"
+        node = model.values[name].producer()
+        if routed_limits is not None and routed_limits[layer_id] > 0:
+            assert node.attributes["swiglu_limit"].as_float() == routed_limits[layer_id]
+            assert node.attributes["swiglu_limit_after_activation"].as_int() == 1
+        else:
+            assert "swiglu_limit" not in node.attributes
+            assert "swiglu_limit_after_activation" not in node.attributes
+    assert model.moe_attrs == original_attrs
+
+
 @pytest.mark.parametrize("trust", [False, True])
 def test_config_failure_preserves_remote_code_policy(tmp_path, monkeypatch, trust):
     load_config = Mock(side_effect=ValueError("custom configuration requires remote code"))
@@ -253,6 +1092,7 @@ def test_config_failure_preserves_remote_code_policy(tmp_path, monkeypatch, trus
     monkeypatch.setattr(builder.AutoConfig, "from_pretrained", load_config)
     monkeypatch.setattr(builder.AutoTokenizer, "from_pretrained", tokenizer)
     monkeypatch.setattr(builder.LFM2AudioModel, "load_config", Mock(return_value=None))
+    monkeypatch.setattr(builder.BailingVLModel, "load_config", Mock(return_value=None))
     options = {"hf_remote": trust}
 
     with pytest.raises(ValueError, match="requires remote code"):
@@ -388,6 +1228,43 @@ def test_block_fp8_metadata_and_partial_blocks_survive_concatenation(tmp_path):
     np.testing.assert_array_equal(node.inputs[2].const_value.numpy(), np.concatenate([normalized, normalized]))
 
 
+@pytest.mark.parametrize(
+    ("dtype", "packed"),
+    [
+        (ir.DataType.FLOAT, False),
+        (ir.DataType.FLOAT16, False),
+        (ir.DataType.BFLOAT16, False),
+        (ir.DataType.FLOAT16, True),
+        (ir.DataType.BFLOAT16, True),
+    ],
+)
+@pytest.mark.parametrize("precision", [ir.DataType.INT4, ir.DataType.INT8, ir.DataType.BFLOAT16])
+def test_group_router_keeps_projection_and_selection_in_fp32(tmp_path, dtype, precision, packed):
+    model = _model(
+        tmp_path, dtype=dtype, precision=precision, ep="cuda" if packed else "cpu", use_paged_attention=packed
+    )
+    model.moe_attrs["num_experts"] = 512
+    model.model.graph.inputs.append(model.make_value("hidden", dtype, model.make_hidden_state_shape()))
+    gate = TensorModule(weight=torch.linspace(-1, 1, 512 * 128).reshape(512, 128).to(torch.bfloat16))
+    moe = SimpleNamespace(gate=gate, expert_bias=torch.zeros(512))
+
+    scores, _ = model.make_moe_router(2, moe, "hidden")
+
+    projection = model.values["/model/layers.2/moe/router/MatMul/output_0"].producer()
+    router = model.values["/model/layers.2/moe/router/MoEGroupRouter/output_0"].producer()
+    assert projection.inputs[0].dtype == ir.DataType.FLOAT
+    assert projection.inputs[1].dtype == ir.DataType.FLOAT
+    assert projection.outputs[0].dtype == ir.DataType.FLOAT
+    assert router.inputs[0] is projection.outputs[0]
+    assert router.outputs[0].dtype == ir.DataType.FLOAT
+    assert projection.name in model.quant_attrs["nodes_to_exclude"]
+    assert model.values[scores].dtype == dtype
+    if dtype != ir.DataType.FLOAT:
+        assert model.values[scores].producer().inputs[0] is router.outputs[0]
+    model.graph.outputs.append(model.values[scores])
+    onnx.shape_inference.infer_shapes(ir.serde.serialize_model(model.model), strict_mode=True)
+
+
 @pytest.mark.parametrize("activation", [None, "silu", "sigmoid"])
 def test_trt_rms_norm_expansion_matches_gate_math(tmp_path, activation):
     model = _model(tmp_path, ep="trt-rtx")
@@ -515,17 +1392,20 @@ def prepare_cuda_provider():
     register_cuda_plugin_ep()
 
 
-def kernel_session(model, provider, required_op):
+def kernel_session(model, provider, required_op=None):
     def unavailable(reason):
         if os.environ.get("ORTGENAI_REQUIRE_BAILING_KERNELS") == "1":
             pytest.fail(reason)
         pytest.skip(reason)
 
     schemas = {schema.name: schema for schema in get_all_operator_schema() if schema.domain == "com.microsoft"}
-    if required_op not in schemas or (
-        required_op == "GatedDeltaNet" and "gate_lower_bound" not in schemas[required_op].attributes
+    if required_op is not None and (
+        required_op not in schemas
+        or (required_op == "GatedDeltaNet" and "gate_lower_bound" not in schemas[required_op].attributes)
     ):
         unavailable(f"Requires an ONNX Runtime build with {required_op} from ORT PR #33817")
+    if required_op in {"MoE", "QMoE"} and "swiglu_limit_after_activation" not in schemas[required_op].attributes:
+        unavailable(f"Requires an ONNX Runtime build with post-SiLU {required_op} clipping from ORT PR #33954")
     if provider == "CUDAExecutionProvider":
         try:
             prepare_cuda_provider()
@@ -540,6 +1420,56 @@ def kernel_session(model, provider, required_op):
     return ort.InferenceSession(
         ir.serde.serialize_model(model.model).SerializeToString(), sess_options=options, providers=[provider]
     )
+
+
+@pytest.mark.parametrize("precision", [ir.DataType.FLOAT16, ir.DataType.INT4])
+def test_builder_emitted_clipped_experts_execute_source_post_silu_order(tmp_path, precision):
+    model = _model(
+        tmp_path,
+        dtype=ir.DataType.FLOAT16,
+        precision=precision,
+        ep="cuda",
+        use_paged_attention=True,
+        config_overrides={
+            "num_experts": 2,
+            "num_experts_per_tok": 1,
+            "n_group": 1,
+            "topk_group": 1,
+            "norm_topk_prob": True,
+            "moe_shared_expert_intermediate_size": 128,
+            "expert_swiglu_limit_list": [0, 0, 4, 0],
+        },
+    )
+    hidden = torch.zeros(3, model.hidden_size, dtype=torch.float16)
+    hidden[:, 0] = torch.tensor([1, 0.4, -1], dtype=torch.float16)
+    gate_up = torch.zeros(2, 2 * model.intermediate_size, model.hidden_size)
+    gate_up[:, 0, 0] = 10
+    gate_up[:, model.intermediate_size, 0] = 2
+    down = torch.zeros(2, model.hidden_size, model.intermediate_size)
+    down[:, 0, 0] = 1
+    shared = SimpleNamespace(
+        gate_proj=TensorModule(weight=torch.zeros(128, model.hidden_size)),
+        up_proj=TensorModule(weight=torch.zeros(128, model.hidden_size)),
+        down_proj=TensorModule(weight=torch.zeros(model.hidden_size, 128)),
+    )
+    moe = SimpleNamespace(
+        gate=TensorModule(weight=torch.zeros(2, model.hidden_size)),
+        expert_bias=torch.zeros(2),
+        experts=SimpleNamespace(gate_up_proj=gate_up, down_proj=down),
+        shared_experts=shared,
+    )
+    model.graph.inputs.append(model.make_value("hidden", model.io_dtype, list(hidden.shape)))
+    model.make_moe(2, moe, "hidden")
+    model.graph.outputs.append(model.values[model.layernorm_attrs["skip_input"]])
+    actual = kernel_session(model, "CUDAExecutionProvider", model.moe_attrs["op_type"]).run(
+        None, {"hidden": hidden.numpy()}
+    )[0]
+    expected = torch.zeros_like(hidden)
+    gates = (hidden[:, 0].float() * 10).half().float()
+    ups = (hidden[:, 0].float() * 2).half().float()
+    expected[:, 0] = torch.nn.functional.silu(gates).clamp(max=4) * ups.clamp(-4, 4)
+    np.testing.assert_allclose(actual, expected.numpy(), rtol=2e-3, atol=1e-3)
+    assert actual[0, 0] == 8
 
 
 @pytest.mark.parametrize("provider", ["CPUExecutionProvider", "CUDAExecutionProvider"])

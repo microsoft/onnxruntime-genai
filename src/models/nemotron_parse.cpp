@@ -390,6 +390,7 @@ NemotronParseModel::NemotronParseModel(std::unique_ptr<Config> config,
       ConfigureDecoderSession(*options, *config_, min_length, opt_length, max_length);
       CreateSessionOptionsFromConfig(session_config, *options,
                                      /*is_primary_session_options=*/false, disable_graph_capture);
+      AddGgufInitializers(*options);
       return options;
     };
     session_options_->AddFreeDimensionOverrideByName("sequence_length", 1);
