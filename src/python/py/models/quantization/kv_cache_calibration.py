@@ -406,6 +406,12 @@ def _numpy_dtype(ort_type: str) -> np.dtype:
         raise ValueError(f"Unsupported calibration model input type '{ort_type}'.") from error
 
 
+def is_kv_cache_input(name):
+    return name.startswith(("past_keys_", "past_values_")) or (
+        name.startswith("past_key_values.") and name.endswith((".key", ".value"))
+    )
+
+
 def run_calibration_batch(session, output_names, feeds):
     """Capture floating caches while preserving BF16 bits and paged GPU aliases."""
     input_types = {meta.name: meta.type for meta in session.get_inputs()}
@@ -418,7 +424,7 @@ def run_calibration_batch(session, output_names, feeds):
     cache_device = "cuda" if paged and "CUDAExecutionProvider" in session.get_providers() else "cpu"
     ort = importlib.import_module("onnxruntime") if paged else None
     for name, values in arrays.items():
-        if paged and name.startswith(("past_keys_", "past_values_", "past_key_values.")):
+        if paged and is_kv_cache_input(name):
             buffer = ort.OrtValue.ortvalue_from_numpy(values, cache_device, 0)
             cache_buffers[name] = buffer
             dtype = 16 if input_types[name] == "tensor(bfloat16)" else values.dtype
@@ -456,7 +462,7 @@ def run_calibration_batch(session, output_names, feeds):
     return outputs
 
 
-def make_paged_calibration_feeds(input_metas, input_ids):
+def make_paged_calibration_feeds(input_metas, input_ids, block_size=None):
     """Allocate contiguous single-sequence prefill pages and their scheduler metadata."""
     seq_len = input_ids.size
     feeds = {
@@ -465,13 +471,28 @@ def make_paged_calibration_feeds(input_metas, input_ids):
         "past_sequence_lengths": np.asarray([0], dtype=np.int32),
     }
     for name, meta in input_metas.items():
-        if name.startswith(("past_keys_", "past_values_", "past_key_values.")):
-            if len(meta.shape) != 4 or any(not isinstance(dim, int) or dim <= 0 for dim in meta.shape[1:]):
-                raise ValueError(f"Paged calibration requires concrete cache block/head dimensions, got {meta.shape}.")
-            block_size = meta.shape[1]
-            num_blocks = (seq_len + block_size - 1) // block_size
-            feeds[name] = np.zeros((num_blocks, *meta.shape[1:]), dtype=_numpy_dtype(meta.type))
-    if not any(name.startswith(("past_keys_", "past_key_values.")) for name in feeds):
+        if is_kv_cache_input(name):
+            if len(meta.shape) != 4:
+                raise ValueError(f"Paged calibration requires rank-4 attention caches, got {meta.shape}.")
+            cache_shape = list(meta.shape[1:])
+            if not isinstance(cache_shape[0], int):
+                cache_shape[0] = block_size
+            if any(type(dim) is not int or dim <= 0 for dim in cache_shape):
+                raise ValueError(
+                    "Paged calibration requires concrete cache block/head dimensions; configure symbolic "
+                    f"block_size in genai_config.json engine.dynamic_batching.block_size, got {meta.shape}."
+                )
+            num_blocks = (seq_len + cache_shape[0] - 1) // cache_shape[0]
+            feeds[name] = np.zeros((num_blocks, *cache_shape), dtype=_numpy_dtype(meta.type))
+        elif name.startswith("past_key_values."):
+            feeds[name] = np.zeros(
+                tuple(1 if not isinstance(dim, int) else dim for dim in meta.shape),
+                dtype=_numpy_dtype(meta.type),
+            )
+    if not any(
+        name.startswith("past_keys_") or (name.startswith("past_key_values.") and name.endswith(".key"))
+        for name in feeds
+    ):
         raise ValueError("Paged calibration model has no key-cache inputs.")
     for name in ("block_table", "block_table_windowed"):
         if name in input_metas:
@@ -479,7 +500,16 @@ def make_paged_calibration_feeds(input_metas, input_ids):
     if "attention_metadata" in input_metas:
         feeds["attention_metadata"] = np.asarray([seq_len, seq_len, 1], dtype=np.int32)
     if "position_ids" in input_metas:
-        feeds["position_ids"] = np.arange(seq_len, dtype=_numpy_dtype(input_metas["position_ids"].type))
+        meta = input_metas["position_ids"]
+        positions = np.arange(seq_len, dtype=_numpy_dtype(meta.type))
+        if len(meta.shape) == 2:
+            position_axes = meta.shape[0]
+            if type(position_axes) is not int or position_axes <= 0:
+                raise ValueError("Rank-2 packed position_ids must have a concrete positive leading dimension.")
+            positions = np.broadcast_to(positions, (position_axes, seq_len)).copy()
+        elif len(meta.shape) != 1:
+            raise ValueError(f"Unsupported packed position_ids shape {meta.shape}.")
+        feeds["position_ids"] = positions
     return feeds
 
 
@@ -590,6 +620,12 @@ def calibrate_kv_scales(
 
     input_metas = {meta.name: meta for meta in sess.get_inputs()}
     paged = "cumulative_sequence_lengths" in input_metas
+    paged_block_size = None
+    if paged:
+        config_path = Path(model_path).parent / "genai_config.json"
+        if config_path.is_file():
+            with config_path.open(encoding="utf-8") as file:
+                paged_block_size = json.load(file).get("engine", {}).get("dynamic_batching", {}).get("block_size")
     output_names = [o.name for o in sess.get_outputs()]
     present_keys = {
         int(name.split(".")[1]): name
@@ -675,7 +711,7 @@ def calibrate_kv_scales(
 
     for pi, input_ids in enumerate(seqs):
         seq_len = input_ids.shape[1]
-        feeds = make_paged_calibration_feeds(input_metas, input_ids) if paged else {
+        feeds = make_paged_calibration_feeds(input_metas, input_ids, paged_block_size) if paged else {
             "input_ids": input_ids.astype(_numpy_dtype(input_metas["input_ids"].type), copy=False),
             "attention_mask": np.ones(
                 (1, seq_len), dtype=_numpy_dtype(input_metas["attention_mask"].type)

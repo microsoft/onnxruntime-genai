@@ -2418,7 +2418,12 @@ class Model:
 
         # Save any constants as nodes
         for input_name in inputs:
-            if input_name.startswith("/model/constants") and input_name not in self.node_names:
+            if not input_name.startswith("/model/constants"):
+                continue
+            value = self.values.get(input_name)
+            if value is None or (
+                value.producer() is None and value.const_value is None and not value.is_graph_input()
+            ):
                 self.make_constant(input_name)
 
         # Resolve values from names
