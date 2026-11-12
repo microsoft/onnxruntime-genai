@@ -12,7 +12,6 @@ import json
 import os
 import struct
 import sys
-import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -43,35 +42,21 @@ def align_up(val: int, align: int = ALIGN) -> int:
 
 
 FINGERPRINT_THREADS = 16
-# At least the coarsest file system timestamp granularity (FAT: 2 s).
-RACY_CHANGE_WINDOW_NS = 2_000_000_000
-_SHA256_BY_FILE_STATE: dict[tuple[int, int, int, int, int], str] = {}
 
 
 def file_sha256(path: Path) -> str:
     """Return the SHA-256 of the complete contents of `path`.
 
-    The digest is cached for the rest of the process under the file's device, inode, size, modification time and status
-    change time, which every write to or replacement of the file changes. A file last changed less than
-    `RACY_CHANGE_WINDOW_NS` before it was hashed is not cached, since a further change within the same timestamp tick
-    would leave its key unchanged.
+    Always read the file: writes through an already-dirty writable mmap can change its contents without changing its stat
+    metadata, so a stat-based digest cache cannot safely validate mutable checkpoints.
     """
-    st = path.stat()
-    key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-    digest = _SHA256_BY_FILE_STATE.get(key)
-    if digest is not None:
-        return digest
-    started_ns = time.time_ns()
     h = hashlib.sha256()
     buf = bytearray(4 << 20)
     view = memoryview(buf)
     with open(path, "rb", buffering=0) as f:
         while n := f.readinto(buf):
             h.update(view[:n])
-    digest = h.hexdigest()
-    if started_ns - max(st.st_mtime_ns, st.st_ctime_ns) > RACY_CHANGE_WINDOW_NS:
-        _SHA256_BY_FILE_STATE[key] = digest
-    return digest
+    return h.hexdigest()
 
 
 class HFCheckpointReader:

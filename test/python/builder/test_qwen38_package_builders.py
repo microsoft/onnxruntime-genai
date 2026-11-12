@@ -21,9 +21,11 @@ import copy
 import hashlib
 import importlib
 import json
+import mmap
 import os
 import struct
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -2069,10 +2071,8 @@ def test_lowbit_qmoe_bank_reuse_requires_matching_settings_and_publishes_atomica
     assert rebuilt_meta["mode"] == "sym_rtn"
 
 
-def test_checkpoint_fingerprint_covers_every_byte_and_rejects_stale_banks(builders, tmp_path, monkeypatch):
+def test_checkpoint_fingerprint_covers_every_byte_and_rejects_stale_banks(builders, tmp_path):
     pkg = builders.pkg
-    # Cache the digest of the freshly written shard too, so the edit below must also invalidate a cached digest.
-    monkeypatch.setattr(importlib.import_module("package_io"), "RACY_CHANGE_WINDOW_NS", -1)
     spec = (
         "fc1",
         3,
@@ -2112,6 +2112,71 @@ def test_checkpoint_fingerprint_covers_every_byte_and_rejects_stale_banks(builde
     pkg.ensure_qmoe_banks(fresh_pool, [spec], hf_dir=ckpt, num_layers=2)
     assert weights.read_bytes() != stale_bank
     assert weights.read_bytes() == (fresh_pool / spec[5]).read_bytes()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux writable-mmap timestamp behavior")
+@pytest.mark.parametrize("single_file", [True, False], ids=["single", "sharded"])
+@pytest.mark.parametrize("bits", [3, 4], ids=["lowbit", "int4"])
+def test_qmoe_bank_reuse_rehashes_checkpoint_after_writable_mmap_edits(builders, tmp_path, single_file, bits):
+    pkg = builders.pkg
+    ckpt = _make_mini_qmoe_hf_checkpoint(tmp_path / "ckpt", num_layers=2, single_file=single_file)
+    shard = ckpt / ("model.safetensors" if single_file else "model-00001-of-00001.safetensors")
+    spec = (
+        "fc1",
+        3,
+        64,
+        "mse",
+        False,
+        "qmoe_fc1_int3_b64.data",
+        "qmoe_fc1_int3_b64_scales.data",
+        [2, 128, 64 * 3 // 8],
+        [2, 128, 1],
+    )
+
+    def ensure_bank(pool):
+        if bits == 4:
+            pkg.ensure_qmoe_int4_bank(
+                pool, hf_dir=ckpt, num_layers=2, num_experts=2, hidden_size=64, inter_size=64, bs4=32
+            )
+        else:
+            pkg.ensure_qmoe_banks(pool, [spec], hf_dir=ckpt, num_layers=2)
+
+    pool = tmp_path / "pool"
+    weights_name = "qmoe_int4.data" if bits == 4 else spec[5]
+    weights = pool / weights_name
+    reader = pkg.HFCheckpointReader(ckpt)
+    with open(shard, "r+b") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_WRITE) as mapped:
+        header_len = struct.unpack("<Q", mapped[:8])[0]
+        header = json.loads(mapped[8 : 8 + header_len])
+        start, end = header["model.language_model.layers.0.mlp.experts.gate_up_proj"]["data_offsets"]
+        begin, end = 8 + header_len + start, 8 + header_len + end
+        # Dirty every affected page before hashing, then age past the former two-second cache guard.
+        mapped[begin:end] = mapped[begin:end]
+        time.sleep(2.1)
+        ensure_bank(pool)
+        stale_bank = weights.read_bytes()
+        fingerprint = reader.checkpoint_fingerprint()
+        assert pkg.checkpoint_fingerprint(ckpt) == fingerprint
+        before = shard.stat()
+
+        negated = np.frombuffer(mapped[begin:end], dtype=np.uint16) ^ np.uint16(0x8000)
+        mapped[begin:end] = negated.tobytes()
+        after = shard.stat()
+        assert (after.st_size, after.st_mtime_ns, after.st_ctime_ns) == (
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        assert reader.checkpoint_fingerprint() != fingerprint
+        assert pkg.checkpoint_fingerprint(ckpt) == reader.checkpoint_fingerprint()
+
+        ensure_bank(pool)
+        fresh_pool = tmp_path / "fresh_pool"
+        ensure_bank(fresh_pool)
+        assert weights.read_bytes() != stale_bank
+        assert weights.read_bytes() == (fresh_pool / weights_name).read_bytes()
+        bank_meta = json.loads((pool / "qmoe_bank_metadata.json").read_text(encoding="utf-8"))["banks"][weights_name]
+        assert bank_meta["checkpoint_fingerprint"] == reader.checkpoint_fingerprint()
 
 
 def test_precision_conversion_updates_bank_metadata_and_supports_fp32_position_reuse(builders, tmp_path):
