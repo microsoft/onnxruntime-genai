@@ -1165,6 +1165,126 @@ def test_fp32_finish_and_residual_norm_stay_finite(tmp_path, with_conv):
     np.testing.assert_allclose(actual, expected.astype(np.float16), rtol=1e-3, atol=1e-3)
 
 
+def make_dynamic_grouped_conv_model(draft_dir, dtype, fused, rows=13):
+    builder = DFlash2Builder(
+        draft_dir, draft_dir, dtype, 256, 128, compute_dtype=dtype, ep="cuda" if fused else "cpu"
+    )
+    builder.graph.inputs.append(builder.make_value("hidden", dtype, [rows, builder.hidden_size]))
+    mask = builder._block_shift_mask("hidden")
+    projection = torch.diag(torch.arange(1, 9, dtype=torch.float32) / 32)
+    deltas = builder._conv_coefficients("/conv", "hidden", projection, rows)
+    kernels = torch.arange(32, dtype=torch.float32).reshape(2, 2, 2, 4) / 32 - 0.5
+    for side, name in enumerate(("prepare", "finish")):
+        output = builder._grouped_conv(f"/conv/{name}", "hidden", deltas[side], kernels[side], mask, rows)
+        builder.graph.outputs.append(builder.values[output])
+    builder.graph.sort()
+    return builder, kernels
+
+
+@pytest.mark.parametrize("dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+def test_dynamic_grouped_conv_preserves_offsets_masks_and_initial_state(tmp_path, dtype):
+    builder, kernels = make_dynamic_grouped_conv_model(_draft_checkpoint(tmp_path), dtype, fused=True)
+    convs = [node for node in builder.graph if node.op_type == "VarlenCausalConvWithState"]
+    assert len(convs) == 2
+    assert [node.attributes["delta_offset"].as_int() for node in convs] == [0, 2]
+    for side, node in enumerate(convs):
+        assert node.domain == "com.microsoft"
+        assert node.attributes["group_size"].as_int() == builder.group_size
+        assert node.inputs[2].name == builder.out("/dflash2/conv_offsets/Cast")
+        assert node.inputs[2].dtype == ir.DataType.INT32
+        assert node.inputs[6].name == builder.out("/conv/kernel_projection/Reshape")
+        assert node.inputs[7].name == builder.out("/dflash2/conv_mask/Reshape")
+        assert node.inputs[7].dtype == dtype
+        state = node.inputs[4]
+        assert list(state.shape) == ["conv_batch", builder.hidden_size, 1]
+        gather = state.producer().inputs[0].producer()
+        assert gather.op_type == "Gather"
+        assert gather.inputs[0].name == "hidden"
+        assert gather.inputs[1].name == builder.out("/dflash2/conv_seed/Max")
+        weight = onnx.numpy_helper.to_array(ir.serde.serialize_tensor(node.inputs[1].const_value)).astype(np.float32)
+        torch_dtype = torch.float16 if dtype == ir.DataType.FLOAT16 else torch.bfloat16
+        expected_weight = kernels[side].reshape(2, builder.hidden_size).flip(0).T.unsqueeze(1).to(torch_dtype)
+        np.testing.assert_array_equal(weight, expected_weight.float().numpy())
+    ranges = {node.name: node for node in builder.graph if node.op_type == "Range"}
+    assert set(ranges) == {"/dflash2/conv_mask/Range", "/dflash2/conv_offsets/Range"}
+    step = ranges["/dflash2/conv_offsets/Range"].inputs[2].producer().attributes["value"].as_tensor().numpy()
+    assert step == builder.block_size
+    offsets = convs[0].inputs[2].producer().inputs[0].producer()
+    assert offsets.op_type == "Concat"
+    assert offsets.inputs[0] is ranges["/dflash2/conv_offsets/Range"].outputs[0]
+    assert offsets.inputs[1].producer().op_type == "Reshape"
+    mask = convs[0].inputs[7].producer().inputs[0].producer().inputs[0].producer()
+    assert mask.op_type == "Greater"
+    assert mask.inputs[0].producer().op_type == "Mod"
+    onnx.checker.check_model(ir.serde.serialize_model(builder.model))
+
+
+@pytest.mark.parametrize("dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+@pytest.mark.parametrize("fused", [False, True])
+def test_dynamic_grouped_conv_matches_rounded_decomposition(tmp_path, dtype, fused):
+    if "CUDAExecutionProvider" not in ort.get_available_providers() or not torch.cuda.is_available():
+        pytest.skip("CUDA is required for FP16/BF16 convolution execution.")
+    if fused:
+        schemas = importlib.import_module("onnxruntime.capi._pybind_state").get_all_operator_schema()
+        if not any(
+            schema.name == "VarlenCausalConvWithState"
+            and len(schema.inputs) >= 8
+            and schema.inputs[6].name == "kernel_delta"
+            and schema.inputs[7].name == "previous_mask"
+            for schema in schemas
+        ):
+            pytest.skip("ORT requires the dynamic grouped VarlenCausalConvWithState kernel contract.")
+    torch_dtype = torch.float16 if dtype == ir.DataType.FLOAT16 else torch.bfloat16
+    rows = 13
+    hidden = torch.linspace(-3.7, 4.1, rows * 8).reshape(rows, 8).to(torch_dtype)
+    hidden[4] = torch.tensor([63.96875, -32.015625, 1.0009765625, -0.99951171875, 0.33325, -0.33325, 3.140625, -2.71875])
+    hidden[5] = hidden[0].flip(0)
+    hidden[9] = -hidden[4].flip(0)
+    hidden[10] = hidden[1].flip(0)
+    device_input = hidden.cuda().contiguous()
+    torch.cuda.synchronize()
+    draft_dir = _draft_checkpoint(tmp_path)
+    results = []
+    for use_fused in ((False, True) if fused else (False,)):
+        builder, kernels = make_dynamic_grouped_conv_model(draft_dir, dtype, use_fused, rows)
+        model_path = tmp_path / f"conv-{use_fused}.onnx"
+        builder.save_onnx_model(builder.model, model_path)
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        session = ort.InferenceSession(str(model_path), options, providers=["CUDAExecutionProvider"])
+        binding = session.io_binding()
+        binding.bind_input("hidden", "cuda", 0, int(dtype), tuple(device_input.shape), device_input.data_ptr())
+        outputs = [torch.empty_like(device_input) for _ in builder.graph.outputs]
+        for value, output in zip(builder.graph.outputs, outputs, strict=True):
+            binding.bind_output(value.name, "cuda", 0, int(dtype), tuple(output.shape), output.data_ptr())
+        session.run_with_iobinding(binding)
+        binding.synchronize_outputs()
+        results.append([output.float().cpu().numpy() for output in outputs])
+
+    projection = torch.diag(torch.arange(1, 9, dtype=torch.float32) / 32)
+    deltas = (hidden.float() @ projection.T).to(torch_dtype).reshape(rows, 4, 2)
+    shifted = torch.cat((hidden[:1], hidden[:-1]))
+    mask = (torch.arange(rows) % builder.block_size != 0).to(torch_dtype).reshape(rows, 1)
+    rounding_matters = False
+    for side in range(2):
+        base = kernels[side].to(torch_dtype)
+        current_coefficient = (base[0] + deltas[:, side * 2, :, None]).reshape(rows, 8).to(torch_dtype)
+        previous_coefficient = (base[1] + deltas[:, side * 2 + 1, :, None]).reshape(rows, 8).to(torch_dtype)
+        current = (hidden * current_coefficient).to(torch_dtype)
+        previous = (shifted * previous_coefficient).to(torch_dtype)
+        expected = (current + (previous * mask).to(torch_dtype)).to(torch_dtype)
+        unrounded_current = (base[0].float() + deltas[:, side * 2, :, None].float()).reshape(rows, 8)
+        unrounded_previous = (base[1].float() + deltas[:, side * 2 + 1, :, None].float()).reshape(rows, 8)
+        unrounded = hidden.float() * unrounded_current + shifted.float() * unrounded_previous * mask.float()
+        rounding_matters |= not torch.equal(expected, unrounded.to(torch_dtype))
+        for output in results:
+            np.testing.assert_array_equal(output[side], expected.float().numpy())
+            np.testing.assert_array_equal(output[side][[0, 5, 10]], current.float().numpy()[[0, 5, 10]])
+        if fused:
+            np.testing.assert_array_equal(results[0][side], results[1][side])
+    assert rounding_matters, "Samples must distinguish activation-dtype rounding from FP32 accumulation."
+
+
 def test_non_fp8_lm_head_preserves_target_layout_and_dtype(tmp_path):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),

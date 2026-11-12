@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "generator/generators.h"
+#include "models/preprocessing/processor.h"
 
 namespace Generators {
 
@@ -24,6 +25,7 @@ struct MediaItem {
   ~MediaItem();
 
   std::array<int64_t, 3> grid;
+  ImagePositionLayout positions;
   std::shared_ptr<Tensor> pixels;
   std::shared_ptr<Tensor> features;
   std::shared_ptr<MediaAccounting> accounting;
@@ -44,8 +46,8 @@ struct PreparedMediaTurn {
   std::vector<MediaSpan> media;
 };
 
-std::array<int64_t, 3> MediaPosition(std::span<const MediaSpan> media, size_t row, size_t merge_size);
-void MediaPositions(std::span<const MediaSpan> media, size_t first_row, size_t merge_size,
+std::array<int64_t, 3> MediaPosition(std::span<const MediaSpan> media, size_t row);
+void MediaPositions(std::span<const MediaSpan> media, size_t first_row,
                     const std::array<std::span<int64_t>, 3>& positions);
 std::array<int64_t, 3> MediaImageGrid(uint32_t width, uint32_t height, size_t patch, size_t merge,
                                       int64_t min_pixels, int64_t max_pixels);

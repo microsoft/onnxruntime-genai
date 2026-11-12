@@ -39,30 +39,10 @@ class OnnxSourceModel(Model):
         self.model.doc_string = source.doc_string
         self.graph.doc_string = source.graph.doc_string
         self.graph.metadata_props.update(source.graph.metadata_props)
-        self.filename = options.get("filename", "model.onnx")
-        if Path(self.filename).name != self.filename or not self.filename.endswith(".onnx"):
-            raise ValueError("ONNX source output filename must be a plain .onnx filename.")
-        self.kv_cache_attrs = {
-            "quant_scheme": scheme,
-            "quant_mode": "PER_CHANNEL",
-            "scales_path": options.get("kv_cache_scale_file", ""),
-            "prefill_shadow": options.get("int8_prefill_shadow", False),
-        }
+        self.make_config_init(decoder_config, options)
         cache_names = set()
         layer_by_key = {}
         if scheme != "none":
-            if decoder_config is None:
-                raise ValueError("Quantized ONNX source export requires the original decoder configuration.")
-            self.num_layers = decoder_config["num_hidden_layers"]
-            self.num_kv_heads = decoder_config["num_key_value_heads"]
-            self.head_size = decoder_config["head_size"]
-            self.use_paged_attention = True
-            self.input_names = {
-                "past_key_values.key": {
-                    layer_id: decoder_config["inputs"]["past_key_names"] % layer_id
-                    for layer_id in range(self.num_layers)
-                },
-            }
             source_inputs = {value.name: value for value in source.graph.inputs}
             for layer_id, key_name in self.input_names["past_key_values.key"].items():
                 layer_by_key[key_name] = layer_id
@@ -88,7 +68,7 @@ class OnnxSourceModel(Model):
         for value in source.graph.initializers.values():
             self.make_initializer(value.const_value, value.name)
         if scheme != "none":
-            for layer_id in range(self.num_layers):
+            for layer_id in self.input_names["past_key_values.key"]:
                 if any(name in self.graph.initializers for name in self.get_kv_cache_scale_names(layer_id)):
                     raise ValueError("ONNX source already contains KV scale initializers.")
             self.make_kv_cache_scale_initializers()
@@ -144,7 +124,7 @@ class OnnxSourceModel(Model):
                 metadata_props=dict(node.metadata_props),
                 **attributes,
             )
-        if scheme != "none" and quantized_layers != set(range(self.num_layers)):
+        if scheme != "none" and quantized_layers != set(self.input_names["past_key_values.key"]):
             raise ValueError("Every configured cache layer must have a PagedAttention node.")
         if self.kv_cache_attrs["prefill_shadow"] and shadow_layers == 0:
             raise ValueError("int8_prefill_shadow requires global causal INT8 per-channel caches with constant scales.")
@@ -152,11 +132,53 @@ class OnnxSourceModel(Model):
         if scheme != "none" or "onnxruntime_genai.kv_cache_quant_scheme" not in self.model.metadata_props:
             self.model.metadata_props["onnxruntime_genai.kv_cache_quant_scheme"] = scheme
 
+    def make_config_init(self, config, extra_options=None):
+        options = extra_options or {}
+        self.filename = options.get("filename", "model.onnx")
+        if Path(self.filename).name != self.filename or not self.filename.endswith(".onnx"):
+            raise ValueError("ONNX source output filename must be a plain .onnx filename.")
+        self.kv_cache_attrs = {
+            "quant_scheme": options.get("kv_cache_quant_scheme", "none"),
+            "quant_mode": "PER_CHANNEL",
+            "scales_path": options.get("kv_cache_scale_file", ""),
+            "prefill_shadow": options.get("int8_prefill_shadow", False),
+        }
+        if self.kv_cache_attrs["quant_scheme"] == "none":
+            return
+        if config is None:
+            raise ValueError("Quantized ONNX source export requires the original decoder configuration.")
+        self.num_layers = config["num_hidden_layers"]
+        self.num_kv_heads = config["num_key_value_heads"]
+        self.head_size = config["head_size"]
+        self.use_paged_attention = True
+        state_groups = config.get("state_groups")
+        layer_ids = (
+            list(range(self.num_layers))
+            if state_groups is None
+            else [
+                layer_id
+                for group in state_groups
+                if group["kind"] == "paged_kv"
+                for layer_id in group["layer_ids"]
+            ]
+        )
+        if (
+            not layer_ids
+            or any(type(layer_id) is not int or not 0 <= layer_id < self.num_layers for layer_id in layer_ids)
+            or len(set(layer_ids)) != len(layer_ids)
+        ):
+            raise ValueError("ONNX source paged KV layer IDs must be unique integers in the decoder layer range.")
+        self.input_names = {
+            "past_key_values.key": {
+                layer_id: config["inputs"]["past_key_names"] % layer_id for layer_id in layer_ids
+            },
+        }
+
     @classmethod
     def from_pretrained(cls, model_path, decoder_config=None, extra_options=None):
         path = Path(model_path).resolve()
         loader = ComponentModelLoader(path, "ONNX source")
-        source = loader.load()
+        source = loader.load(reject_sparse_initializers=True)
         loader.validate(allow_ort_extensions=True)
         ir.external_data.set_base_dir(source.graph, str(path.parent))
         return cls(source, decoder_config, {"filename": path.name, **(extra_options or {})})

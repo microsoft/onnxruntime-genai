@@ -27,7 +27,7 @@ class ComponentModelLoader:
     model_path: Path
     component_name: str
 
-    def load(self) -> ir.Model:
+    def load(self, *, reject_sparse_initializers: bool = False) -> ir.Model:
         """Parse source metadata without materializing external tensor data."""
         try:
             proto = onnx.load(self.model_path, load_external_data=False)
@@ -36,6 +36,8 @@ class ComponentModelLoader:
                 f"component {self.component_name!r} source is not a readable ONNX model: "
                 f"{self.model_path}"
             ) from error
+        if reject_sparse_initializers and proto.graph.sparse_initializer:
+            raise ValueError(f"component {self.component_name!r} source uses unsupported sparse initializers.")
         external_tensors = list(self.iter_external_tensors(proto))
         self.external_data_files(external_tensors)
         model = ir.serde.deserialize_model(proto)

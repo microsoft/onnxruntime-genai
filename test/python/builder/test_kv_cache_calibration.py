@@ -487,6 +487,76 @@ def test_detect_kv_shape_reads_paged_cache_dims():
     assert kvc._detect_kv_shape(session, "/nonexistent/model.onnx") == (8, 128)
 
 
+@pytest.mark.parametrize("block_dimension", [2, "block_size"])
+@pytest.mark.parametrize("position_planes", [None, 3])
+@pytest.mark.parametrize("cache_names", [("past_keys_3", "past_values_3"), ("past_key_values.3.key", "past_key_values.3.value")])
+def test_calibrate_paged_hybrid_model_resolves_input_shapes(
+    tmp_path, monkeypatch, block_dimension, position_planes, cache_names
+):
+    ir = pytest.importorskip("onnx_ir")
+    tokenizers = pytest.importorskip("tokenizers")
+
+    def value(name, dtype, shape):
+        return ir.Value(name=name, type=ir.TensorType(dtype), shape=ir.Shape(shape))
+
+    cache_shape = ["num_blocks", block_dimension, 1, 4]
+    keys = value(cache_names[0], ir.DataType.FLOAT, cache_shape)
+    values = value(cache_names[1], ir.DataType.FLOAT, cache_shape)
+    positions = value("position_ids", ir.DataType.INT64, [3, "tokens"] if position_planes else ["tokens"])
+    inputs = [
+        value("input_ids", ir.DataType.INT64, ["tokens"]),
+        value("cumulative_sequence_lengths", ir.DataType.INT32, [2]),
+        value("past_sequence_lengths", ir.DataType.INT32, [1]),
+        value("block_table", ir.DataType.INT32, [1, "num_blocks"]),
+        positions,
+        keys,
+        values,
+        value("past_key_values.0.conv_state", ir.DataType.FLOAT16, ["batch", 8, 3]),
+        value("past_key_values.0.recurrent_state", ir.DataType.FLOAT, ["batch", 2, 4, 4]),
+    ]
+    present_keys = value("present.3.key", ir.DataType.FLOAT, cache_shape)
+    present_values = value("present.3.value", ir.DataType.FLOAT, cache_shape)
+    key_delta = value("key_delta", ir.DataType.FLOAT, [])
+    value_delta = value("value_delta", ir.DataType.FLOAT, [])
+    graph = ir.Graph(
+        inputs=inputs,
+        outputs=[present_keys, present_values],
+        nodes=[
+            ir.node("Constant", inputs=[], outputs=[key_delta], attributes={"value": ir.tensor(np.float32(2))}),
+            ir.node("Constant", inputs=[], outputs=[value_delta], attributes={"value": ir.tensor(np.float32(4))}),
+            ir.node("Add", inputs=[keys, key_delta], outputs=[present_keys]),
+            ir.node("Add", inputs=[values, value_delta], outputs=[present_values]),
+        ],
+        opset_imports={"": 20},
+    )
+    model_path = tmp_path / "model.onnx"
+    ir.save(ir.Model(graph, ir_version=10), model_path)
+    (tmp_path / "genai_config.json").write_text(json.dumps({"engine": {"dynamic_batching": {"block_size": 2}}}))
+    tokenizer = tokenizers.Tokenizer(tokenizers.models.WordLevel({"[UNK]": 0, "a": 1, "b": 2, "c": 3}, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
+    tokenizer.save(str(tmp_path / "tokenizer.json"))
+    run_batch = kvc.run_calibration_batch
+
+    def checked_run(session, output_names, feeds):
+        assert feeds[cache_names[0]].shape == feeds[cache_names[1]].shape == (2, 2, 1, 4)
+        np.testing.assert_array_equal(feeds["past_key_values.0.conv_state"], np.zeros((1, 8, 3), dtype=np.float16))
+        np.testing.assert_array_equal(feeds["past_key_values.0.recurrent_state"], np.zeros((1, 2, 4, 4), dtype=np.float32))
+        expected_positions = np.arange(3) if position_planes is None else np.tile(np.arange(3), (3, 1))
+        np.testing.assert_array_equal(feeds["position_ids"], expected_positions)
+        return run_batch(session, output_names, feeds)
+
+    monkeypatch.setattr(kvc, "run_calibration_batch", checked_run)
+    output_path = tmp_path / "scales.json"
+    kvc.calibrate_kv_scales(
+        str(model_path), str(tmp_path), str(output_path), method="minmax", target_seq=3, num_seqs=1,
+        k_rotary_envelope=False, corpus=["a b c"],
+    )
+    result = json.loads(output_path.read_text())
+    assert result["layer_ids"] == [3]
+    np.testing.assert_allclose(result["scales"]["k_scales"], [[2 / 128] * 4])
+    np.testing.assert_allclose(result["scales"]["v_scales"], [[4 / 128] * 4])
+
+
 def test_calibrate_paged_cache_ignores_unused_slots(tmp_path, monkeypatch):
     inputs = [
         _FakeInput("input_ids", ["tokens"], "tensor(int64)"),

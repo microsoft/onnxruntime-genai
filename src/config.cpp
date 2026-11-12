@@ -133,6 +133,7 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   }
   // An empty MTP list intentionally disables sharing the main decoder's initializers.
   decoder.shared_initializers = mtp.shared_initializers;
+  decoder.gguf_initializers = mtp.gguf_initializers;
   if (mtp.index_share.enabled || mtp.index_share.base_capacity != 0) {
     if (mtp.index_share.indices_input.empty() || mtp.index_share.counts_input.empty() ||
         mtp.index_share.indices_output.empty() || mtp.index_share.counts_output.empty() ||
@@ -768,6 +769,113 @@ struct SharedInitializers_Element : JSON::Element {
   std::unique_ptr<SharedInitializer_Element> element_;
 };
 
+struct GgufTensorMapping_Element : JSON::Element {
+  explicit GgufTensorMapping_Element(Config::Model::GgufTensorMapping& v) : v_{v} {}
+
+  // The ONNX initializer name is this object's key in "tensors", so it is not a field.
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "gguf_name") {
+      v_.gguf_name = JSON::Get<std::string_view>(value);
+    } else if (name == "file") {
+      v_.file = JSON::Get<std::string_view>(value);
+    } else if (name == "data_type") {
+      v_.data_type = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "share") {
+      v_.share = JSON::Get<bool>(value);
+      v_.has_share = true;
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "shape") {
+      v_.has_shape = true;
+      return shape_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::GgufTensorMapping& v_;
+  Int64Array_Element shape_{v_.shape};
+};
+
+struct GgufTensorsObject_Element : JSON::Element {
+  explicit GgufTensorsObject_Element(std::vector<Config::Model::GgufTensorMapping>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    auto& entry = v_.emplace_back();
+    entry.onnx_name = std::string{name};
+    entry.gguf_name = std::string{JSON::Get<std::string_view>(value)};
+  }
+
+  Element& OnObject(std::string_view name) override {
+    auto& entry = v_.emplace_back();
+    entry.onnx_name = std::string{name};
+    element_ = std::make_unique<GgufTensorMapping_Element>(entry);
+    return *element_;
+  }
+
+ private:
+  std::vector<Config::Model::GgufTensorMapping>& v_;
+  std::unique_ptr<GgufTensorMapping_Element> element_;
+};
+
+struct GgufFilesArray_Element : JSON::Element {
+  explicit GgufFilesArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnValue(std::string_view /*name*/, JSON::Value value) override {
+    v_.emplace_back(JSON::Get<std::string_view>(value));
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
+struct GgufInitializers_Element : JSON::Element {
+  explicit GgufInitializers_Element(Config::Model::GgufInitializers& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "config_file") {
+      v_.config_file = JSON::Get<std::string_view>(value);
+    } else if (name == "share") {
+      v_.share = JSON::Get<bool>(value);
+      v_.has_share = true;
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "tensors") {
+      return tensors_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "files") {
+      return files_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::GgufInitializers& v_;
+  GgufFilesArray_Element files_{v_.files};
+  GgufTensorsObject_Element tensors_{v_.tensors};
+};
+
+struct GgufInitializersRoot_Element : JSON::Element {
+  explicit GgufInitializersRoot_Element(Config::Model::GgufInitializers& v) : inner_{v} {}
+
+  Element& OnObject(std::string_view /*name*/) override { return inner_; }
+
+ private:
+  GgufInitializers_Element inner_;
+};
+
 using DecoderStateGroup = Config::Model::Decoder::StateGroup;
 using DecoderStateGroupKind = Config::Model::Decoder::StateGroupKind;
 using DecoderStateUpdate = Config::Model::Decoder::StateUpdate;
@@ -1123,6 +1231,8 @@ struct Decoder_Element : JSON::Element {
       v_.indexer_compress_ratio = SafeDoubleToInt(JSON::Get<double>(value), name);
       if (v_.indexer_compress_ratio <= 0)
         throw std::runtime_error("indexer_compress_ratio must be positive");
+    } else if (name == "gguf_initializers") {
+      v_.gguf_initializers.config_file = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1146,6 +1256,9 @@ struct Decoder_Element : JSON::Element {
     if (name == "sliding_window") {
       v_.sliding_window = Config::Model::Decoder::SlidingWindow{};
       return sliding_window_;
+    }
+    if (name == "gguf_initializers") {
+      return gguf_initializers_;
     }
     // Support object-style pipeline: "pipeline": { "embeddings": { ... }, ... }
     if (name == "pipeline") {
@@ -1185,6 +1298,7 @@ struct Decoder_Element : JSON::Element {
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
   std::unique_ptr<StringArray_Element> layer_types_;
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};
+  GgufInitializers_Element gguf_initializers_{v_.gguf_initializers};
   std::unique_ptr<StateGroups_Element> state_groups_;
 };
 
@@ -1280,6 +1394,8 @@ struct Mtp_Element : JSON::Element {
       if (v_.index_share.base_capacity <= 0) throw std::out_of_range("base_capacity must be > 0");
       v_.index_share.enabled = true;
       if (v_.index_share.max_draft_tokens == 0) v_.index_share.max_draft_tokens = 7;
+    } else if (name == "gguf_initializers") {
+      v_.gguf_initializers.config_file = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1302,6 +1418,9 @@ struct Mtp_Element : JSON::Element {
     if (name == "outputs") {
       return outputs_;
     }
+    if (name == "gguf_initializers") {
+      return gguf_initializers_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -1319,6 +1438,7 @@ struct Mtp_Element : JSON::Element {
   MtpInputs_Element inputs_{v_};
   MtpOutputs_Element outputs_{v_};
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};
+  GgufInitializers_Element gguf_initializers_{v_.gguf_initializers};
 };
 
 struct Dflash2Inputs_Element : JSON::Element {
@@ -1456,6 +1576,8 @@ struct Dflash2_Element : JSON::Element {
       }
     } else if (name == "main_aux_hidden_states") {
       v_.main_aux_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "gguf_initializers") {
+      v_.gguf_initializers.config_file = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1477,6 +1599,9 @@ struct Dflash2_Element : JSON::Element {
     }
     if (name == "outputs") {
       return outputs_;
+    }
+    if (name == "gguf_initializers") {
+      return gguf_initializers_;
     }
     throw JSON::unknown_value_error{};
   }
@@ -1522,6 +1647,7 @@ struct Dflash2_Element : JSON::Element {
   Dflash2Inputs_Element inputs_{v_.inputs};
   Dflash2Outputs_Element outputs_{v_.outputs};
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};
+  GgufInitializers_Element gguf_initializers_{v_.gguf_initializers};
   IntArray_Element aux_hidden_state_layers_{v_.aux_hidden_state_layers};
 };
 
@@ -4261,6 +4387,21 @@ void ValidateModelPaths(const Config& config) {
   for (const auto& stage : m.decoder.pipeline) {
     ValidateConfigPath(stage.filename, "model.decoder.pipeline.filename");
   }
+  auto validate_gguf = [](const Config::Model::GgufInitializers& g, std::string_view prefix) {
+    ValidateConfigPath(g.config_file, std::string{prefix} + ".config_file");
+    for (const auto& f : g.files) {
+      ValidateConfigPath(f, std::string{prefix} + ".files");
+    }
+    for (const auto& t : g.tensors) {
+      ValidateConfigPath(t.file, std::string{prefix} + ".tensors.file");
+    }
+  };
+  validate_gguf(m.decoder.gguf_initializers, "model.decoder.gguf_initializers");
+  if (m.draft) {
+    validate_gguf(m.draft->gguf_initializers, "model.draft.gguf_initializers");
+  }
+  validate_gguf(m.dflash2.gguf_initializers, "model.dflash2.gguf_initializers");
+  validate_gguf(m.mtp.gguf_initializers, "model.mtp.gguf_initializers");
 }
 
 }  // namespace
@@ -4396,6 +4537,38 @@ std::pair<std::string, bool> Config::GetGraphName(const std::string& nominal_nam
     return {nominal_name, false};
   }
   return {it->second, true};
+}
+
+void LoadGgufInitializersConfig(const fs::path& path, Config::Model::GgufInitializers& v) {
+  std::ifstream file = path.open(std::ios::binary | std::ios::ate);
+  if (!file.is_open()) {
+    throw std::runtime_error("Error opening GGUF initializers config at " + path.string());
+  }
+  const std::streamsize size = file.tellg();
+  file.seekg(0, std::ios::beg);
+  std::vector<char> buffer(size);
+  if (size > 0 && !file.read(buffer.data(), size)) {
+    throw std::runtime_error("Error reading GGUF initializers config at " + path.string());
+  }
+  GgufInitializersRoot_Element root{v};
+  try {
+    JSON::Parse(root, std::string_view(buffer.data(), buffer.size()));
+    // Model::AddGgufInitializers loads a single mapping file, so a chained reference would be silently ignored.
+    if (!v.config_file.empty()) {
+      throw std::runtime_error("gguf_initializers.config_file: nested mapping files are not supported, got: " +
+                               v.config_file);
+    }
+    for (const auto& f : v.files) {
+      ValidateConfigPath(f, "gguf_initializers.files");
+    }
+    for (const auto& t : v.tensors) {
+      ValidateConfigPath(t.file, "gguf_initializers.tensors.file");
+    }
+  } catch (const std::exception& message) {
+    std::ostringstream oss;
+    oss << "Error encountered while parsing '" << path.string() << "' " << message.what();
+    throw std::runtime_error(oss.str());
+  }
 }
 
 }  // namespace Generators

@@ -1008,6 +1008,7 @@ def test_qwen35_moe_combines_shared_expert_with_gated_add(monkeypatch):
     model.io_dtype = ir.DataType.FLOAT16
     model.use_paged_attention = False
     model.hidden_size = 16
+    model.intermediate_size = 12
     model.moe_intermediate_size = 4
     model.moe_attrs = {
         "op_type": "MoE",
@@ -1024,9 +1025,10 @@ def test_qwen35_moe_combines_shared_expert_with_gated_add(monkeypatch):
         shared_expert_gate=object(),
     )
     calls = []
+    initializers = {}
     monkeypatch.setattr(model, "make_matmul", lambda *_args: "/router/MatMul")
     monkeypatch.setattr(model, "make_reshape", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(model, "make_initializer", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(model, "make_initializer", lambda tensor, name, **_kwargs: initializers.update({name: tensor}))
     monkeypatch.setattr(model, "make_moe_op", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(model, "make_shared_expert", lambda *_args: ("shared_output", "sigmoid_gate"))
     monkeypatch.setattr(
@@ -1037,6 +1039,8 @@ def test_qwen35_moe_combines_shared_expert_with_gated_add(monkeypatch):
 
     model.make_moe(1, mlp, "hidden_states")
 
+    assert initializers["model.layers.1.moe.experts.gate_up_proj.bias"].shape == (2, 8)
+    assert initializers["model.layers.1.moe.experts.down_proj.bias"].shape == (2, 16)
     assert calls == [
         (
             "/model/layers.1/moe/GatedAdd",

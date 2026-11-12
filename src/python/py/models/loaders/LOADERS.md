@@ -22,12 +22,13 @@ The IR presents model structure and tensors through a consistent set of Python o
 - `quant_model.py` selects the concrete quantized loader for the requested quantization format.
 - `component.py` validates prebuilt ONNX component sources and returns ONNX IR models for package configuration. Raw external-data validation and the ONNX schema checker stay at this source-format boundary because IR deserialization may normalize malformed metadata and does not provide an equivalent schema checker; graph construction does not use those APIs.
 - `qwen3_8.py` loads native Qwen3.8 FP8/NVFP4 checkpoints. `engram.py`, `vision.py`, and `mtp.py` own the corresponding component-loading helpers; `qwen.py` preserves the existing MTP loader import paths.
+- `bailing.py` resolves local or Hugging Face Bailing checkpoints and streams BF16, 128x128 block-FP8, and compressed-tensors packed-INT4 weights into `TensorModule`, `QuantizedDecoderLayer`, and `QuantizedExperts`. Layer traversal materializes only the requested layers and releases file handles on completion or failure.
 
 CUDA packing settings are loader inputs, not properties inferred from the export host GPU. Integer QMoE and NVFP4 have different `weights_prepacked` contracts: NVFP4 defaults to legacy N-packed storage, and only explicit mode `1` preserves the newer K-packed layout. Synthetic loader instances in tests must initialize `quant_attrs` just as normal loader construction does.
 
 New source formats should be implemented here and should expose the same model structure consumed by the builders, keeping source-specific logic out of the ONNX graph construction code.
 
-`OnnxSourceModel` also uses the component loader for its flat source graphs. Its explicit `allow_ort_extensions` validation mode temporarily registers missing standard-domain operators from the installed ORT operator schemas, including their input/output, attribute, and type constraints. Registration is removed even if validation fails. Default component validation remains unchanged, and unknown operators without a real runtime schema still fail.
+`OnnxSourceModel` also uses the component loader for its flat source graphs. Its `reject_sparse_initializers` loading policy rejects raw sparse initializers before IR conversion can discard them; other component-loading callers retain their existing policy. Its explicit `allow_ort_extensions` validation mode temporarily registers missing standard-domain operators from the installed ORT operator schemas, including their input/output, attribute, and type constraints. Registration is removed even if validation fails. Default component validation remains unchanged, and unknown operators without a real runtime schema still fail.
 
 ## ONNX API boundary
 
@@ -36,6 +37,7 @@ The loader ONNX import inventory is:
 - `component.py`: `onnx` for public `onnx.load(..., load_external_data=False)`, `onnx.TensorProto` identification/external-storage markers, and `onnx.checker.check_model(path)`; `onnx_ir` for public `ir.serde.deserialize_model`, `ir.ExternalTensor`, `ir.DataType`, and `ir.Shape`.
 - `gptoss.py`: `onnx_ir` for `ir.DataType.FLOAT8E8M0`.
 - `modelopt.py`: `onnx_ir` for `ir.DataType.FLOAT8E4M3FN`.
+- `bailing.py`: `onnx_ir` for `ir.DataType.FLOAT` in native FP8 expert-scale metadata.
 - All other loader Python modules have no ONNX or ONNX IR imports. No loader uses `onnx.helper`, `onnx.numpy_helper`, or private ONNX/ONNX IR APIs.
 
 The raw dependency in `component.py` is intentional, not an alternative graph construction or serialization path. Public `ir.load(path)` also parses with external data disabled, but immediately deserializes the protobuf. That loses training graphs, sparse initializers, and tensor payloads inconsistent with an attribute's declared type; sparse tensor attributes are currently unsupported. Consequently, traversing only the resulting IR cannot validate every original external-data location and byte range. The loader recursively inspects the raw protobuf first, rejects unsafe paths (including symlink escapes), missing files, and invalid byte ranges without materializing tensor data, and only then converts to IR through public serde.

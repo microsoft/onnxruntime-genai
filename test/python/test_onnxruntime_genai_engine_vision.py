@@ -4,6 +4,7 @@
 """Real-checkpoint gates; set ORTGENAI_REQUIRE_ENGINE_VISION=1 in qualification jobs."""
 
 import gc
+import io
 import json
 import os
 import struct
@@ -17,6 +18,67 @@ IMAGE_DIR = Path(__file__).resolve().parents[1] / "images"
 IMAGE_MARKER = "<|vision_start|><|image_pad|><|vision_end|>\n"
 
 
+def vision_modes():
+    directory = os.environ.get("ORTGENAI_ENGINE_VISION_MODEL")
+    if directory and Path(directory, "genai_config.json").is_file():
+        manifest = json.loads(Path(directory, "genai_config.json").read_text())
+        if manifest["model"]["type"] == "qwen4_exp":
+            return [pytest.param((False, False), id="eager-target")]
+    return [
+        pytest.param((False, False), id="eager-target"),
+        pytest.param((False, True), id="eager-dflash"),
+        pytest.param((True, False), id="graph-target"),
+        pytest.param((True, True), id="graph-dflash"),
+    ]
+
+
+def vision_profile(manifest):
+    profile = (2, 6, 6) if manifest["model"]["type"] == "qwen4_exp" else (4, 512, 64)
+    batching = manifest["engine"]["dynamic_batching"]
+    defaults = {"max_batch_size": 16, "max_scheduled_tokens": 2048}
+    for field, required in zip(("max_batch_size", "max_scheduled_tokens"), profile[:2], strict=True):
+        assert batching.get(field, defaults[field]) >= required, f"Qualification requires {field} >= {required}"
+    chunk_size = manifest["search"].get("chunk_size", 0)
+    assert not chunk_size or chunk_size >= profile[2], f"Qualification requires chunk_size >= {profile[2]}"
+    return profile
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen4_exp"])
+@pytest.mark.parametrize(
+    "omitted_fields",
+    [("max_batch_size",), ("max_scheduled_tokens",), ("max_batch_size", "max_scheduled_tokens")],
+)
+def test_qualification_uses_runtime_defaults_for_omitted_limits(model_type, omitted_fields):
+    profile = (2, 6, 6) if model_type == "qwen4_exp" else (4, 512, 64)
+    manifest = {
+        "model": {"type": model_type},
+        "engine": {"dynamic_batching": {"max_batch_size": profile[0], "max_scheduled_tokens": profile[1]}},
+        "search": {"chunk_size": profile[2]},
+    }
+    for field in omitted_fields:
+        del manifest["engine"]["dynamic_batching"][field]
+    assert vision_profile(manifest) == profile
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen4_exp"])
+@pytest.mark.parametrize("field", ["max_batch_size", "max_scheduled_tokens", "chunk_size"])
+def test_qualification_rejects_reduced_execution_limits(model_type, field):
+    batch_size, token_cap, chunk_size = (2, 6, 6) if model_type == "qwen4_exp" else (4, 512, 64)
+    manifest = {
+        "model": {"type": model_type},
+        "engine": {"dynamic_batching": {"max_batch_size": batch_size, "max_scheduled_tokens": token_cap}},
+        "search": {"chunk_size": chunk_size},
+    }
+    limits = manifest["search"] if field == "chunk_size" else manifest["engine"]["dynamic_batching"]
+    limits[field] -= 1
+    with pytest.raises(AssertionError, match=field):
+        vision_profile(manifest)
+    if field != "chunk_size":
+        limits[field] = 0
+        with pytest.raises(AssertionError, match=field):
+            vision_profile(manifest)
+
+
 @pytest.fixture(scope="module")
 def vision_package():
     directory = os.environ.get("ORTGENAI_ENGINE_VISION_MODEL")
@@ -27,7 +89,7 @@ def vision_package():
     if not og.is_cuda_available():
         pytest.fail("Real Engine vision qualification requires CUDA")
     manifest = json.loads(Path(directory, "genai_config.json").read_text())
-    assert manifest["model"]["type"] == "qwen3_5"
+    assert manifest["model"]["type"] in {"qwen3_5", "qwen4_exp"}
     assert manifest["model"]["vision"]["filename"]
     assert manifest["model"]["embedding"]["filename"]
     return directory, manifest
@@ -35,12 +97,12 @@ def vision_package():
 
 @pytest.fixture(
     scope="module",
-    params=[(False, False), (False, True), (True, False), (True, True)],
-    ids=["eager-target", "eager-dflash", "graph-target", "graph-dflash"],
+    params=vision_modes(),
 )
 def vision_model(request, vision_package):
     directory, manifest = vision_package
     graphs, drafts = request.param
+    batch_size, token_cap, chunk_size = vision_profile(manifest)
     config = og.Config(directory)
     overlay = {
         "model": {
@@ -57,22 +119,66 @@ def vision_model(request, vision_package):
         "engine": {
             "dynamic_batching": {
                 "num_blocks": 64,
-                "max_batch_size": 4,
-                "max_scheduled_tokens": 512,
+                "max_batch_size": batch_size,
+                "max_scheduled_tokens": token_cap,
                 "prefix_caching": True,
-                "media_device_bytes": 2 * 1024 * 1024,
+                "media_device_bytes": (1 if manifest["model"]["type"] == "qwen4_exp" else 2) * 1024 * 1024,
             }
         },
-        "search": {"chunk_size": 64},
+        "search": {"chunk_size": chunk_size},
     }
+    if manifest["model"]["type"] == "qwen4_exp":
+        del overlay["model"]["decoder"]
     if drafts:
         assert manifest["model"]["dflash2"]["filename"], "The mandatory drafter must not be silently absent"
     else:
         overlay["model"]["dflash2"] = {"filename": ""}
     config.overlay(json.dumps(overlay))
     config.set_provider_option("cuda", "enable_cuda_graph", "1" if graphs else "0")
+    if manifest["model"]["type"] == "qwen4_exp":
+        config.set_provider_option("cuda", "arena_extend_strategy", "kSameAsRequested")
     model = og.Model(config)
     yield model, drafts
+    del model
+    gc.collect()
+
+
+@pytest.fixture(scope="module")
+def ling_vision_model():
+    directory = os.environ.get("ORTGENAI_ENGINE_LING_VISION_MODEL")
+    if not directory or not Path(directory, "genai_config.json").is_file():
+        if os.environ.get("ORTGENAI_REQUIRE_ENGINE_LING_VISION") == "1":
+            pytest.fail("ORTGENAI_ENGINE_LING_VISION_MODEL must name a real packed Ling vision package")
+        pytest.skip("Set ORTGENAI_ENGINE_LING_VISION_MODEL to run Ling admission regressions")
+    if not og.is_cuda_available():
+        pytest.fail("Ling Engine vision execution requires CUDA")
+    manifest = json.loads(Path(directory, "genai_config.json").read_text())
+    assert manifest["model"]["type"] == "bailing_moe_v3_vl"
+    assert manifest["model"]["vision"]["filename"]
+    assert manifest["model"]["embedding"]["filename"]
+    assert not manifest["model"].get("dflash2", {}).get("filename")
+    config = og.Config(directory)
+    config.overlay(
+        json.dumps(
+            {
+                "model": {"decoder": {"session_options": {"session.use_device_allocator_for_initializers": "1"}}},
+                "engine": {
+                    "dynamic_batching": {
+                        "num_blocks": 16,
+                        "max_batch_size": 1,
+                        "max_scheduled_tokens": 17,
+                        "prefix_caching": False,
+                        "media_host_bytes": 64 * 1024 * 1024,
+                        "media_device_bytes": 4 * 1024 * 1024,
+                    }
+                },
+                "search": {"chunk_size": 17},
+            }
+        )
+    )
+    config.set_provider_option("cuda", "enable_cuda_graph", "0")
+    model = og.Model(config)
+    yield model
     del model
     gc.collect()
 
@@ -212,13 +318,60 @@ def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(visi
     survivor.close()
 
 
-def test_text_only_export_rejects_images_without_consuming_the_turn(vision_package):
+def test_oversized_turn_preserves_reusable_media(vision_package):
     directory, _ = vision_package
     config = og.Config(directory)
     config.overlay(
         json.dumps(
             {
-                "model": {"type": "qwen3_5_text", "vision": {"filename": ""}, "dflash2": {"filename": ""}},
+                "model": {"dflash2": {"filename": ""}},
+                "engine": {
+                    "dynamic_batching": {
+                        "num_blocks": 64,
+                        "max_batch_size": 1,
+                        "prefix_caching": True,
+                        "media_host_bytes": 21 * 1024 * 1024,
+                    }
+                },
+            }
+        )
+    )
+    config.set_provider_option("cuda", "enable_cuda_graph", "0")
+    model = og.Model(config)
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    value = prompt(tokenizer, 1, "Describe the images briefly. " + "code " * 200)
+    images = og.Images.open(str(IMAGE_DIR / "sheet.png"))
+    cached_tokens = []
+    for iteration in range(3):
+        if iteration == 2:
+            options = og.RequestOptions()
+            options.set_max_session_tokens(len(tokenizer.encode(value)) + 1)
+            rejected = engine.create_request(options=options)
+            larger_image = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
+            with pytest.raises(RuntimeError, match="Expanded image rows exceed"):
+                begin(rejected, value, larger_image, maximum=1)
+            rejected.close()
+        request = new_request(engine)
+        begin(request, value, images, maximum=1)
+        _, finishes, _ = drain(engine)
+        assert len(finishes) == 1
+        cached_tokens.append(finishes[0][3])
+        request.close()
+    assert cached_tokens[1] > 0
+    assert cached_tokens[2] == cached_tokens[1]
+
+
+def test_text_only_export_rejects_images_without_consuming_the_turn(vision_package):
+    directory, manifest = vision_package
+    config = og.Config(directory)
+    config.overlay(
+        json.dumps(
+            {
+                "model": {
+                    "type": manifest["model"]["type"] + "_text",
+                    "vision": {"filename": ""},
+                    "dflash2": {"filename": ""},
+                },
                 "engine": {"dynamic_batching": {"num_blocks": 64, "max_batch_size": 1}},
             }
         )
@@ -235,6 +388,25 @@ def test_text_only_export_rejects_images_without_consuming_the_turn(vision_packa
     _, finishes, _ = drain(engine)
     assert len(finishes) == 1
     request.close()
+
+
+def test_vision_export_requires_multimodal_position_bindings(vision_package):
+    directory, manifest = vision_package
+    bindings = [
+        ("position_ids", "missing_position_input", "three-axis int64 decoder position IDs"),
+        ("rotary_position_ids", "missing_rotary_input", "rotary history must use three-axis int64 positions"),
+        (
+            "rotary_position_ids",
+            manifest["model"]["decoder"]["inputs"]["position_ids"],
+            "rotary history must use three-axis int64 positions",
+        ),
+    ]
+    for binding, input_name, diagnostic in bindings:
+        config = og.Config(directory)
+        config.overlay(json.dumps({"model": {"decoder": {"inputs": {binding: input_name}}}}))
+        config.set_provider_option("cuda", "enable_cuda_graph", "0")
+        with pytest.raises(RuntimeError, match=diagnostic):
+            og.Model(config)
 
 
 def test_image_input_lifetime_and_real_draft_activity(vision_model):
@@ -258,6 +430,26 @@ def test_image_input_lifetime_and_real_draft_activity(vision_model):
         assert stats["draft_tokens_evaluated"] > 0
         assert stats["dflash2_failures"] == 0
     request.close()
+
+
+def test_controlled_image_substitution_changes_grounded_answer(vision_model):
+    model, _ = vision_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    value = prompt(
+        tokenizer, 1, "Classify the image as either vehicles or a spreadsheet. Reply with only the category."
+    )
+    answers, streams = [], []
+    for filename in ("cars.jpg", "sheet.png"):
+        request = new_request(engine)
+        begin(request, value, og.Images.open(str(IMAGE_DIR / filename)))
+        tokens, finishes, _ = drain(engine)
+        assert len(finishes) == 1
+        answers.append(tokenizer.decode(tokens).lower())
+        streams.append(tokens)
+        request.close()
+    assert "car" in answers[0] or "vehicle" in answers[0], answers[0]
+    assert "spreadsheet" in answers[1], answers[1]
+    assert streams[0] != streams[1], "Identical prompts must respond to the substituted image content"
 
 
 def test_two_image_pressure_prefix_identity_and_rewind(vision_model, tmp_path):
@@ -318,6 +510,93 @@ def test_admission_failures_preserve_turn_id_and_preflight_allocations(vision_mo
     assert turn == 1
     drain(engine)
     request.close()
+
+
+def test_exact_expanded_prompt_capacity_rejects_before_pixels(vision_model):
+    model, _ = vision_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    images = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
+    value = prompt(tokenizer, 1)
+    processed = model.create_multimodal_processor()(value, images=images)
+    options = og.RequestOptions()
+    options.set_max_session_tokens(processed["input_ids"].as_numpy().size)
+    request = engine.create_request(options=options)
+    try:
+        with pytest.raises(RuntimeError, match="Expanded image rows exceed the remaining session capacity"):
+            begin(request, value, images, maximum=1)
+        turn = begin(request, "x", maximum=1)
+        assert turn == 1
+        drain(engine)
+    finally:
+        request.close()
+
+
+@pytest.mark.parametrize(
+    ("sizes", "suffix"),
+    [
+        ([(64, 64)], " "),
+        ([(128, 96)], "\n\ncode"),
+        ([(64, 64), (96, 64)], "\n"),
+    ],
+)
+def test_ling_expanded_admission_capacity_and_history_recovery(ling_vision_model, sizes, suffix):
+    """Source-shaped image/newline admission checks, not full-model numerical qualification."""
+    from PIL import Image  # noqa: PLC0415
+
+    model = ling_vision_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    marker = "<|vision_start|><|image_pad|><|vision_end|>"
+    encoded = []
+    expanded = ""
+    for index, (width, height) in enumerate(sizes):
+        image = Image.new("RGB", (width, height), (32 + index * 64, 96, 192))
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        encoded.append(buffer.getvalue())
+        rows = (width // 32) * (height // 32)
+        expanded += "<|vision_start|>" + "<|image_pad|>" * rows + "<|vision_end|>\n"
+    value = marker * len(sizes) + suffix
+    images = og.Images.open_bytes(*encoded)
+    expected_ids = list(tokenizer.encode(expanded + suffix))
+    processed = model.create_multimodal_processor()(value, images=images)
+    assert processed["input_ids"].as_numpy().reshape(-1).tolist() == expected_ids
+
+    for remaining in (-1, 0, 1):
+        options = og.RequestOptions()
+        options.set_max_session_tokens(len(expected_ids) + remaining)
+        request = engine.create_request(options=options)
+        try:
+            if remaining <= 0:
+                with pytest.raises(RuntimeError, match="Expanded image rows exceed the remaining session capacity"):
+                    begin(request, value, images, maximum=1)
+                turn = begin(request, "x", maximum=1)
+            else:
+                turn = begin(request, value, images, maximum=1)
+            assert turn == 1
+            _, finishes, _ = drain(engine)
+            assert len(finishes) == 1
+            if remaining > 0:
+                assert finishes[0][1] == len(expected_ids)
+        finally:
+            request.close()
+
+    options = og.RequestOptions()
+    options.set_max_session_tokens(512)
+    request = engine.create_request(options=options)
+    try:
+        with pytest.raises(RuntimeError, match="marker count"):
+            begin(request, value, maximum=1)
+        first = begin(request, value, images, maximum=1)
+        assert first == 1
+        _, finishes, _ = drain(engine)
+        assert finishes[0][1] == len(expected_ids)
+        later = begin(request, "x", maximum=1)
+        assert later > first
+        _, finishes, _ = drain(engine)
+        assert len(finishes) == 1
+        assert engine.get_speculative_stats()["draft_forward_passes"] == 0
+    finally:
+        request.close()
 
 
 def test_text_api_continuation_after_media_and_cancellation(vision_model):
@@ -410,7 +689,10 @@ def test_cancel_after_encoding_and_replay_full_history(vision_model):
     messages = [
         {"role": "user", "content": IMAGE_MARKER + "What is shown? Answer briefly."},
         {"role": "assistant", "content": tokenizer.decode(tokens)},
-        {"role": "user", "content": "What kind of vehicles are they? Answer briefly."},
+        {
+            "role": "user",
+            "content": "Classify them as cars, motorcycles, buses, or trucks. Reply with only the category.",
+        },
     ]
     full = tokenizer.apply_chat_template(messages=json.dumps(messages), add_generation_prompt=True) + "\n</think>\n\n"
     retained = list(tokenizer.encode(value)) + tokens
@@ -489,7 +771,7 @@ def test_reference_tool_formatting_retains_image_history(vision_model):
         },
         {"role": "tool", "content": "The inspected vehicles are cars."},
     ]
-    initial = prompt(tokenizer, 1, "Identify the vehicles. Use the inspection result.") + messages[1]["content"]
+    initial = prompt(tokenizer, 1, "Identify the vehicles. Use the inspection result.") + "This reply will be replaced."
     full = tokenizer.apply_chat_template(messages=json.dumps(messages), add_generation_prompt=True) + "\n</think>\n\n"
     initial_ids, full_ids = list(tokenizer.encode(initial)), list(tokenizer.encode(full))
     assert "<tool_call>\n<function=inspect>" in full
