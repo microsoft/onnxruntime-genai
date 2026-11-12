@@ -1,5 +1,50 @@
 This is an end-to-end benchmarking script for any GenAI-supported ONNX model.
 
+Reproducible coding qualification
+
+benchmark_coding.py takes a JSON array of already tokenized prompt IDs. Prepare
+and retain that array with the intended tokenizer/chat template, dataset revision
+and task text; the tool never imports a private corpus script or executes output.
+
+python benchmark/python/benchmark_coding.py --model {paged model folder} --prompt-ids {ids.json} --provider WebGpuExecutionProvider --plugin-library {plugin library} --runtime-artifact {loaded GenAI library} --runtime-artifact {loaded ORT library} --num-blocks 128 --new-tokens 128 --chunk 512 --warmup 1 --repeat 3 --output {outside-model result.json}
+
+Use the provider's registration name for a plugin (e.g. WebGpuExecutionProvider
+or MLXExecutionProvider). Omit --plugin-library for a built-in provider.
+The model must already contain the intended speculative configuration; the
+harness does not silently change drafter policy or precision. For target-only
+comparisons export a separate target-only configuration. Cache capacity must
+cover target plus auxiliary reservations; it is not inferred from token count.
+Use a profile-free config with engine.dynamic_batching; runtime profiles are
+rejected because later device selection could override prefix caching or chunks.
+
+All model files, external weights, and explicitly supplied native libraries are
+stream-hashed before timing. Supply the actual loaded GenAI/core/plugin files,
+not an unrelated SDK library. The result records the imported module location
+but does not prove which dynamic loader dependency was selected; audit that
+separately. Hashing can warm the filesystem cache. Model load is measured
+separately from the first request after loading and warm-process requests.
+This is not a cold OS-cache benchmark. Run a fresh process for each cold-load
+replicate; alternate A/B order and keep machine/environment settings fixed.
+
+Every request is new, greedy, and capped at 2048 generated tokens. Prefix
+caching is explicitly disabled, including across warmups; no prefix state is
+reused. The first request and each warm-process request record token IDs,
+host-visible event times, completion reason, and raw speculative snapshots
+plus additive counter deltas. Native failed, capacity-blocked, and retryable outcomes abort the measurement
+with their error code even when they have no associated request.
+Speculative tokens may be buffered together; host event spacing is not GPU
+kernel latency. Decode rate excludes the first
+token and uses the last minus first token time. EOS may finish below the cap.
+
+Use --reference {baseline.json} for exact token-ID comparison across every
+recorded request. Prompt hash and output cap must agree; differing token IDs
+produce a nonzero exit after saving the evidence. This is deterministic output
+qualification, not a coding-quality score, state-snapshot comparison, provider
+coverage assertion, or a statistical performance gate. No model download is
+required by the pure protocol tests:
+
+python -m pytest benchmark/python/test_benchmark_coding.py
+
 
 Prerequisites: 
 0) Install onnxruntime-genai, pandas, tqdm and psutil
