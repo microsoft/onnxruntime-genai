@@ -2446,9 +2446,8 @@ Prefix reuse is opt-in and shared by Generators and Engines using the same Model
 For Bolt this configuration selects snapshot policy, not paged execution. `num_blocks`,
 `gpu_utilization_factor`, and device-memory budgeting are unsupported. The native target always
 consumes eight-token blocks; one Engine prefill step processes the complete prompt synchronously.
-This backend rejects `device_memory_budget_bytes`; native checkpoints, including the default
-device-resident ones, allocate from free device memory at publication, so leave device headroom or
-configure RAM/disk snapshot tiers.
+This backend rejects `device_memory_budget_bytes`. Device-resident checkpoints allocate additional
+VRAM at publication, so leave device headroom or configure RAM/disk snapshot tiers instead.
 Snapshot storage uses the existing `snapshot_cache` VRAM/RAM/disk byte budgets and count limit.
 Without an explicit storage policy, at most one device-resident checkpoint is retained.
 `prefix_caching: false`, `max_snapshots: 0`, or explicitly zero storage budgets disable reuse.

@@ -64,9 +64,8 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   turn's input, not retained earlier-turn history.
   The existing `max_snapshots` and `snapshot_cache` VRAM/RAM/disk limits bound checkpoint storage; without explicit
   tier budgets or a count, at most one device-resident checkpoint is retained. `max_snapshots: 0` disables publication.
-  This backend does not accept `device_memory_budget_bytes`. Native checkpoints, including the default
-  device-resident ones, are allocated from free device memory at publish time, so leave headroom or
-  configure RAM/disk snapshot tiers.
+  This backend does not accept `device_memory_budget_bytes`. Device-resident checkpoints allocate
+  additional VRAM at publish time, so leave device headroom or configure RAM/disk snapshot tiers instead.
   With warning logging enabled, an explicit opt-in that is inactive because of multiple slots, zero snapshot count,
   or all-zero tier budgets emits a warning.
   DFlash checkpoints must retain enough target features to reconstruct its complete context window (or start at
