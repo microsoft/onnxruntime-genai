@@ -48,6 +48,11 @@ enum class PyEngineErrorCode : uint32_t {
   EngineExecutionFailure = OgaErrorCode_EngineExecutionFailure,
 };
 
+enum class PyExperimentalEnginePolicy : uint32_t {
+  Default = OgaExperimentalEnginePolicy_Default,
+  AgeBasedRecovery = OgaExperimentalEnginePolicy_AgeBasedRecovery,
+};
+
 // If a parameter to a C++ function is an array of float16, this type will let pybind11::array_t<Ort::Float16_t> map to numpy's float16 format
 namespace pybind11 {
 namespace detail {
@@ -1111,6 +1116,29 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::return_value_policy::reference_internal);
 
+  pybind11::enum_<PyExperimentalEnginePolicy>(m, "ExperimentalEnginePolicy")
+      .value("DEFAULT", PyExperimentalEnginePolicy::Default)
+      .value("AGE_BASED_RECOVERY", PyExperimentalEnginePolicy::AgeBasedRecovery);
+
+  pybind11::class_<OgaExperimentalEngineOptions>(m, "ExperimentalEngineOptions")
+      .def(pybind11::init([](uint32_t version) {
+             return OgaExperimentalEngineOptions::Create(version);
+           }),
+           pybind11::arg("version"),
+           "Opt into experimental Engine options version 1; other versions are rejected.")
+      .def(
+          "set_policy",
+          [](OgaExperimentalEngineOptions& options, PyExperimentalEnginePolicy policy) {
+            options.SetPolicy(static_cast<OgaExperimentalEnginePolicy>(policy));
+          },
+          pybind11::arg("policy"))
+      .def(
+          "set_recompute_limits", &OgaExperimentalEngineOptions::SetRecomputeLimits,
+          pybind11::arg("max_victims_per_step"))
+      .def(
+          "set_age_based_recovery", &OgaExperimentalEngineOptions::SetAgeBasedRecovery,
+          pybind11::arg("min_decode_steps_before_preemption"));
+
   pybind11::class_<OgaEngineCapabilities>(m, "EngineCapabilities")
       .def_property_readonly(
           "configured_max_batch_size",
@@ -1120,10 +1148,20 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           &OgaEngineCapabilities::MaxScheduledTokens)
       .def_property_readonly(
           "max_request_length",
-          &OgaEngineCapabilities::MaxRequestLength);
+          &OgaEngineCapabilities::MaxRequestLength)
+      .def_property_readonly("experimental_policy", [](const OgaEngineCapabilities& capabilities) {
+        return static_cast<PyExperimentalEnginePolicy>(capabilities.ExperimentalPolicy());
+      })
+      .def("supports_experimental_policy", [](const OgaEngineCapabilities& caps, PyExperimentalEnginePolicy policy) {
+            const auto c_policy = static_cast<OgaExperimentalEnginePolicy>(policy);
+            return caps.SupportsExperimentalPolicy(c_policy); }, pybind11::arg("policy"));
 
   pybind11::class_<OgaEngine>(m, "Engine")
       .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
+      .def(pybind11::init([](OgaModel& model, const OgaExperimentalEngineOptions& options) {
+             return OgaEngine::Create(model, options);
+           }),
+           pybind11::arg("model"), pybind11::kw_only(), pybind11::arg("experimental_options"))
       .def(
           "create_request",
           [](OgaEngine& engine, OgaRequestOptions* options) {

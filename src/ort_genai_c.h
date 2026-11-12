@@ -79,6 +79,7 @@ typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
+typedef struct OgaExperimentalEngineOptions OgaExperimentalEngineOptions;
 typedef struct OgaEngineCapabilities OgaEngineCapabilities;
 typedef struct OgaEngineEvent OgaEngineEvent;
 typedef struct OgaEngineEventBuffer OgaEngineEventBuffer;
@@ -146,6 +147,11 @@ typedef uint32_t OgaEngineEventFlags;
 #define OgaEngineEventFlag_CapacityBlocked ((OgaEngineEventFlags)(1u << 2))
 #define OgaEngineEventFlag_Failed ((OgaEngineEventFlags)(1u << 3))
 #define OgaEngineEventFlag_Retryable ((OgaEngineEventFlags)(1u << 4))
+
+/** \brief Policies supported by experimental Engine options version 1. No foreground policy exists. */
+typedef uint32_t OgaExperimentalEnginePolicy;
+#define OgaExperimentalEnginePolicy_Default ((OgaExperimentalEnginePolicy)0)
+#define OgaExperimentalEnginePolicy_AgeBasedRecovery ((OgaExperimentalEnginePolicy)1)
 
 /** \brief Stable behavioral classification for an Engine event. */
 typedef uint32_t OgaErrorCode;
@@ -1343,6 +1349,44 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** out);
 
 /**
+ * \brief Explicitly opts into the versioned experimental Engine construction-options contract.
+ *
+ * Only version 1 is supported. Unknown versions fail. These runtime-only options are not part of
+ * genai_config.json. Future experimental revisions may change or retire this API; callers must
+ * select a supported version, not assume source/binary compatibility across experimental revisions.
+ * The existing OgaCreateEngine path and permanent legacy configuration keys retain their behavior.
+ * An unset policy inherits the resolved model/profile selection (Default unless legacy-enabled).
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateExperimentalEngineOptions(
+    uint32_t version, OgaExperimentalEngineOptions** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyExperimentalEngineOptions(OgaExperimentalEngineOptions* options);
+
+/** \brief Selects Default (wait-only) or AgeBasedRecovery. Unknown values fail without changing options. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaExperimentalEngineOptionsSetPolicy(
+    OgaExperimentalEngineOptions* options, OgaExperimentalEnginePolicy policy);
+
+/** \brief Sets the shared positive recompute victim cap for one planning pass (default 1). */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaExperimentalEngineOptionsSetRecomputeLimits(
+    OgaExperimentalEngineOptions* options, size_t max_victims_per_step);
+
+/** \brief Sets the positive age-policy decode quantum (default 8), with its global-stall exception. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaExperimentalEngineOptionsSetAgeBasedRecovery(
+    OgaExperimentalEngineOptions* options, size_t min_decode_steps_before_preemption);
+
+/**
+ * \brief Creates an Engine, copying experimental options without modifying the Model.
+ *
+ * Resolve the Model and selected runtime profile first, then apply runtime numeric overrides.
+ * An explicit runtime policy conflicting with an explicitly configured legacy enable flag fails;
+ * an omitted legacy false default is not an explicit selection. Explicit profile false overrides
+ * base true. Runtime tuning groups require effective AgeBasedRecovery, even at their default values.
+ * Unsupported layouts fail rather than falling back. Both model and options must be non-null.
+ * Options may be changed or destroyed after this call without affecting the Engine.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngineWithExperimentalOptions(
+    OgaModel* model, const OgaExperimentalEngineOptions* options, OgaEngine** out);
+
+/**
  * \brief Returns a caller-owned snapshot of the Engine's configured runtime capabilities.
  * This call must run on the Engine's owner thread.
  * \param[in] engine The Engine to inspect.
@@ -1372,6 +1416,18 @@ OGA_EXPORT size_t OGA_API_CALL OgaEngineCapabilitiesGetMaxScheduledTokens(
  */
 OGA_EXPORT uint64_t OGA_API_CALL OgaEngineCapabilitiesGetMaxRequestLength(
     const OgaEngineCapabilities* capabilities);
+
+/** \brief Returns the effective construction-time policy, including legacy-configured selection. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineCapabilitiesGetExperimentalPolicy(
+    const OgaEngineCapabilities* capabilities, OgaExperimentalEnginePolicy* out);
+
+/**
+ * \brief Reports whether this Engine's model/backend/cache supports a known experimental policy.
+ * Default is always supported. AgeBasedRecovery requires compatible dynamic full-attention paged KV
+ * without auxiliary state. Unknown policy values and null arguments fail.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineCapabilitiesSupportsExperimentalPolicy(
+    const OgaEngineCapabilities* capabilities, OgaExperimentalEnginePolicy policy, bool* out);
 
 /** \brief Destroys an Engine capability snapshot. */
 OGA_EXPORT void OGA_API_CALL OgaDestroyEngineCapabilities(

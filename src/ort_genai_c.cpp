@@ -116,6 +116,7 @@ struct OgaASRPostProcessorResult : Generators::ASRPostProcessorResult, OgaAbstra
 struct OgaASRPostProcessorTimestampResult : Generators::TimestampResult, OgaAbstract {};
 struct OgaASRPostProcessorTimestampRecord : Generators::TimestampRecord, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
+struct OgaExperimentalEngineOptions : Generators::ExperimentalEngineOptions, OgaAbstract {};
 struct OgaEngineCapabilities : Generators::EngineCapabilities, OgaAbstract {};
 struct OgaEngineEvent : Generators::EngineEvent, OgaAbstract {};
 struct OgaEngineEventBuffer : Generators::EngineEventBuffer, OgaAbstract {};
@@ -1669,6 +1670,71 @@ OgaResult* OgaCreateEngine(OgaModel* model, OgaEngine** out) {
   OGA_CATCH
 }
 
+OgaResult* OgaCreateExperimentalEngineOptions(uint32_t version, OgaExperimentalEngineOptions** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::invalid_argument("out must not be null.");
+  }
+  *out = nullptr;
+  *out = ReturnUnique<OgaExperimentalEngineOptions>(
+      std::make_unique<Generators::ExperimentalEngineOptions>(version));
+  return nullptr;
+  OGA_CATCH
+}
+
+void OgaDestroyExperimentalEngineOptions(OgaExperimentalEngineOptions* options) {
+  delete static_cast<Generators::ExperimentalEngineOptions*>(options);
+}
+
+OgaResult* OgaExperimentalEngineOptionsSetPolicy(
+    OgaExperimentalEngineOptions* options, OgaExperimentalEnginePolicy policy) {
+  OGA_TRY
+  if (!options) {
+    throw std::invalid_argument("options must not be null.");
+  }
+  options->SetPolicy(static_cast<Generators::ExperimentalEnginePolicy>(policy));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaExperimentalEngineOptionsSetRecomputeLimits(
+    OgaExperimentalEngineOptions* options, size_t max_victims_per_step) {
+  OGA_TRY
+  if (!options) {
+    throw std::invalid_argument("options must not be null.");
+  }
+  options->SetRecomputeLimits(max_victims_per_step);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaExperimentalEngineOptionsSetAgeBasedRecovery(
+    OgaExperimentalEngineOptions* options, size_t min_decode_steps_before_preemption) {
+  OGA_TRY
+  if (!options) {
+    throw std::invalid_argument("options must not be null.");
+  }
+  options->SetAgeBasedRecovery(min_decode_steps_before_preemption);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaCreateEngineWithExperimentalOptions(
+    OgaModel* model, const OgaExperimentalEngineOptions* options, OgaEngine** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::invalid_argument("out must not be null.");
+  }
+  *out = nullptr;
+  if (!model || !options) {
+    throw std::invalid_argument("model and options must not be null.");
+  }
+  auto engine = std::make_shared<Generators::Engine>(model->shared_from_this(), *options);
+  *out = ReturnShared<OgaEngine>(engine);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaEngineGetCapabilities(
     const OgaEngine* engine, OgaEngineCapabilities** out) {
   OGA_TRY
@@ -1698,6 +1764,37 @@ size_t OgaEngineCapabilitiesGetMaxScheduledTokens(
 uint64_t OgaEngineCapabilitiesGetMaxRequestLength(
     const OgaEngineCapabilities* capabilities) {
   return capabilities ? capabilities->max_request_length : 0;
+}
+
+OgaResult* OgaEngineCapabilitiesGetExperimentalPolicy(
+    const OgaEngineCapabilities* capabilities, OgaExperimentalEnginePolicy* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::invalid_argument("out must not be null.");
+  }
+  *out = OgaExperimentalEnginePolicy_Default;
+  if (!capabilities) {
+    throw std::invalid_argument("capabilities must not be null.");
+  }
+  *out = static_cast<OgaExperimentalEnginePolicy>(capabilities->experimental_policy);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineCapabilitiesSupportsExperimentalPolicy(
+    const OgaEngineCapabilities* capabilities, OgaExperimentalEnginePolicy policy, bool* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::invalid_argument("out must not be null.");
+  }
+  *out = false;
+  if (!capabilities) {
+    throw std::invalid_argument("capabilities must not be null.");
+  }
+  Generators::ValidateExperimentalEnginePolicy(static_cast<Generators::ExperimentalEnginePolicy>(policy));
+  *out = policy == OgaExperimentalEnginePolicy_Default || capabilities->supports_age_based_recovery;
+  return nullptr;
+  OGA_CATCH
 }
 
 OgaResult* OgaCreateEngineEventBuffer(

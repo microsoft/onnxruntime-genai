@@ -62,7 +62,8 @@ struct CacheManager {
       size_t auxiliary_reserved_memory_bytes = 0,
       size_t optional_draft_checkpoint_bytes = 0,
       bool* draft_checkpoint_enabled = nullptr,
-      size_t non_auxiliary_reserved_memory_bytes = 0);
+      size_t non_auxiliary_reserved_memory_bytes = 0,
+      std::optional<bool> recompute_preemption_enabled = std::nullopt);
 
   virtual bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const = 0;
 
@@ -227,7 +228,8 @@ struct PagedCacheManager : CacheManager {
                     size_t auxiliary_bytes_per_block = 0,
                     size_t auxiliary_reserved_memory_bytes = 0,
                     size_t optional_draft_checkpoint_bytes = 0,
-                    size_t non_auxiliary_reserved_memory_bytes = 0);
+                    size_t non_auxiliary_reserved_memory_bytes = 0,
+                    std::optional<bool> recompute_preemption_enabled = std::nullopt);
   bool DraftCheckpointEnabled() const noexcept { return draft_checkpoint_capacity_ != 0; }
   size_t DraftCheckpointVramBytes() const noexcept override { return draft_checkpoint_vram_bytes_; }
   size_t DraftCheckpointCapacity() const noexcept override { return draft_checkpoint_capacity_; }
@@ -328,6 +330,7 @@ struct PagedCacheManager : CacheManager {
   std::unique_ptr<PagedKeyValueCache> key_value_cache_;
   std::unique_ptr<FixedStatePool> fixed_state_pool_;
   bool has_auxiliary_state_{};
+  bool recompute_preemption_enabled_{};
   size_t draft_checkpoint_vram_bytes_{};
   size_t draft_checkpoint_capacity_{};
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;

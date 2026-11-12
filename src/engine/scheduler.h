@@ -7,6 +7,7 @@
 #include "scheduled_requests.h"
 #include "cache_manager.h"
 #include "step_plan.h"
+#include "engine_options.h"
 
 /**
  * @file scheduler.h
@@ -40,6 +41,8 @@ struct Scheduler {
   explicit Scheduler(std::shared_ptr<Model> model);
 
   static std::unique_ptr<Scheduler> Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
+  static std::unique_ptr<Scheduler> Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager,
+                                           const EnginePreemptionOptions& preemption);
 
   /**
    * @brief Adds a request to the Scheduler for processing.
@@ -105,6 +108,7 @@ struct Scheduler {
   }
 
   virtual bool SupportsIndependentSlotAdmission() const { return false; }
+  virtual bool SupportsRecomputePreemption() const { return false; }
 
   /**
    * @brief Checks if the Scheduler has any pending requests.
@@ -165,6 +169,8 @@ struct PreemptionProbeBuilder {
 
 struct DynamicBatchScheduler : Scheduler {
   DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
+  DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager,
+                        const EnginePreemptionOptions& preemption);
 
   void AddRequest(std::shared_ptr<Request> request) override;
 
@@ -181,6 +187,7 @@ struct DynamicBatchScheduler : Scheduler {
   bool HasPendingRequests() const override;
 
   bool SupportsIndependentSlotAdmission() const override { return true; }
+  bool SupportsRecomputePreemption() const override { return true; }
 
  private:
   std::vector<std::shared_ptr<Request>> PlanPreemption(
@@ -191,6 +198,8 @@ struct DynamicBatchScheduler : Scheduler {
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
   bool preemption_enabled_{};
+  RecomputeLimits recompute_limits_;
+  AgeBasedRecoveryOptions age_based_recovery_;
   uint64_t committed_step_index_{};
   std::weak_ptr<Request> preemption_beneficiary_;
   uint64_t preemption_beneficiary_turn_id_{};

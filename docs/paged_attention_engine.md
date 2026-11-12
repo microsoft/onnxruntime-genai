@@ -2432,14 +2432,19 @@ If no request can run because of temporary capacity, `RunDynamic()` reports `Cap
 
 ## Recompute preemption
 
-Set these Engine-wide fields in `engine.dynamic_batching`, either in the base configuration or a
-runtime-profile overlay:
+Prefer the opt-in, versioned **experimental runtime construction options** below. Only `Default`
+(existing ordering and wait-only capacity behavior) and `AgeBasedRecovery` (committed-service aging
+and bounded recompute reclamation) are implemented. The no-options Engine constructor is unchanged:
+it inherits the resolved legacy configuration and remains wait-only unless that configuration opts in.
+
+The existing permanent compatibility inputs remain supported in `engine.dynamic_batching`, either
+in the base configuration or a runtime-profile overlay:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `enable_recompute_preemption` | `false` | Enable committed-step aging and recompute preemption |
-| `max_preemptions_per_step` | `1` | Maximum residents relinquishing KV in one planning pass |
-| `min_decode_steps_before_preemption` | `8` | Committed decode steps earned before another active suspension |
+| `max_preemptions_per_step` | `1` | Compatibility default for shared `recompute_limits.max_victims_per_step` |
+| `min_decode_steps_before_preemption` | `8` | Compatibility default for the age policy's decode quantum |
 
 Both numeric limits must be positive integers representable by the configuration parser. Actual
 victim count is also bounded by resident count. These fields are construction-time policy, not
@@ -2447,26 +2452,73 @@ mutable per-Request or per-Turn settings.
 
 ### Policy selection and compatibility
 
-These are permanent age-based scheduling controls, not temporary aliases for a future foreground
-policy. With `enable_recompute_preemption=false`, the existing default ordering and wait-only
-capacity behavior remain in effect. With `true`, the Engine selects committed-service aging plus
-bounded recompute reclamation (`AgeBasedRecovery`), not just an independently enabled cache
-mechanism. The numeric controls tune only that policy; they remain validated but do not enable
-aging or reclamation when the flag is false.
+`OgaExperimentalEngineOptions::Create(1)` / `ExperimentalEngineOptions(version=1)` explicitly opts
+into experimental contract revision **1**. The opaque C handle, experimental names, explicit revision,
+and separate creation entry point form the experimental boundary; no new model/profile JSON keys
+are introduced. This runtime API may evolve incompatibly or be retired in a future release.
+Unsupported revisions fail explicitly rather than being silently reinterpreted. Callers must
+check compatibility when updating the library. This does **not** make permanent `genai_config`
+keys removable or repurposable, including the three legacy fields above. They retain their defaults,
+numeric validation and age-policy meaning; no deprecation or removal of those keys is introduced.
 
-The base configuration is resolved first, then the selected runtime-profile overlay overrides
-its supplied fields, including an explicit `false`. The Engine fixes the resulting policy at
-construction. `Default` and `AgeBasedRecovery` are descriptive policy names here, not new JSON
-enum values or runtime API options.
+The option groups have independent responsibilities:
 
-Any future explicit runtime policy selector must preserve that meaning and resolve after the
-model/profile settings. If explicit legacy policy controls and an explicit runtime selection
-disagree, construction must reject the combination rather than silently override or reinterpret
-either one. For example, an explicit `true` cannot become `Default` or `ForegroundFirst` through
-another option. With no explicit legacy policy selection, a future runtime option may select a
-supported policy directly. Unsupported choices must be rejected, and an API introducing such a
-selector must report its effective policy and capabilities. No runtime policy selector or
-foreground mode is implemented by this revision.
+| Runtime setter | Default | Responsibility |
+| --- | --- | --- |
+| `SetPolicy` / `set_policy` | Inherit resolved legacy flag; otherwise `Default` | Choose one construction-time policy |
+| `SetRecomputeLimits` / `set_recompute_limits` | `max_victims_per_step = 1`, or legacy value | Shared recompute-planning victim cap, not an age quantum |
+| `SetAgeBasedRecovery` / `set_age_based_recovery` | `min_decode_steps_before_preemption = 8`, or legacy value | Age-specific service quantum and existing global-stall exception |
+
+Both runtime numeric values must be positive and fit `size_t`; actual victims remain bounded by
+resident count. If the victim cap cannot free enough capacity, no victims are released and admission
+waits. The cap does not change policy ordering. Future policies need their own tuning group rather
+than inheriting the age quantum.
+
+Resolution is model configuration, then the selected runtime profile, then runtime options. A
+profile's explicit `false` overrides base `true`. An unset runtime policy inherits the effective
+legacy flag: `false` maps to `Default`, `true` permanently maps to `AgeBasedRecovery`. An explicit
+runtime selection must agree with an explicitly configured effective legacy flag, including
+explicit `false`; an omitted/default `false` is not a contradictory selection and permits runtime
+`AgeBasedRecovery`. Profile numeric overrides alone do not turn an omitted flag into an explicit
+selection. Runtime numeric setters override the corresponding resolved legacy defaults.
+
+Runtime tuning groups are rejected for effective `Default`, even when set to their usual defaults;
+they are never silently ignored. In contrast, existing legacy numbers remain validated but inactive
+when legacy selection is false, preserving old configuration behavior. Unknown policies, including
+unimplemented `ForegroundFirst`, and unsupported model/cache/backend combinations fail explicitly
+without fallback. A policy cannot be changed on a running Engine.
+
+```cpp
+auto options = OgaExperimentalEngineOptions::Create(1);
+options->SetPolicy(OgaExperimentalEnginePolicy_AgeBasedRecovery);
+options->SetRecomputeLimits(1);
+options->SetAgeBasedRecovery(8);
+auto engine = OgaEngine::Create(*model, *options);
+auto capabilities = engine->GetCapabilities();
+auto effective_policy = capabilities->ExperimentalPolicy();
+bool supported = capabilities->SupportsExperimentalPolicy(OgaExperimentalEnginePolicy_AgeBasedRecovery);
+```
+
+```python
+options = og.ExperimentalEngineOptions(version=1)
+options.set_policy(og.ExperimentalEnginePolicy.AGE_BASED_RECOVERY)
+options.set_recompute_limits(max_victims_per_step=1)
+options.set_age_based_recovery(min_decode_steps_before_preemption=8)
+engine = og.Engine(model, experimental_options=options)
+capabilities = engine.get_capabilities()
+effective_policy = capabilities.experimental_policy
+supported = capabilities.supports_experimental_policy(og.ExperimentalEnginePolicy.AGE_BASED_RECOVERY)
+```
+
+The C equivalents are `OgaCreateExperimentalEngineOptions`, the
+`OgaExperimentalEngineOptionsSet*` setters, and `OgaCreateEngineWithExperimentalOptions`.
+Creation copies the resolved values; changing or destroying options does not change existing
+Engines or the shared Model defaults. Capability snapshots report the effective policy (including
+legacy selection) and supported policies for that Engine's actual model, backend and cache.
+`Default` is always supported; `AgeBasedRecovery` is reported only for the supported dense paged
+subset below. These are structural capabilities, not production qualification or current capacity.
+Manual speculative proposals report zero supported draft tokens and are rejected under
+`AgeBasedRecovery`, including when the legacy enable flag was omitted.
 
 ### Policy scope and host integration
 
@@ -2474,7 +2526,7 @@ This is **age-based capacity recovery, not host-designated foreground handoff**.
 age orders waiting work; a fresh interactive request does not automatically outrank an older
 background or suspended request. There are no foreground/background tiers, equal-tier residency
 rules, per-invocation deadlines, replacement identities, or mutable Request importance controls.
-The configuration fields above select this Engine-wide policy, not application urgency.
+The construction options and compatibility fields above select this Engine-wide policy, not application urgency.
 
 Preemption is cooperative between complete execution steps; it never interrupts an in-flight
 model call. An unfinished resident still in initial prefill or cache replay is not an eligible

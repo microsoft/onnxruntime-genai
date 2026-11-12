@@ -32,7 +32,7 @@ class LegacyDeviceInterfaceVersionTest : public ::testing::TestWithParam<DeviceT
     const auto calls_before = GetLegacyInterfaceCallCount();
     try {
       GetDeviceInterface(GetParam());
-      ADD_FAILURE() << "An add-on without the combined GGUF, preemption, and media layouts must be rejected.";
+      ADD_FAILURE() << "An add-on without the matching Engine policy/config layouts must be rejected.";
     } catch (const std::runtime_error& error) {
       EXPECT_EQ(std::string{error.what()},
                 "Cuda interface not available: CUDA add-on interface version mismatch: expected " +
@@ -58,6 +58,10 @@ TEST_P(LegacyDeviceInterfaceVersionTest, RejectsVersion21BeforeUsingItsInterface
 
 TEST_P(LegacyDeviceInterfaceVersionTest, RejectsVersion22BeforeUsingItsInterface) {
   RejectsVersionBeforeUsingInterface(22);
+}
+
+TEST_P(LegacyDeviceInterfaceVersionTest, RejectsVersion23BeforeUsingItsInterface) {
+  RejectsVersionBeforeUsingInterface(23);
 }
 
 INSTANTIATE_TEST_SUITE_P(

@@ -251,7 +251,8 @@ struct StateUpdateReplayDesc {
 // Version 22: Config's decoder/drafter layouts gained GGUF initializer mappings.
 // A parallel preemption branch used version 22 for different batching and runtime-profile layouts.
 // Version 23: Combines the GGUF mappings and recompute-preemption Config layouts.
-inline constexpr uint32_t kDeviceInterfaceVersion = 23;
+// Version 24: Config records explicit legacy preemption selection for experimental Engine options.
+inline constexpr uint32_t kDeviceInterfaceVersion = 24;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

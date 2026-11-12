@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "cache_manager.h"
+#include "engine_options.h"
 
 #include <algorithm>
 #include <exception>
@@ -214,13 +215,14 @@ std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model,
                                                    size_t auxiliary_reserved_memory_bytes,
                                                    size_t optional_draft_checkpoint_bytes,
                                                    bool* draft_checkpoint_enabled,
-                                                   size_t non_auxiliary_reserved_memory_bytes) {
+                                                   size_t non_auxiliary_reserved_memory_bytes,
+                                                   std::optional<bool> recompute_preemption_enabled) {
   const ModelStateManifest manifest{model->config_->model.decoder};
   if (model->config_->engine.dynamic_batching) {
     ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
     auto manager = std::make_unique<PagedCacheManager>(
         model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes,
-        optional_draft_checkpoint_bytes, non_auxiliary_reserved_memory_bytes);
+        optional_draft_checkpoint_bytes, non_auxiliary_reserved_memory_bytes, recompute_preemption_enabled);
     if (draft_checkpoint_enabled) {
       *draft_checkpoint_enabled = manager->DraftCheckpointEnabled();
     }
@@ -376,9 +378,13 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
                                      size_t auxiliary_bytes_per_block,
                                      size_t auxiliary_reserved_memory_bytes,
                                      size_t optional_draft_checkpoint_bytes,
-                                     size_t non_auxiliary_reserved_memory_bytes)
+                                     size_t non_auxiliary_reserved_memory_bytes,
+                                     std::optional<bool> recompute_preemption_enabled)
     : CacheManager(model),
-      params_(std::make_shared<GeneratorParams>(*model_)) {
+      params_(std::make_shared<GeneratorParams>(*model_)),
+      recompute_preemption_enabled_{recompute_preemption_enabled
+                                        ? *recompute_preemption_enabled
+                                        : ResolveEnginePreemptionOptions(*model_->config_).Enabled()} {
   has_auxiliary_state_ = auxiliary_bytes_per_block != 0 ||
                          auxiliary_reserved_memory_bytes != 0 ||
                          optional_draft_checkpoint_bytes != 0;
@@ -740,7 +746,7 @@ size_t PagedCacheManager::MaxQueryTokensPerRequest() const {
 }
 
 size_t PagedCacheManager::MaxDraftTokensPerStep() const {
-  if (model_->config_->engine.dynamic_batching->enable_recompute_preemption) {
+  if (recompute_preemption_enabled_) {
     return 0;
   }
   // Recurrent state can only be replayed through the compact transitions the operators captured.

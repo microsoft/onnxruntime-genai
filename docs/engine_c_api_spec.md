@@ -12,7 +12,7 @@ The public ownership and execution hierarchy is:
 
 ```text
 Model
-  `-- Engine                 one shared runtime configured by model.config.engine
+  `-- Engine                 runtime configured by model.config.engine and construction options
         `-- Request          one resident conversation/session
               `-- Turn       one queued, active, or completed generation invocation
 ```
@@ -37,6 +37,7 @@ The redesign must:
 
 ```c
 typedef struct OgaEngine OgaEngine;
+typedef struct OgaExperimentalEngineOptions OgaExperimentalEngineOptions;
 typedef struct OgaEngineEvent OgaEngineEvent;
 typedef struct OgaEngineEventBuffer OgaEngineEventBuffer;
 typedef struct OgaRequest OgaRequest;
@@ -53,6 +54,48 @@ through getters, so the API publishes no layout, size, alignment, version, or st
 Request creation takes no generation parameters. The Engine derives each Request's private search
 configuration from its own model, forcing a single sequence and a single beam, so no caller-supplied
 `GeneratorParams` field can reach the Engine and be silently ignored.
+
+### Experimental construction options, revision 1
+
+The existing `OgaCreateEngine(model, out)` and C++/Python no-options constructors retain their
+behavior. To opt into the separately versioned experimental policy surface:
+
+```c
+typedef uint32_t OgaExperimentalEnginePolicy;
+#define OgaExperimentalEnginePolicy_Default ((OgaExperimentalEnginePolicy)0)
+#define OgaExperimentalEnginePolicy_AgeBasedRecovery ((OgaExperimentalEnginePolicy)1)
+
+OgaResult* OgaCreateExperimentalEngineOptions(uint32_t version, OgaExperimentalEngineOptions** out);
+void OgaDestroyExperimentalEngineOptions(OgaExperimentalEngineOptions* options);
+OgaResult* OgaExperimentalEngineOptionsSetPolicy(
+    OgaExperimentalEngineOptions* options, OgaExperimentalEnginePolicy policy);
+OgaResult* OgaExperimentalEngineOptionsSetRecomputeLimits(
+    OgaExperimentalEngineOptions* options, size_t max_victims_per_step);
+OgaResult* OgaExperimentalEngineOptionsSetAgeBasedRecovery(
+    OgaExperimentalEngineOptions* options, size_t min_decode_steps_before_preemption);
+OgaResult* OgaCreateEngineWithExperimentalOptions(
+    OgaModel* model, const OgaExperimentalEngineOptions* options, OgaEngine** out);
+```
+
+Version `1` is required; unknown revisions and policies fail. `Default` is wait-only;
+`AgeBasedRecovery` adds committed-service aging and selective recompute recovery. No foreground
+policy is exposed. Policy selection, the shared recompute victim cap, and age-specific quantum
+are separate setters. Both numbers must be positive; their defaults are one victim and eight
+decode steps, respectively, unless supplied by legacy model/profile settings.
+
+Model/profile selection precedes runtime options. The selected profile's explicit false overrides
+base true. An omitted runtime policy inherits the effective legacy flag. An explicit runtime policy
+conflicting with an explicit effective legacy flag is an error; omitted/default false is not an
+explicit contradiction. Runtime numbers override legacy defaults, but setting either runtime tuning
+group with effective `Default` is an error, not an ignored option. Unsupported layouts fail without
+fallback. Creation copies options without modifying the Model; options may subsequently change or
+be destroyed without affecting the Engine.
+
+This opt-in runtime API has an explicit experimental revision boundary and may change or be retired
+in future releases. Unsupported revisions must not silently acquire a new meaning. No new
+`genai_config` keys are added and no permanent legacy configuration keys are deprecated, made
+removable, or reinterpreted by that boundary. See the complete
+[compatibility contract and wrapper examples](paged_attention_engine.md#policy-selection-and-compatibility).
 
 ### Request options
 
@@ -594,6 +637,11 @@ selection. For static batching, the maximum batch size is the configured value, 
 four when no `static_batching` entry exists; it does not account for any lower operational limit in
 the current static scheduler. The snapshot also reports the maximum Request length after
 runtime-profile selection and cache construction. The call follows the Engine owner-thread rule.
+`OgaEngineCapabilitiesGetExperimentalPolicy` reports the effective policy.
+`OgaEngineCapabilitiesSupportsExperimentalPolicy` reports support for a known policy on this
+Engine's actual model/backend/cache, even when not selected: `Default` always; `AgeBasedRecovery`
+only for compatible full-attention dynamic paged KV without auxiliary state. Unknown policies and
+null arguments return errors. Capability reporting is not production or performance qualification.
 
 `max_request_length` is the maximum logical token length one Request can reach when it has exclusive
 use of the target paged cache. It includes the final sampled token that has not yet been written to
@@ -613,6 +661,11 @@ size_t max_scheduled_tokens =
   OgaEngineCapabilitiesGetMaxScheduledTokens(capabilities);
 uint64_t max_request_length =
   OgaEngineCapabilitiesGetMaxRequestLength(capabilities);
+OgaExperimentalEnginePolicy policy;
+bool supports_age;
+OgaCheckResult(OgaEngineCapabilitiesGetExperimentalPolicy(capabilities, &policy));
+OgaCheckResult(OgaEngineCapabilitiesSupportsExperimentalPolicy(
+    capabilities, OgaExperimentalEnginePolicy_AgeBasedRecovery, &supports_age));
 OgaDestroyEngineCapabilities(capabilities);
 ```
 
@@ -774,8 +827,8 @@ changes Turn identity, or resets Search/RNG state. Its supported layouts and def
 configuration are described in [Paged Attention Engine](paged_attention_engine.md#recompute-preemption).
 The existing manifest/profile controls permanently select construction-time age-based recovery,
 not foreground scheduling. A selected profile overrides the base settings before Engine creation;
-conflicting explicit legacy and future runtime policy selections must be rejected, not silently
-reinterpreted. No runtime scheduling-policy selector is implemented here. See the
+conflicting explicit legacy and experimental runtime policy selections are rejected, not silently
+reinterpreted. See the
 [policy compatibility contract](paged_attention_engine.md#policy-selection-and-compatibility).
 The implemented policy is age-based capacity recovery, not foreground priority: a fresh invocation
 does not automatically displace older work, and unfinished prefill/replay cannot be selected as a

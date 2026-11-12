@@ -192,6 +192,9 @@ bool TryGreedyTokensToDevice(
 Engine::Engine(std::shared_ptr<Model> model)
     : Engine(model, CreateDependencies(model)) {}
 
+Engine::Engine(std::shared_ptr<Model> model, const ExperimentalEngineOptions& options)
+    : Engine(model, CreateDependencies(model, options)) {}
+
 Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     : model_{std::move(model)},
       cache_manager_{std::move(dependencies.cache_manager)},
@@ -224,12 +227,17 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   if (!model_executor_) {
     throw std::runtime_error("Engine requires a non-null model executor.");
   }
-  ValidateRecomputePreemptionModel(*model_->config_);
-  if (model_->config_->engine.dynamic_batching &&
-      model_->config_->engine.dynamic_batching->enable_recompute_preemption &&
-      (!cache_manager_->SupportsDynamicBatching() ||
-       !cache_manager_->SupportsRecomputePreemption() ||
-       mtp_model_ || mtp_cache_manager_ || mtp_model_executor_ || dflash2_drafter_)) {
+  preemption_options_ = dependencies.preemption_options
+                            ? *dependencies.preemption_options
+                            : ResolveEnginePreemptionOptions(*model_->config_);
+  ValidateExperimentalEnginePolicy(preemption_options_.policy);
+  ValidateRecomputePreemptionModel(*model_->config_, preemption_options_);
+  supports_age_based_recovery_ =
+      SupportsRecomputePreemptionModel(*model_->config_) &&
+      cache_manager_->SupportsDynamicBatching() && cache_manager_->SupportsRecomputePreemption() &&
+      scheduler_->SupportsRecomputePreemption() &&
+      !mtp_model_ && !mtp_cache_manager_ && !mtp_model_executor_ && !dflash2_drafter_;
+  if (preemption_options_.Enabled() && !supports_age_based_recovery_) {
     throw std::runtime_error(
         "Recompute preemption requires a compatible dynamic paged cache without auxiliary state.");
   }
@@ -347,6 +355,10 @@ void ValidateMtpModelCompatibility(const Config& config,
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   return CreateEngineBackend(std::move(model)).dependencies;
+}
+
+EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model, const ExperimentalEngineOptions& options) {
+  return CreateEngineBackend(std::move(model), options).dependencies;
 }
 
 void Engine::PrepareDflash2Feeds(const StepPlan& plan,
@@ -2950,7 +2962,7 @@ bool Engine::HasPendingRequests() {
 
 size_t Engine::MaxDraftTokensPerStep() const {
   ValidateOwnerThread();
-  return backend_capabilities_.UsesTransactions() &&
+  return !preemption_options_.Enabled() && backend_capabilities_.UsesTransactions() &&
                  model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()
              : 0;
@@ -3015,7 +3027,8 @@ EngineCapabilities Engine::GetCapabilities() const {
   ValidateOwnerThread();
   return {backend_capabilities_.configured_max_batch_size,
           backend_capabilities_.max_scheduled_tokens,
-          backend_capabilities_.max_request_length};
+          backend_capabilities_.max_request_length,
+          preemption_options_.policy, supports_age_based_recovery_};
 }
 
 std::optional<PrefixCacheMetrics> Engine::PrefixCacheStats() const {

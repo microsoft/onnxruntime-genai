@@ -570,8 +570,7 @@ int Request::TurnEosFloor() const noexcept {
 }
 
 const char* Request::DraftTokenValidationError() const noexcept {
-  if (params_->config.engine.dynamic_batching &&
-      params_->config.engine.dynamic_batching->enable_recompute_preemption) {
+  if (const auto engine = engine_.lock(); engine && engine->RecomputePreemptionEnabled()) {
     return "Speculative drafts are not supported with recompute preemption.";
   }
   // A stop-enabled turn is not excluded here: draft verification observes target-accepted tokens

@@ -992,10 +992,12 @@ struct Config {
         bool Configured() const noexcept { return explicitly_set || Enabled() || !directory.empty(); }
       } snapshot_cache;
       size_t dflash2_max_snapshots{1};  // Budget-limited windowed drafter prefix snapshots; 0 disables.
-      // Permanent construction-time age-based recovery policy, not foreground priority.
+      // Permanent legacy inputs to construction-time policy resolution, not foreground priority.
       bool enable_recompute_preemption{false};
       size_t max_preemptions_per_step{1};
       size_t min_decode_steps_before_preemption{8};
+      // Runtime provenance only: distinguish an explicit false from the omitted legacy default.
+      bool recompute_preemption_explicitly_set{};
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 

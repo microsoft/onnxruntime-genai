@@ -851,17 +851,20 @@ inline DoublesEngine MakeStaticDoublesEngine(std::shared_ptr<Model> model, size_
   return DoublesEngine{std::move(engine), cache_observer, executor_observer, std::move(trace)};
 }
 
-inline CompositeDoublesEngine MakeCompositeDoublesEngine(std::shared_ptr<Model> model,
-                                                         int32_t forced_token) {
+inline CompositeDoublesEngine MakeCompositeDoublesEngine(
+    std::shared_ptr<Model> model, int32_t forced_token,
+    const ExperimentalEngineOptions& options = ExperimentalEngineOptions{}) {
   // Use a recording executor so these tests can inspect composite transaction behavior without
   // depending on the synthetic ONNX graph's logits.
-  auto cache = std::make_shared<PagedCacheManager>(model);
+  const auto preemption = ResolveEnginePreemptionOptions(*model->config_, options);
+  auto cache = std::make_shared<PagedCacheManager>(model, 0, 0, 0, 0, preemption.Enabled());
   auto* cache_observer = cache.get();
-  auto scheduler = Scheduler::Create(model, cache);
+  auto scheduler = Scheduler::Create(model, cache, preemption);
   auto executor = std::make_unique<RecordingModelExecutor>(model, cache, forced_token);
   auto* executor_observer = executor.get();
 
   EngineDependencies dependencies{std::move(cache), std::move(scheduler), std::move(executor)};
+  dependencies.preemption_options = preemption;
   auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
   return CompositeDoublesEngine{std::move(engine), cache_observer, executor_observer};
 }

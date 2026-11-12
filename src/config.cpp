@@ -3252,6 +3252,7 @@ struct DynamicBatching_Element : JSON::Element {
       v_->dflash2_max_snapshots = static_cast<size_t>(parsed_value);
     } else if (name == "enable_recompute_preemption") {
       v_->enable_recompute_preemption = JSON::Get<bool>(value);
+      v_->recompute_preemption_explicitly_set = true;
     } else if (name == "max_preemptions_per_step" ||
                name == "min_decode_steps_before_preemption") {
       const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
@@ -4324,6 +4325,7 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device) {
     if (batching.dflash2_max_snapshots) effective.dflash2_max_snapshots = *batching.dflash2_max_snapshots;
     if (batching.enable_recompute_preemption) {
       effective.enable_recompute_preemption = *batching.enable_recompute_preemption;
+      effective.recompute_preemption_explicitly_set = true;
     }
     if (batching.max_preemptions_per_step) effective.max_preemptions_per_step = *batching.max_preemptions_per_step;
     if (batching.min_decode_steps_before_preemption) {

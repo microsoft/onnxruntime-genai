@@ -198,7 +198,10 @@ Allow supported settings under:
   (default `8`), positive integers bounded by `2147483647`. Base runtime fragments and profile
   overlays share validation and preserve explicit `false`. These permanently select default-off,
   construction-time age-based recovery, not foreground scheduling or exported graph properties.
-  Future runtime selectors must preserve the [policy compatibility contract](paged_attention_engine.md#policy-selection-and-compatibility).
+  Runtime Engine construction options use a separate explicitly versioned experimental boundary;
+  they do not add new export settings or weaken the permanence of these legacy keys. See the
+  [policy compatibility contract](paged_attention_engine.md#policy-selection-and-compatibility)
+  for runtime numeric precedence and explicit-selection conflicts.
   Enabled preemption currently requires full-attention paged KV
   without fixed, ring/model-managed, or auxiliary/speculative state; Engine construction rejects
   unsupported layouts. See [Recompute preemption](paged_attention_engine.md#recompute-preemption).

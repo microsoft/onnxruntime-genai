@@ -167,6 +167,88 @@ TEST(RecomputePreemptionConfigTest, RuntimeProfileCombinesPreemptionAndSnapshotO
   EXPECT_EQ(batching.min_decode_steps_before_preemption, 3u);
 }
 
+TEST(RecomputePreemptionConfigTest, RuntimeSelectionDistinguishesOmittedAndExplicitLegacyFalse) {
+  Config config{fs::path{MODEL_PATH "engine/dummy-decoder"},
+                R"({"engine":{"dynamic_batching":{"num_blocks":4}}})"};
+  ExperimentalEngineOptions options;
+  EXPECT_EQ(ResolveEnginePreemptionOptions(config, options).policy, ExperimentalEnginePolicy::Default);
+  options.SetPolicy(ExperimentalEnginePolicy::AgeBasedRecovery);
+  EXPECT_TRUE(ResolveEnginePreemptionOptions(config, options).Enabled());
+  EXPECT_FALSE(config.engine.dynamic_batching->enable_recompute_preemption);
+
+  EXPECT_THROW(OverlayConfig(config, R"({"engine":{"dynamic_batching":{
+    "enable_recompute_preemption":false,"max_preemptions_per_step":0}}})"),
+               std::runtime_error);
+  EXPECT_TRUE(ResolveEnginePreemptionOptions(config, options).Enabled());
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"enable_recompute_preemption":false}}})");
+  EXPECT_THROW(ResolveEnginePreemptionOptions(config, options), std::invalid_argument);
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"enable_recompute_preemption":true}}})");
+  EXPECT_TRUE(ResolveEnginePreemptionOptions(config, options).Enabled());
+  options.SetPolicy(ExperimentalEnginePolicy::Default);
+  EXPECT_THROW(ResolveEnginePreemptionOptions(config, options), std::invalid_argument);
+}
+
+TEST(RecomputePreemptionConfigTest, RuntimeGroupsOverrideLegacyDefaultsWithoutChangingConfig) {
+  Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, R"({
+    "engine":{"dynamic_batching":{"enable_recompute_preemption":true,
+      "max_preemptions_per_step":2,"min_decode_steps_before_preemption":3}}
+  })"};
+  ExperimentalEngineOptions options;
+  options.SetRecomputeLimits(4);
+  options.SetAgeBasedRecovery(5);
+  const auto resolved = ResolveEnginePreemptionOptions(config, options);
+  EXPECT_TRUE(resolved.Enabled());
+  EXPECT_EQ(resolved.recompute_limits.max_victims_per_step, 4u);
+  EXPECT_EQ(resolved.age_based_recovery.min_decode_steps_before_preemption, 5u);
+  EXPECT_EQ(config.engine.dynamic_batching->max_preemptions_per_step, 2u);
+  EXPECT_EQ(config.engine.dynamic_batching->min_decode_steps_before_preemption, 3u);
+  EXPECT_THROW(options.SetRecomputeLimits(0), std::invalid_argument);
+  EXPECT_THROW(options.SetAgeBasedRecovery(0), std::invalid_argument);
+  EXPECT_THROW(options.SetPolicy(static_cast<ExperimentalEnginePolicy>(2)), std::invalid_argument);
+  EXPECT_EQ(ResolveEnginePreemptionOptions(config, options).recompute_limits.max_victims_per_step, 4u);
+
+  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"enable_recompute_preemption":false}}})");
+  EXPECT_FALSE(ResolveEnginePreemptionOptions(config).Enabled());
+  EXPECT_THROW(ResolveEnginePreemptionOptions(config, options), std::invalid_argument);
+}
+
+TEST(RecomputePreemptionConfigTest, RuntimeSelectionUsesProfileOverrideIncludingExplicitFalse) {
+  for (const bool enabled : {false, true}) {
+    Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, enabled ? R"({
+      "engine":{"dynamic_batching":{"enable_recompute_preemption":false}},
+      "runtime_profiles":[{"id":"age","eligibility":{"minimum_total_device_memory_bytes":1},
+        "overlay":{"engine":{"dynamic_batching":{"enable_recompute_preemption":true,
+          "max_preemptions_per_step":2,"min_decode_steps_before_preemption":3}}}}]
+    })"
+                                                                       : R"({
+      "engine":{"dynamic_batching":{"enable_recompute_preemption":true}},
+      "runtime_profiles":[{"id":"wait","eligibility":{"minimum_total_device_memory_bytes":1},
+        "overlay":{"engine":{"dynamic_batching":{"enable_recompute_preemption":false}}}}]
+    })"};
+    ApplyRuntimeProfile(config, uint64_t{100});
+    ExperimentalEngineOptions options;
+    EXPECT_EQ(ResolveEnginePreemptionOptions(config).Enabled(), enabled);
+    options.SetPolicy(enabled ? ExperimentalEnginePolicy::Default : ExperimentalEnginePolicy::AgeBasedRecovery);
+    EXPECT_THROW(ResolveEnginePreemptionOptions(config, options), std::invalid_argument);
+    options.SetPolicy(enabled ? ExperimentalEnginePolicy::AgeBasedRecovery : ExperimentalEnginePolicy::Default);
+    EXPECT_EQ(ResolveEnginePreemptionOptions(config, options).Enabled(), enabled);
+  }
+
+  Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, R"({
+    "engine":{"dynamic_batching":{"num_blocks":4}},
+    "runtime_profiles":[{"id":"limits","eligibility":{"minimum_total_device_memory_bytes":1},
+      "overlay":{"engine":{"dynamic_batching":{"max_preemptions_per_step":2,
+        "min_decode_steps_before_preemption":3}}}}]
+  })"};
+  ApplyRuntimeProfile(config, uint64_t{100});
+  ExperimentalEngineOptions options;
+  options.SetPolicy(ExperimentalEnginePolicy::AgeBasedRecovery);
+  const auto resolved = ResolveEnginePreemptionOptions(config, options);
+  EXPECT_TRUE(resolved.Enabled());
+  EXPECT_EQ(resolved.recompute_limits.max_victims_per_step, 2u);
+  EXPECT_EQ(resolved.age_based_recovery.min_decode_steps_before_preemption, 3u);
+}
+
 TEST(RecomputePreemptionTest, DefaultOffPreservesWaitOnlyAdmission) {
   auto test = MakeCompositeDoublesEngine(PreemptionModel(1, false), 5);
   auto resident = Queue(test.engine);
@@ -244,6 +326,48 @@ TEST(RecomputePreemptionTest, ServiceQuantumPreventsImmediatePingPong) {
   EXPECT_TRUE(test.cache->IsResident(waiting));
   EXPECT_EQ(waiting->PreemptionCount(), 0u);
   CheckState(test, std::array{resident, waiting});
+}
+
+TEST(RecomputePreemptionTest, RuntimeAgeOptionsSnapshotQuantumInsteadOfReadingSharedConfig) {
+  auto model = PreemptionModel(1, false);
+  ExperimentalEngineOptions options;
+  options.SetPolicy(ExperimentalEnginePolicy::AgeBasedRecovery);
+  options.SetAgeBasedRecovery(3);
+  auto test = MakeCompositeDoublesEngine(model, 5, options);
+  options.SetPolicy(ExperimentalEnginePolicy::Default);
+  options.SetAgeBasedRecovery(100);
+  model->config_->engine.dynamic_batching->min_decode_steps_before_preemption = 100;
+  EXPECT_FALSE(model->config_->engine.dynamic_batching->enable_recompute_preemption);
+  EXPECT_EQ(test.engine->GetCapabilities().experimental_policy, ExperimentalEnginePolicy::AgeBasedRecovery);
+  auto resident = Queue(test.engine);
+  ModelSteps(test, 2);
+  auto waiting = Queue(test.engine);
+  ModelSteps(test, 2);
+  EXPECT_EQ(resident->PreemptionCount(), 0u);
+  ModelSteps(test, 1);
+  EXPECT_EQ(resident->Status(), RequestStatus::Suspended);
+  EXPECT_TRUE(test.cache->IsResident(waiting));
+  CheckState(test, std::array{resident, waiting});
+}
+
+TEST(RecomputePreemptionTest, RuntimeSharedVictimCapRequiresWholeAdmissionToFit) {
+  for (const size_t cap : {1u, 2u}) {
+    auto model = PreemptionModel(2, false, 0, 1, 3);
+    ExperimentalEngineOptions options;
+    options.SetPolicy(ExperimentalEnginePolicy::AgeBasedRecovery);
+    options.SetRecomputeLimits(cap);
+    auto test = MakeCompositeDoublesEngine(model, 5, options);
+    auto first = Queue(test.engine);
+    auto second = Queue(test.engine);
+    ModelSteps(test, 2);
+    const std::vector<int32_t> prompt(70, 9);
+    auto waiting = Queue(test.engine, prompt, 1);
+    ModelSteps(test, 1);
+    EXPECT_EQ(first->PreemptionCount(), cap == 2 ? 1u : 0u);
+    EXPECT_EQ(second->PreemptionCount(), cap == 2 ? 1u : 0u);
+    EXPECT_EQ(test.cache->IsResident(waiting), cap == 2);
+    CheckState(test, std::array{first, second, waiting});
+  }
 }
 
 TEST(RecomputePreemptionTest, VictimBoundDoesNotDiscardInsufficientCapacity) {

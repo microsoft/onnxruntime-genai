@@ -144,14 +144,23 @@ bool StaticBatchScheduler::HasPendingRequests() const {
 }
 
 DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
-    : Scheduler{model}, model_{model}, cache_manager_{cache_manager}, preemption_enabled_{model->config_->engine.dynamic_batching->enable_recompute_preemption} {
+    : DynamicBatchScheduler(model, cache_manager, ResolveEnginePreemptionOptions(*model->config_)) {}
+
+DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager,
+                                             const EnginePreemptionOptions& preemption)
+    : Scheduler{model},
+      model_{model},
+      cache_manager_{cache_manager},
+      preemption_enabled_{preemption.Enabled()},
+      recompute_limits_{preemption.recompute_limits},
+      age_based_recovery_{preemption.age_based_recovery} {
+  ValidateExperimentalEnginePolicy(preemption.policy);
   if (preemption_enabled_ && !cache_manager_->SupportsRecomputePreemption()) {
     throw std::runtime_error(
         "Recompute preemption requires full-attention paged KV without fixed or auxiliary state.");
   }
-  const auto& config = *model_->config_->engine.dynamic_batching;
   if (preemption_enabled_ &&
-      (config.max_preemptions_per_step == 0 || config.min_decode_steps_before_preemption == 0)) {
+      (recompute_limits_.max_victims_per_step == 0 || age_based_recovery_.min_decode_steps_before_preemption == 0)) {
     throw std::invalid_argument("Recompute preemption limits must be positive.");
   }
 }
@@ -261,7 +270,6 @@ std::vector<std::shared_ptr<Request>> DynamicBatchScheduler::PlanPreemption(
     }
     return left > right;
   });
-  const auto& config = *model_->config_->engine.dynamic_batching;
   const PreemptionProbeBuilder probe_builder{candidates, residents.size()};
 
   for (const auto& beneficiary : candidates) {
@@ -288,7 +296,7 @@ std::vector<std::shared_ptr<Request>> DynamicBatchScheduler::PlanPreemption(
           continue;
         }
         const bool earned_quantum =
-            victim->decode_steps_since_admission_ >= config.min_decode_steps_before_preemption;
+            victim->decode_steps_since_admission_ >= age_based_recovery_.min_decode_steps_before_preemption;
         // A globally stalled batch may have exhausted blocks before paying the full quantum.
         // Require at least one committed output since admission even in that liveness escape.
         if (!earned_quantum && (result.executable || !victim->generated_since_admission_)) {
@@ -298,7 +306,7 @@ std::vector<std::shared_ptr<Request>> DynamicBatchScheduler::PlanPreemption(
       eligible_victims.push_back(victim);
     }
     const size_t victim_limit =
-        std::min(config.max_preemptions_per_step, eligible_victims.size());
+        std::min(recompute_limits_.max_victims_per_step, eligible_victims.size());
     std::vector<std::shared_ptr<Request>> victims;
     victims.reserve(victim_limit);
     // A useless early owner must not hide a useful later victim. Rotate the policy order rather
@@ -347,7 +355,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   std::vector<Candidate> candidates;
   candidates.reserve(allocated_requests.size() + requests_pool_.size());
   const size_t cache_query_token_cap = cache_manager_->MaxQueryTokensPerRequest();
-  const size_t max_draft_token_count = cache_manager_->MaxDraftTokensPerStep();
+  const size_t max_draft_token_count = preemption_enabled_ ? 0 : cache_manager_->MaxDraftTokensPerStep();
   std::shared_ptr<Request> preparation_request;
   std::shared_ptr<MediaItem> preparation_item;
   StepPlanningResult deferred_preparation;
@@ -776,8 +784,16 @@ bool DynamicBatchScheduler::HasPendingRequests() const {
 }
 
 std::unique_ptr<Scheduler> Scheduler::Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager) {
+  return Create(model, cache_manager, ResolveEnginePreemptionOptions(*model->config_));
+}
+
+std::unique_ptr<Scheduler> Scheduler::Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager,
+                                             const EnginePreemptionOptions& preemption) {
   if (cache_manager->SupportsDynamicBatching()) {
-    return std::make_unique<DynamicBatchScheduler>(model, cache_manager);
+    return std::make_unique<DynamicBatchScheduler>(model, cache_manager, preemption);
+  }
+  if (preemption.Enabled()) {
+    throw std::runtime_error("Recompute preemption requires a dynamic paged scheduler.");
   }
   if (cache_manager->SupportsContinuousMultiSlotDecoding()) {
     return std::make_unique<FixedSlotScheduler>(model, cache_manager);

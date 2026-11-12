@@ -683,6 +683,83 @@ def test_engine_capabilities(model):
     assert "Engine operations must be called from the Engine owner thread" in str(off_thread_errors[0])
 
 
+def test_experimental_engine_policy_is_per_engine_and_copied(model):
+    policy = og.ExperimentalEnginePolicy
+    options = og.ExperimentalEngineOptions(version=1)
+    options.set_policy(policy.AGE_BASED_RECOVERY)
+    options.set_recompute_limits(max_victims_per_step=2)
+    options.set_age_based_recovery(min_decode_steps_before_preemption=3)
+    age = og.Engine(model, experimental_options=options)
+    options.set_policy(policy.DEFAULT)
+    with pytest.raises(RuntimeError, match="require AgeBasedRecovery"):
+        og.Engine(model, experimental_options=options)
+    del options
+    wait = og.Engine(model)
+    assert age.get_capabilities().experimental_policy == policy.AGE_BASED_RECOVERY
+    assert wait.get_capabilities().experimental_policy == policy.DEFAULT
+    for engine in (age, wait):
+        assert engine.get_capabilities().supports_experimental_policy(policy.DEFAULT)
+        assert engine.get_capabilities().supports_experimental_policy(policy.AGE_BASED_RECOVERY)
+        sink, sinks = _Sink(), {}
+        _create_request(engine, _PROMPT_A, 2, sink, sinks)
+        _run(engine, sinks)
+        assert sink.tokens == predicted_tokens(_PROMPT_A, 2)
+
+
+@pytest.mark.parametrize("legacy", [None, False, True])
+def test_experimental_engine_policy_legacy_conflicts(device, legacy):
+    config = og.Config(str(_MODEL_DIR))
+    config.clear_providers()
+    if device != "cpu":
+        config.append_provider(device)
+    if legacy is not None:
+        config.overlay(json.dumps({"engine": {"dynamic_batching": {"enable_recompute_preemption": legacy}}}))
+    model = og.Model(config)
+    policy = og.ExperimentalEnginePolicy
+    assert og.Engine(model).get_capabilities().experimental_policy == (
+        policy.AGE_BASED_RECOVERY if legacy else policy.DEFAULT
+    )
+    for selection in (policy.DEFAULT, policy.AGE_BASED_RECOVERY):
+        options = og.ExperimentalEngineOptions(version=1)
+        options.set_policy(selection)
+        if legacy is not None and (selection == policy.AGE_BASED_RECOVERY) != legacy:
+            with pytest.raises(RuntimeError, match="conflicts"):
+                og.Engine(model, experimental_options=options)
+        else:
+            assert og.Engine(model, experimental_options=options).get_capabilities().experimental_policy == selection
+
+
+def test_experimental_engine_options_validation(model):
+    for version in (0, 2):
+        with pytest.raises(RuntimeError, match="version"):
+            og.ExperimentalEngineOptions(version=version)
+    options = og.ExperimentalEngineOptions(version=1)
+    for value in ("ForegroundFirst", "unknown"):
+        with pytest.raises(TypeError):
+            options.set_policy(value)
+    with pytest.raises(RuntimeError, match="must be > 0"):
+        options.set_recompute_limits(max_victims_per_step=0)
+    with pytest.raises(RuntimeError, match="must be > 0"):
+        options.set_age_based_recovery(min_decode_steps_before_preemption=0)
+    options.set_age_based_recovery(min_decode_steps_before_preemption=8)
+    with pytest.raises(RuntimeError, match="require AgeBasedRecovery"):
+        og.Engine(model, experimental_options=options)
+
+
+def test_experimental_runtime_age_rejects_drafts(draft_model):
+    assert og.Engine(draft_model).max_draft_tokens_per_proposal() > 0
+    options = og.ExperimentalEngineOptions(version=1)
+    options.set_policy(og.ExperimentalEnginePolicy.AGE_BASED_RECOVERY)
+    engine = og.Engine(draft_model, experimental_options=options)
+    assert engine.max_draft_tokens_per_proposal() == 0
+    request = engine.create_request()
+    request.begin_turn(np.asarray(_PROMPT_A, dtype=np.int32))
+    _next_event(engine)
+    with pytest.raises(RuntimeError, match="recompute preemption"):
+        request.set_draft_tokens(np.asarray([5], dtype=np.int32))
+    request.close()
+
+
 def test_engine_run_releases_gil(model):
     engine = og.Engine(model)
     prompt = _PROMPT_LONG * 20
