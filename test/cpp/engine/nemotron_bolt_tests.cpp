@@ -8,6 +8,7 @@
 #include <functional>
 #include <cstring>
 #include <cmath>
+#include <limits>
 
 #include <nlohmann/json.hpp>
 
@@ -34,6 +35,26 @@ struct NemotronBoltTestAccess {
 
   static size_t Length(const NemotronBoltState& state) { return state.length_; }
   static size_t SelectedRow(const NemotronBoltState& state) { return static_cast<size_t>(state.state_row_); }
+
+  static void CheckCommittedRound(const NemotronBoltState& state, size_t public_length) {
+    EXPECT_EQ(state.length_ + 1, public_length + state.pending_.size());
+    EXPECT_EQ(state.stats_.tokens_queued, state.stats_.tokens_emitted + state.pending_.size());
+    if (state.stats_.rounds != 0) {
+      EXPECT_LT(static_cast<size_t>(state.state_row_), state.verified_rows_);
+      EXPECT_EQ(state.stats_.bonus_tokens + state.stats_.correction_tokens, state.stats_.rounds);
+      EXPECT_EQ(state.stats_.zero_accept_rounds + state.stats_.partial_accept_rounds +
+                    state.stats_.full_accept_rounds,
+                state.stats_.rounds);
+      size_t accepted = 0, rounds = 0;
+      for (size_t i = 0; i < state.stats_.acceptance_length_histogram.size(); ++i) {
+        accepted += i * state.stats_.acceptance_length_histogram[i];
+        rounds += state.stats_.acceptance_length_histogram[i];
+      }
+      EXPECT_EQ(state.stats_.draft_tokens_accepted, accepted);
+      EXPECT_EQ(state.stats_.rounds, rounds);
+      EXPECT_LE(accepted, state.stats_.draft_tokens_evaluated);
+    }
+  }
 
   static nlohmann::json CompareLiveBoundary(NemotronBoltState& ordinary,
                                             NemotronBoltState& speculative, size_t row) {
@@ -312,6 +333,46 @@ TEST(NemotronBolt, VerificationKeepsQueryEndpointsInOneKeyTile) {
       EXPECT_EQ((position + 7) / 128, (position + row + 7) / 128);
     if (rows < 8)
       EXPECT_NE((position + 7) / 128, (position + rows + 7) / 128);
+  }
+}
+
+TEST(NemotronBolt, VerificationScratchAndOutputBudgetBoundaries) {
+  EXPECT_EQ(NemotronBoltVerifyUsableRows(500, 513, 508), 8);
+  EXPECT_EQ(NemotronBoltVerifyUsableRows(500, 512, 506), 5);
+  EXPECT_THROW(NemotronBoltVerifyUsableRows(500, 512, 507), std::runtime_error);
+  for (int budget : {-1, 0, 499, 500, 501})
+    EXPECT_THROW(NemotronBoltVerifyUsableRows(500, 512, budget), std::runtime_error);
+  EXPECT_THROW(NemotronBoltVerifyUsableRows(500, 507, 502), std::runtime_error);
+  EXPECT_THROW(NemotronBoltVerifyUsableRows(std::numeric_limits<size_t>::max(), 512, 502),
+               std::runtime_error);
+}
+
+TEST(NemotronBolt, TerminalRoundsUseOnlyDeliverableVerifiedRows) {
+  const std::vector<int32_t> drafts{20, 21, 22, 23, 24, 25, 26};
+  for (size_t usable = 1; usable <= 8; ++usable) {
+    for (size_t budget = 1; budget <= 8; ++budget) {
+      for (size_t eos_row = 0; eos_row <= 8; ++eos_row) {
+        std::vector<int64_t> predictions(drafts.begin(), drafts.end());
+        predictions.push_back(99);
+        std::vector<int32_t> candidates = drafts;
+        if (eos_row < 8) {
+          predictions[eos_row] = 2;
+          if (eos_row < 7) candidates[eos_row] = 2;
+        }
+        const auto tokens = NemotronBoltRoundTokens(candidates, predictions, budget,
+                                                    std::vector<int>{2}, usable);
+        const size_t committed_rows = std::min({usable, budget, eos_row + 1});
+        ASSERT_EQ(tokens.size(), committed_rows);
+        EXPECT_EQ(tokens.back(), predictions[committed_rows - 1]);
+        const auto accepted = NemotronBoltAcceptedPrefix(candidates, predictions, committed_rows - 1);
+        EXPECT_EQ(accepted, committed_rows - 1);
+        EXPECT_LT(accepted, usable);  // Selected state and bonus/correction prediction stay in range.
+        auto poisoned = predictions;
+        std::fill(poisoned.begin() + usable, poisoned.end(), -1);
+        EXPECT_EQ(NemotronBoltRoundTokens(candidates, poisoned, budget, std::vector<int>{2}, usable),
+                  tokens);
+      }
+    }
   }
 }
 
@@ -1045,28 +1106,28 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
             bolt.drafter_model_->config_->model.decoder.shared_initializers.size());
   ASSERT_EQ(bolt.shared_initializer_entries_.size(),
             bolt.drafter_model_->shared_initializer_entries_.size());
-  ASSERT_EQ(bolt.shared_initializer_entries_.size(),
-            bolt.drafter_model_->shared_initializer_entries_.size());
   for (size_t i = 0; i < bolt.shared_initializer_entries_.size(); ++i) {
     const auto& target = bolt.config_->model.decoder.shared_initializers[i];
     const auto& draft = bolt.drafter_model_->config_->model.decoder.shared_initializers[i];
     const auto target_path = bolt.config_->ResolvePath(target.data_file);
     const auto draft_path = bolt.drafter_model_->config_->ResolvePath(draft.data_file);
 #ifdef _WIN32
-    const bool same_file = target_path.string() == draft_path.string();
+    const bool same_file = std::filesystem::canonical(target_path.c_str()) ==
+                           std::filesystem::canonical(draft_path.c_str());
 #else
     const bool same_file = std::filesystem::equivalent(target_path.string(), draft_path.string());
 #endif
     const auto offset = [](const std::string& value) {
       return value.empty() ? uint64_t{0} : std::stoull(value);
     };
-    const auto& target_memory = bolt.p_device_->GetAllocator().GetInfo();
-    const auto& draft_memory = bolt.drafter_model_->p_device_->GetAllocator().GetInfo();
+    const auto target_memory = bolt.p_device_->GetMemoryInfo();
+    const auto draft_memory = bolt.drafter_model_->p_device_->GetMemoryInfo();
     const bool same_region = same_file && offset(target.offset) == offset(draft.offset) &&
                              std::stoull(target.length) == std::stoull(draft.length) &&
                              target.data_type == draft.data_type && target.shape == draft.shape &&
-                             target_memory.GetDeviceType() == draft_memory.GetDeviceType() &&
-                             target_memory.GetDeviceId() == draft_memory.GetDeviceId();
+                             target_memory->GetAllocatorName() == draft_memory->GetAllocatorName() &&
+                             target_memory->GetDeviceType() == draft_memory->GetDeviceType() &&
+                             target_memory->GetDeviceId() == draft_memory->GetDeviceId();
     // Split data files contain copies; registry sharing follows the source region, not equal values.
     if (same_region)
       EXPECT_EQ(bolt.shared_initializer_entries_[i].get(),
@@ -1139,7 +1200,11 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
     EXPECT_THROW(generator.AppendTokens(std::vector<int32_t>{-1}), std::runtime_error);
     EXPECT_EQ(generator.TokenCount(), 0);
     generator.AppendTokens(prompt);
-    while (!generator.IsDone()) generator.GenerateNextToken();
+    while (!generator.IsDone()) {
+      generator.GenerateNextToken();
+      NemotronBoltTestAccess::CheckCommittedRound(
+          dynamic_cast<NemotronBoltState&>(*generator.state_), generator.TokenCount());
+    }
     const auto sequence = generator.GetSequence(0).CopyDeviceToCpu();
     EXPECT_EQ(sequence.size(), prompt.size() + budget);
     EXPECT_TRUE(std::equal(sequence.begin(), sequence.end(), baseline.begin()));

@@ -15,15 +15,18 @@ struct NemotronBoltTestAccess;
 inline constexpr size_t kBoltVerifyRows = 8;
 
 size_t NemotronBoltVerifyPrefixRows(size_t position);
+size_t NemotronBoltVerifyUsableRows(size_t position, size_t capacity, int max_length);
 void ValidateNemotronBoltSearch(const GeneratorParams& params);
 void ValidateNemotronBoltGraphCapture(const Config::SessionOptions& options, bool speculative);
 std::unique_ptr<Config> CreateNemotronBoltDrafterConfig(const Config& config);
 size_t NemotronBoltAcceptedPrefix(std::span<const int32_t> drafts,
-                                  std::span<const int64_t> predictions);
+                                  std::span<const int64_t> predictions,
+                                  size_t max_accepted = kBoltVerifyRows - 1);
 std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
                                              std::span<const int64_t> predictions,
                                              size_t remaining,
-                                             std::span<const int> eos);
+                                             std::span<const int> eos,
+                                             size_t usable_rows = kBoltVerifyRows);
 
 struct NemotronBoltModel : Model {
   NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env);
@@ -73,6 +76,7 @@ struct NemotronBoltState : State {
   std::unique_ptr<Tensor> prefill_aux_;
   std::unique_ptr<Request> request_;
   size_t length_{};
+  size_t verified_rows_{};
   int32_t state_row_{};
   int32_t anchor_{};
   std::vector<int32_t> drafts_;

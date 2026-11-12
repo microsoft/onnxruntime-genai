@@ -93,11 +93,12 @@ void ValidateNemotronBoltSearch(const GeneratorParams& params) {
 }
 
 size_t NemotronBoltAcceptedPrefix(std::span<const int32_t> drafts,
-                                  std::span<const int64_t> predictions) {
-  Require(drafts.size() == kBoltVerifyRows - 1 && predictions.size() == kBoltVerifyRows,
+                                  std::span<const int64_t> predictions, size_t max_accepted) {
+  Require(drafts.size() == kBoltVerifyRows - 1 && predictions.size() == kBoltVerifyRows &&
+              max_accepted < kBoltVerifyRows,
           "verification requires seven drafts and eight predictions");
   size_t accepted = 0;
-  while (accepted < drafts.size() && drafts[accepted] == predictions[accepted])
+  while (accepted < max_accepted && drafts[accepted] == predictions[accepted])
     ++accepted;
   return accepted;
 }
@@ -110,12 +111,29 @@ size_t NemotronBoltVerifyPrefixRows(size_t position) {
   return std::min(kBoltVerifyRows, key_tile - ((position + kBoltVerifyRows - 1) % key_tile));
 }
 
+size_t NemotronBoltVerifyUsableRows(size_t position, size_t capacity, int max_length) {
+  Require(max_length > 0 && position < static_cast<size_t>(max_length) - 1,
+          "verification requires a positive remaining output budget");
+  Require(capacity >= kBoltVerifyRows && position <= capacity - kBoltVerifyRows,
+          "verify block exceeds fixed capacity");
+  const size_t prefix = NemotronBoltVerifyPrefixRows(position);
+  if (prefix == kBoltVerifyRows || prefix <= capacity - position - kBoltVerifyRows)
+    return kBoltVerifyRows;
+  Require(static_cast<size_t>(max_length) <= position + 1 + prefix,
+          "arithmetic boundary exceeds verification scratch capacity");
+  return prefix;
+}
+
 std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
                                              std::span<const int64_t> predictions,
-                                             size_t remaining, std::span<const int> eos) {
-  const size_t accepted = NemotronBoltAcceptedPrefix(drafts, predictions);
+                                             size_t remaining, std::span<const int> eos,
+                                             size_t usable_rows) {
+  Require(usable_rows > 0 && usable_rows <= kBoltVerifyRows, "invalid usable verification rows");
+  const size_t limit = std::min(remaining, usable_rows);
+  // Reserve the last delivered row for its prediction/anchor, not an uncommitted draft.
+  const size_t accepted = NemotronBoltAcceptedPrefix(drafts, predictions, limit ? limit - 1 : 0);
   std::vector<int32_t> result;
-  for (size_t row = 0; row <= accepted && result.size() < remaining; ++row) {
+  for (size_t row = 0; row <= accepted && result.size() < limit; ++row) {
     const int32_t token = row < accepted ? drafts[row] : static_cast<int32_t>(predictions[row]);
     result.push_back(token);
     if (std::find(eos.begin(), eos.end(), token) != eos.end())
@@ -425,6 +443,7 @@ void NemotronBoltState::Reset() {
   model_.p_device_->Synchronize();
   if (drafter_) drafter_->ReleaseAll();
   length_ = 0;
+  verified_rows_ = 0;
   state_row_ = 0;
   anchor_ = 0;
   drafts_.clear();
@@ -471,14 +490,13 @@ void NemotronBoltState::RestoreVerifyPrefix(Tensor& tensor, Tensor& prefix) {
 }
 
 std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, bool want_predictions) {
+  verified_rows_ = kBoltVerifyRows;
   const size_t prefix = NemotronBoltVerifyPrefixRows(length_);
   if (!prefilled_ || !drafter_ || prefix == kBoltVerifyRows)
     return VerifyBlock(tokens, want_predictions);
-  if (length_ + prefix + kBoltVerifyRows > bolt_.capacity_) {
-    Require(static_cast<size_t>(params_->search.max_length) - length_ - 1 <= prefix,
-            "arithmetic boundary exceeds verification scratch capacity");
+  verified_rows_ = NemotronBoltVerifyUsableRows(length_, bolt_.capacity_, params_->search.max_length);
+  if (verified_rows_ < kBoltVerifyRows)
     return VerifyBlock(tokens, want_predictions);
-  }
   const size_t position = length_;
   const int32_t selected = state_row_;
   // Keep compact prefixes alive through stream completion, including failure/reset cleanup.
@@ -523,7 +541,7 @@ std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, 
 std::vector<int64_t> NemotronBoltState::VerifyBlock(std::span<const int32_t> tokens, bool want_predictions) {
   const auto rows = tokens.size();
   Require((rows == bolt_.target_rows_ || (bolt_.single_token_decode_ && rows == 1)) &&
-              length_ + kBoltVerifyRows <= bolt_.capacity_,
+              bolt_.capacity_ >= kBoltVerifyRows && length_ <= bolt_.capacity_ - kBoltVerifyRows,
           "verify block exceeds fixed capacity");
   if (bolt_.single_token_decode_) {
     const auto& selected = rows == 1 ? single_token_tensors_ : tensors_;
@@ -617,6 +635,9 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
 
 int32_t NemotronBoltState::NextToken(size_t public_length) {
   Require(prefilled_, "AppendTokens must precede GenerateNextToken");
+  Require(params_->search.max_length > 0 &&
+              public_length < static_cast<size_t>(params_->search.max_length),
+          "generation is already at its output budget");
   if (pending_.empty() && !drafter_) {
     // Only row zero is committed; later rows are causal scratch and are overwritten.
     const auto rows = bolt_.single_token_decode_ ? 1 : bolt_.target_rows_;
@@ -632,7 +653,11 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
     block.insert(block.end(), drafts_.begin(), drafts_.end());
     const auto target_passes = stats_.target_forward_passes;
     const auto predictions = Verify(block);
-    const size_t accepted = NemotronBoltAcceptedPrefix(drafts_, predictions);
+    const auto tokens = NemotronBoltRoundTokens(
+        drafts_, predictions, static_cast<size_t>(params_->search.max_length) - public_length,
+        model_.config_->model.eos_token_id, verified_rows_);
+    // The final queued token is the new anchor; state includes only its preceding input rows.
+    const size_t accepted = tokens.size() - 1;
     if (g_log.enabled && g_log.model_logits) {
       auto& log = Log("model_logits");
       log << "Bolt verify length=" << length_ << " state_row=" << state_row_ << " anchor=" << anchor_
@@ -642,21 +667,16 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
       for (auto token : predictions) log << token << ',';
       log << std::endl;
     }
-    const auto tokens = NemotronBoltRoundTokens(
-        drafts_, predictions, static_cast<size_t>(params_->search.max_length) - public_length,
-        model_.config_->model.eos_token_id);
     pending_.insert(pending_.end(), tokens.begin(), tokens.end());
     ++stats_.rounds;
     ++stats_.completed_rounds;
     stats_.target_verify_forward_passes += stats_.target_forward_passes - target_passes;
     stats_.draft_tokens_proposed += 7;
-    stats_.draft_tokens_evaluated += 7;
+    stats_.draft_tokens_evaluated += std::min(drafts_.size(), verified_rows_);
     stats_.draft_tokens_accepted += accepted;
     ++stats_.acceptance_length_histogram[accepted];
     stats_.tokens_queued += tokens.size();
-    if (tokens.size() == accepted + 1) {
-      accepted == 7 ? ++stats_.bonus_tokens : ++stats_.correction_tokens;
-    }
+    accepted == 7 ? ++stats_.bonus_tokens : ++stats_.correction_tokens;
     if (accepted == 0)
       ++stats_.zero_accept_rounds;
     else if (accepted == 7)

@@ -66,7 +66,11 @@ python model-generate.py -m /path/to/new-hybrid -e cuda
 The output must be fresh and may be nested inside an initially flat input package.
 Put it on the weight payload's filesystem so large
 external data can be hardlinked within the new package; external-data path
-validation remains enabled. Packed values, eight recurrent snapshot slots, KV
+validation remains enabled. Files smaller than 64 MiB may be copied if hardlinks
+are unavailable; large payloads are never copied or repacked. The converter
+publishes only after validation and removes its staging directory and newly
+created empty parents on failure, so failed nested conversions can be retried.
+Packed values, eight recurrent snapshot slots, KV
 capacity and the physical eight-row attention geometry are unchanged.
 
 ## Execution Providers
