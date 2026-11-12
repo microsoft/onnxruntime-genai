@@ -1,0 +1,6 @@
+# onnxruntime-gpu nightly containing ORT #33817 (MoEGroupRouter/per-key KDA) and #33954 (post-SiLU expert clipping).
+# The 2026-11-10 wheel registers swiglu_limit_after_activation on both MoE and QMoE. It bundles CPU and CUDA 13 providers
+# from one revision; install cuda13-runtime.txt next to it. The CUDA 12 plugin EP (onnxruntime-ep-cuda12 with a CPU
+# onnxruntime nightly) can replace both once a build made after the merge is published.
+-i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
+onnxruntime-gpu==1.32.0.dev20261110001

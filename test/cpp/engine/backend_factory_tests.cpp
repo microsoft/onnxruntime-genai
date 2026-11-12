@@ -7,6 +7,7 @@
 
 #include "engine/backend_factory.h"
 #include "engine/paged_key_value_cache.h"
+#include "models/decoder_only.h"
 #include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
 
@@ -69,6 +70,20 @@ TEST(EngineBackendFactoryTest, HeadroomDoesNotChangeSizingWithoutDeviceMemoryBud
   EXPECT_EQ(batching.num_blocks, original_blocks);
 }
 
+TEST(EngineBackendFactoryTest, ExplicitPagedPoolDoesNotDeductMediaAllowance) {
+  auto model = LoadSyntheticPagedModel();
+  auto decoder = std::dynamic_pointer_cast<DecoderOnly_Model>(model);
+  ASSERT_NE(decoder, nullptr);
+  decoder->vision_ = std::make_unique<PackedVision>();
+  decoder->vision_->device = model->p_device_kvcache_;
+  const auto blocks = model->config_->engine.dynamic_batching->num_blocks.value();
+
+  const auto bundle = CreateEngineBackend(model);
+
+  EXPECT_EQ(bundle.dependencies.cache_manager->TargetBlockCount(), blocks);
+  EXPECT_EQ(model->config_->engine.dynamic_batching->num_blocks, blocks);
+}
+
 TEST(EngineBackendFactoryTest, Qwen38RejectsDeviceMemoryBudgetBeforeModelInitialization) {
   for (const size_t slots : {1u, 2u}) {
     for (const auto headroom : {std::optional<uint64_t>{}, std::optional<uint64_t>{0}}) {
@@ -97,6 +112,34 @@ void SetDeviceMemoryBudgetAfterStartup(const std::shared_ptr<Model>& model, uint
   const size_t initial_free_bytes = model->device_memory_budget_initial_free_bytes_.value();
   const size_t startup_bytes = initial_free_bytes > free_bytes ? initial_free_bytes - free_bytes : 0;
   model->config_->engine.dynamic_batching->device_memory_budget_bytes = startup_bytes + remaining_bytes;
+}
+
+TEST(EngineBackendFactoryTest, AutomaticCudaMediaReservationUsesTheFeatureDevice) {
+  if (!GetDeviceInterface(DeviceType::CUDA)) {
+    GTEST_SKIP() << "CUDA device is unavailable";
+  }
+  std::array<size_t, 2> blocks{};
+  size_t bytes_per_block = 0;
+  for (size_t index = 0; index < blocks.size(); ++index) {
+    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+    ClearProviders(*config);
+    SetProviderOption(*config, "cuda", "enable_cuda_graph", "0");
+    config->engine.dynamic_batching->device_memory_budget_bytes = 64 * 1024 * 1024;
+    config->engine.dynamic_batching->device_memory_headroom_bytes = 16 * 1024 * 1024;
+    config->engine.dynamic_batching->media_device_bytes = 16 * 1024 * 1024;
+    auto model = CreateModel(GetOrtEnv(), std::move(config));
+    auto decoder = std::dynamic_pointer_cast<DecoderOnly_Model>(model);
+    ASSERT_NE(decoder, nullptr);
+    decoder->vision_ = std::make_unique<PackedVision>();
+    decoder->vision_->device = index == 0 ? GetDeviceInterface(DeviceType::CPU) : model->p_device_kvcache_;
+    SetDeviceMemoryBudgetAfterStartup(model, 64 * 1024 * 1024);
+    const auto bundle = CreateEngineBackend(model);
+    ASSERT_FALSE(model->config_->engine.dynamic_batching->num_blocks);
+    blocks[index] = bundle.dependencies.cache_manager->TargetBlockCount();
+    bytes_per_block = PagedKeyValueCacheBytesPerBlock(model);
+  }
+  ASSERT_GT(blocks[0], blocks[1]);
+  EXPECT_EQ((blocks[0] - blocks[1]) * bytes_per_block, 16u * 1024 * 1024);
 }
 
 TEST(EngineBackendFactoryTest, DeviceMemoryBudgetRequiresExplicitHeadroomBeforeChangingSizing) {

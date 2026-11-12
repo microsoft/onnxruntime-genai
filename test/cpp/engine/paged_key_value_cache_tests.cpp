@@ -133,6 +133,35 @@ TEST_F(PagedKeyValueCacheTest, ReportsCommittedBoundaryForResident) {
   EXPECT_THROW(cache_->CommittedSlots(this), StepPlanningConsistencyError);
 }
 
+TEST_F(PagedKeyValueCacheTest, PrefixPublicationEligibilityTracksCommittedBlockBoundaries) {
+  for (const bool checkpoint_required : {false, true}) {
+    model_->config_->engine.dynamic_batching->prefix_caching = true;
+    cache_ = std::make_unique<PagedKeyValueCache>(model_, 0, 0, checkpoint_required, 2);
+    auto request = AddCommittedRequest({2, 3, 4, 5});
+    EXPECT_FALSE(cache_->CanSealCommittedBlocks(this));
+    ASSERT_TRUE(cache_->CanSealCommittedBlocks(request.get()));
+    if (!checkpoint_required) {
+      cache_->SealCommittedBlocks(request.get(), std::array<int32_t, 4>{2, 3, 4, 5});
+      EXPECT_FALSE(cache_->CanSealCommittedBlocks(request.get()));
+    }
+    for (const size_t slots : {size_t{5}, size_t{8}}) {
+      const std::array reservations{PagedCacheReservationRequest{request.get(), slots, false}};
+      auto reservation = cache_->Reserve(reservations);
+      reservation.Commit();
+      EXPECT_EQ(cache_->CanSealCommittedBlocks(request.get()), slots == 8);
+    }
+    cache_->Remove(request);
+    EXPECT_FALSE(cache_->CanSealCommittedBlocks(request.get()));
+  }
+}
+
+TEST_F(PagedKeyValueCacheTest, DisabledPrefixCachingHasNoPublicationBoundary) {
+  model_->config_->engine.dynamic_batching->prefix_caching = false;
+  cache_ = MakePagedCache(model_);
+  auto request = AddCommittedRequest({2, 3, 4, 5});
+  EXPECT_FALSE(cache_->CanSealCommittedBlocks(request.get()));
+}
+
 TEST_F(PagedKeyValueCacheTest, ValidatedRemovalReleasesAndReindexesCommittedTables) {
   auto first = AddCommittedRequest({2, 3, 4, 5});
   auto second = AddCommittedRequest({6, 7, 8, 9});

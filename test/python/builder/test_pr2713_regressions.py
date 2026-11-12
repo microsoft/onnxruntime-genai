@@ -188,6 +188,7 @@ def test_modelopt_gate_exclusions_are_specific_to_model_family(dense):
 def test_multimodal_qwen38_builds_decoder_and_mtp_without_blanket_restriction():
     model = qwen.Qwen4ExpModel.__new__(qwen.Qwen4ExpModel)
     model.text_only = False
+    model.extra_options = {}
     calls = []
     model.decoder = SimpleNamespace(quant_type=None, make_model=lambda path: calls.append(("decoder", path)))
     model.mtp = SimpleNamespace(make_model=lambda path: calls.append(("mtp", path)))
@@ -397,6 +398,69 @@ def test_int8_embedding_request_does_not_reuse_int4_lm_head():
     gather = next(node for node in model.model.graph if node.op_type == "GatherBlockQuantized")
     assert gather.attributes["bits"].as_int() == 8
     assert gather.inputs[0].name == "model.embed_tokens.weight_Q8"
+
+
+@pytest.mark.parametrize("precision", [ir.DataType.INT4, ir.DataType.INT8])
+@pytest.mark.parametrize(
+    "dtype,torch_dtype",
+    [
+        (ir.DataType.FLOAT16, torch.float16),
+        (ir.DataType.BFLOAT16, torch.bfloat16),
+    ],
+)
+def test_int8_cpu_embedding_component_executes_with_floating_output(tmp_path, precision, dtype, torch_dtype):
+    config = LlamaConfig(
+        hidden_size=64,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+        max_position_embeddings=128,
+        architectures=["LlamaForCausalLM"],
+    )
+    model = base.Model(
+        config,
+        dtype,
+        precision,
+        "cuda",
+        str(tmp_path / "cache"),
+        {
+            "use_paged_attention": True,
+            "exclude_embeds": True,
+            "embedding_quant_type": "int8",
+            "op_types_to_quantize": ("MatMul", "Gather"),
+            "block_size": 32,
+        },
+    )
+    table = torch.linspace(-2, 3, 32 * 64).reshape(32, 64).to(torch_dtype)
+    component = model.make_embedding_component(table)
+    gather = next(node for node in component.model.graph if node.op_type == "GatherBlockQuantized")
+    assert gather.inputs[0].dtype == ir.DataType.UINT8
+    assert gather.inputs[2].dtype == (ir.DataType.FLOAT if dtype == ir.DataType.BFLOAT16 else dtype)
+    assert list(component.model.graph.outputs[0].shape) == ["num_tokens", 64]
+    assert component.model.graph.outputs[0].dtype == dtype
+    ids = np.array([0, 31, 0, 9], dtype=np.int64)
+    quantized = gather.inputs[0].const_value.numpy().astype(np.float32) - 128
+    scales = gather.inputs[2].const_value.numpy().astype(np.float32)
+    expected = quantized.reshape(32, 2, 32) * scales.reshape(32, 2, 1)
+    expected = torch.from_numpy(expected.reshape(32, 64)[ids]).to(torch_dtype).float().numpy()
+    component.save_model(str(tmp_path))
+
+    session = ort.InferenceSession(str(tmp_path / "embedding.onnx"), providers=["CPUExecutionProvider"])
+    output = torch.empty((len(ids), 64), dtype=torch_dtype)
+    binding = session.io_binding()
+    binding.bind_cpu_input("input_ids", ids)
+    binding.bind_output(
+        "inputs_embeds",
+        device_type="cpu",
+        element_type=int(dtype),
+        shape=tuple(output.shape),
+        buffer_ptr=output.data_ptr(),
+    )
+    session.run_with_iobinding(binding)
+
+    np.testing.assert_array_equal(output.float().numpy(), expected)
 
 
 @pytest.mark.skipif(

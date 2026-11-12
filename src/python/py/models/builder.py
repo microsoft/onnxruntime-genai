@@ -29,6 +29,8 @@ from builder_config import (
     validate_model_dependent_config,
 )
 from builders import (
+    BailingMoeV3Model,
+    BailingVLModel,
     ChatGLMModel,
     ErnieModel,
     Gemma2Model,
@@ -65,7 +67,6 @@ from builders import (
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen4ExpModel,
-    Qwen4ExpTextModel,
     Qwen25VLTextModel,
     QwenModel,
     SmolLM3Model,
@@ -138,8 +139,10 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     try:
         config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     except ValueError:
-        # LFM2-Audio checkpoints have no model_type; their LFM2 decoder config is nested.
-        config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
+        # These composite configurations do not require remote modeling code.
+        config = BailingVLModel.load_config(hf_name, token=hf_token, **extra_kwargs)
+        if config is None:
+            config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
         if config is None:
             raise
     tokenizer_name = model_specific_hf.get("tokenizer", hf_name)
@@ -278,7 +281,7 @@ def check_extra_options(
     if extra_options.get("use_paged_attention", False):
         incompatible_options = [
             key
-            for key in ("exclude_embeds", "exclude_lm_head")
+            for key in ("exclude_lm_head",)
             if extra_options.get(key, False)
         ]
         if incompatible_options:
@@ -428,6 +431,14 @@ def check_extra_options(
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
 
+    if extra_options.get("use_paged_attention", False) and extra_options.get("exclude_embeds", False):
+        if not (
+            getattr(config, "model_type", None) in {"bailing_moe_v3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp"}
+            and getattr(config, "vision_config", None) is not None
+            and not extra_options.get("text_only", False)
+        ):
+            raise ValueError("use_paged_attention with exclude_embeds requires a complete supported vision composite.")
+
     if (
         execution_provider == "webgpu"
         and extra_options.get("use_paged_attention", False)
@@ -446,11 +457,18 @@ def check_extra_options(
 
     quantization_config = getattr(config, "quantization_config", {})
     if quantization_config.get("quant_method") == "fp8":
-        if getattr(config, "model_type", None) not in {"qwen4_exp", "qwen4_exp_text"}:
-            raise ValueError("Native FP8 checkpoint export is currently supported only for Qwen3.8.")
+        if getattr(config, "model_type", None) not in {
+            "qwen4_exp",
+            "qwen4_exp_text",
+            "bailing_hybrid",
+            "bailing_moe_v3_vl",
+        }:
+            raise ValueError("Native FP8 checkpoint export is currently supported only for Qwen3.8 and BailingMoeV3.")
         if execution_provider not in {"cuda", "webgpu"}:
-            raise ValueError("Native Qwen3.8 FP8 checkpoint export requires the CUDA or WebGPU EP.")
-    if quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}:
+            raise ValueError("Native Qwen3.8/BailingMoeV3 FP8 checkpoint export requires the CUDA or WebGPU EP.")
+    if quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"} and getattr(
+        config, "model_type", None
+    ) not in {"bailing_hybrid", "bailing_moe_v3_vl"}:
         if execution_provider != "cuda":
             raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")
         if extra_options.get("moe_quant_type", "nvfp4") != "nvfp4":
@@ -728,7 +746,12 @@ def create_model(
     config_only = extra_options.get("config_only", False)
 
     # List architecture options in alphabetical order
-    if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
+    if config.architectures[0] == "BailingMoeV3ForCausalLM":
+        onnx_model = BailingMoeV3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "bailing_hybrid"
+    elif config.architectures[0] == "BailingMoeV3VLForConditionalGeneration":
+        onnx_model = BailingVLModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
         # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
         config.bos_token_id = 1
         config.hidden_act = "swiglu"
@@ -1017,6 +1040,11 @@ def get_args():
                     Unsupported shapes, non-default zero points, and shared weight buffers stay raw.
                 use_device_allocator_for_initializers = true/false: Default false; opt into device allocation.
                     Paged Qwen3.8 sessions enable this automatically.
+                gated_delta_net_bf16_precision = bf16/fp16/fp32: Internal KDA prefill tensor-core precision.
+                    Bailing CUDA BF16 paged-attention exports only; explicit use elsewhere is rejected.
+                    Default bf16 uses native BF16 tiles; fp16 uses runtime range safeguards;
+                    fp32 uses the higher-accuracy multi-slice path. Model I/O and FP32 recurrent states are unchanged.
+                    Example: -p bf16 -e cuda --extra_options use_paged_attention=true gated_delta_net_bf16_precision=fp32
                 is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
                 op_types_to_quantize = MatMul/Gather: Specify op types to target for int4/int8 weight-only quantization.
@@ -1116,7 +1144,7 @@ def get_args():
                     small dynamic-convolution and candidate-selector projections dense. The body
                     uses the target's automatic hardware-specific packing policy. CUDA emits
                     the corresponding fpA-intB layout for
-                    projections the kernel supports (N % 64 for int4, N % 32 for int8); other
+                    projections the kernel supports (N %% 64 for int4, N %% 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
                     CUDA body activations and KV caches default to bf16. WebGPU uses FP16,
                     with FP32 residual/skip normalization and convolution-finish accumulation for FP16
@@ -1164,8 +1192,9 @@ def get_args():
                     By default, the model outputs [num_tokens, vocab_size] logits.
                     Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
                     attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
-                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or
-                    exclude_lm_head.
+                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_lm_head.
+                    exclude_embeds is supported only for complete Qwen3.5/Qwen4-Exp vision composites, exporting a pure CPU lookup
+                    and a separate vision encoder; it cannot be combined with text_only.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
                     accepts. Default is 256. Also written to the `engine.dynamic_batching` section of

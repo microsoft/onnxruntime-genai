@@ -521,11 +521,31 @@ struct Config {
       std::vector<int64_t> shape;
     };
 
+    struct GgufTensorMapping {
+      std::string onnx_name;
+      std::string gguf_name;
+      std::string file;
+      int data_type{};
+      std::vector<int64_t> shape;
+      bool has_shape{};
+      bool share{};
+      bool has_share{};
+    };
+
+    struct GgufInitializers {
+      std::string config_file;
+      std::vector<std::string> files;
+      std::vector<GgufTensorMapping> tensors;
+      bool share{};
+      bool has_share{};
+    };
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
+      GgufInitializers gguf_initializers;
 
       int prefill_sequence_length{};
 
@@ -735,6 +755,7 @@ struct Config {
       std::optional<RunOptions> run_options;
       // Empty intentionally means the head does not share the main decoder's initializers.
       std::vector<SharedInitializer> shared_initializers;
+      GgufInitializers gguf_initializers;
 
       int num_hidden_layers{1};  // The MTP head has a single decoder layer.
       int num_key_value_heads{};
@@ -786,7 +807,7 @@ struct Config {
 
       int kv_capacity{33028};
 
-      bool warmup{true};  // Run the graph warm-up (captures every CUDA graph) when the model is created
+      bool warmup{true};  // Capture graphs at model creation and before use on a new Engine thread
 
       // Concurrent request slots of the Engine-hosted decode device, in [1, kMaxBatchSize]. Values above 1 need the fold
       // stack with unified fast prefill (see ValidateQwen38MultiSlotConfig).
@@ -849,6 +870,7 @@ struct Config {
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
+      GgufInitializers gguf_initializers;
 
       int num_hidden_layers{};
       int num_key_value_heads{};
@@ -954,6 +976,8 @@ struct Config {
       std::optional<float> gpu_utilization_factor;           // Fraction of free GPU memory to use for key-value cache.
       std::optional<uint64_t> device_memory_budget_bytes;    // GPU sizing allowance for one CUDA Model/Engine.
       std::optional<uint64_t> device_memory_headroom_bytes;  // Additional profiled GPU memory reserved when budgeting.
+      size_t media_host_bytes{512 * 1024 * 1024};            // Retained canonical inputs and preprocessing reservation.
+      size_t media_device_bytes{128 * 1024 * 1024};          // Reclaimable projected image features.
       size_t max_batch_size{16};                             // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};                     // Maximum tokens in one dynamically batched model run.
       std::optional<bool> prefix_caching;
@@ -1008,6 +1032,8 @@ struct Config {
       struct DynamicBatching {
         std::optional<size_t> num_blocks;
         std::optional<uint64_t> device_memory_headroom_bytes;
+        std::optional<size_t> media_host_bytes;
+        std::optional<size_t> media_device_bytes;
         std::optional<size_t> max_batch_size;
         std::optional<size_t> max_scheduled_tokens;
         std::optional<bool> prefix_caching;
@@ -1048,6 +1074,7 @@ struct VisionProcessingConfig {
 };
 
 VisionProcessingConfig LoadVisionProcessingConfig(const fs::path& path);
+void LoadGgufInitializersConfig(const fs::path& path, Config::Model::GgufInitializers& v);
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
