@@ -26,6 +26,7 @@ import json
 import os
 from pathlib import Path
 
+import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
 
@@ -123,6 +124,33 @@ def main() -> None:
     if replaced == 0:
         raise ValueError("the target graph has no Mamba2Verify nodes")
 
+    # Row-wise routing may scatter constant updates shaped for eight rows (e.g. a [8,1] -inf mask that
+    # removes each selected expert before the next ArgMax). Widen uniform ones to R rows; ScatterElements
+    # requires updates to match the [R,1] indices.
+    inline = {init.name: init for init in graph.initializer if init.data_location != TensorProto.EXTERNAL}
+    constants = {node.output[0]: node for node in graph.node if node.op_type == "Constant"}
+    widened = set()
+    for node in graph.node:
+        if node.op_type != "ScatterElements" or node.input[2] in widened:
+            continue
+        name = node.input[2]
+        if name in inline:
+            array = numpy_helper.to_array(inline[name])
+        elif name in constants and constants[name].attribute[0].name == "value":
+            array = numpy_helper.to_array(constants[name].attribute[0].t)
+        else:
+            continue
+        if array.ndim == 0 or array.shape[0] != 8:
+            continue
+        if not (array == array.flat[0]).all() and not np.isnan(array).all():
+            raise ValueError(f"ScatterElements updates {name} is an eight-row constant with non-uniform values")
+        tensor = numpy_helper.from_array(np.full((args.rows, *array.shape[1:]), array.flat[0], dtype=array.dtype), name)
+        if name in inline:
+            inline[name].CopyFrom(tensor)
+        else:
+            constants[name].attribute[0].t.CopyFrom(tensor)
+        widened.add(name)
+
     logits_producer = next(node for node in graph.node if "logits" in node.output)
     head_output = logits_producer.input[0] if logits_producer.op_type == "Identity" else "logits"
     head = next(node for node in graph.node if head_output in node.output)
@@ -168,8 +196,8 @@ def main() -> None:
     decoder["shared_initializers"] = list(shared.values())
     (output / "genai_config.json").write_text(json.dumps(config, indent=2) + "\n")
     digest = hashlib.sha256((output / filename).read_bytes()).hexdigest()
-    print(f"{output / filename}: rows={args.rows}, Mamba2Prefill={replaced}, shared_initializers={len(shared)}, "
-          f"sha256={digest}")
+    print(f"{output / filename}: rows={args.rows}, Mamba2Prefill={replaced}, widened_scatter_updates={len(widened)}, "
+          f"shared_initializers={len(shared)}, sha256={digest}")
 
 
 if __name__ == "__main__":
