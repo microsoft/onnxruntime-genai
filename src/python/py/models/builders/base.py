@@ -3704,6 +3704,20 @@ class Model:
         self.layernorm_attrs["root_input"] = layernorm_attrs_value
         self.layernorm_attrs["skip_input"] = layernorm_attrs_value
 
+    def _norm_weight_with_offset(self, weight):
+        """Return ``weight + add_offset``, adding the offset in FP32.
+
+        Checkpoints load in their stored dtype (for example bfloat16 with transformers 5),
+        and adding the offset in that dtype would round the result before it is cast to
+        the ONNX dtype.
+        """
+        offset = self.layernorm_attrs["add_offset"]
+        if offset == 0:
+            return weight
+        if isinstance(weight, torch.Tensor):
+            return weight.float() + offset
+        return np.asarray(weight, dtype=np.float32) + offset
+
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if location == "final_norm" and self.prunes_hidden_rows():
             self.make_selected_hidden_rows()
@@ -3717,7 +3731,7 @@ class Model:
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_initializer(layernorm.weight + self.layernorm_attrs["add_offset"], weight, to=new_io_dtype)
+        self.make_initializer(self._norm_weight_with_offset(layernorm.weight), weight, to=new_io_dtype)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
             self.make_initializer(layernorm.bias, bias, to=new_io_dtype)
@@ -4357,7 +4371,7 @@ class Model:
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
-        self.make_initializer(attention.q_norm.weight + self.layernorm_attrs["add_offset"], q_weight_name, to=new_io_dtype)
+        self.make_initializer(self._norm_weight_with_offset(attention.q_norm.weight), q_weight_name, to=new_io_dtype)
 
         # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
         q_layernorm_inputs = [q_reshape_1_output, q_weight_name]
@@ -4408,7 +4422,7 @@ class Model:
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
         self.make_initializer(
-            attention.k_norm.weight + self.layernorm_attrs["add_offset"], k_weight_name, to=new_io_dtype
+            self._norm_weight_with_offset(attention.k_norm.weight), k_weight_name, to=new_io_dtype
         )
 
         # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
@@ -5419,10 +5433,10 @@ class Model:
     def make_fused_gqa_qk_norm_inputs(self, layer_id, attention):
         q_weight_name, k_weight_name = self.get_qk_norm_weight_names(layer_id)
         self.make_initializer(
-            attention.q_norm.weight + self.layernorm_attrs["add_offset"], q_weight_name, to=self.io_dtype
+            self._norm_weight_with_offset(attention.q_norm.weight), q_weight_name, to=self.io_dtype
         )
         self.make_initializer(
-            attention.k_norm.weight + self.layernorm_attrs["add_offset"], k_weight_name, to=self.io_dtype
+            self._norm_weight_with_offset(attention.k_norm.weight), k_weight_name, to=self.io_dtype
         )
 
     def make_attention_qk_rope(self, layer_id, **kwargs):
