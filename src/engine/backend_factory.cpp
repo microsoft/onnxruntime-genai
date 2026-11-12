@@ -286,6 +286,11 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
           dflash2_max_batch_size);
     }
   }
+  cache_manager->InitializeSnapshotCache(snapshot_cache);
+  if (dflash2_drafter && dflash2_bytes_per_block != 0 && cache_manager->PrefixCachingEnabled()) {
+    dflash2_drafter->UseTargetBlockTables(cache_manager->Snapshot().total_blocks);
+    dflash2_prefix_checkpoints_enabled = true;
+  }
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
 

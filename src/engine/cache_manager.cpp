@@ -77,6 +77,11 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
     if (fixed_state_pool) {
       fixed_reservation_.emplace(fixed_state_pool->Reserve(fixed_requests));
     }
+    for (const auto& entry : plan.requests) {
+      if (entry.newly_admitted && entry.prefix_match) {
+        cache.RestoreWindowPrefix(entry.request_id, *entry.prefix_match, *paged_reservation_);
+      }
+    }
   }
 
   PagedCacheReservation* PagedReservation() override {
@@ -382,6 +387,24 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   // the composite path degrades to paged-only. Its capacity matches the paged batch limit so paged
   // admission (bounded by max_batch_size) can never outrun fixed slots.
   ModelStateManifest manifest{model->config_->model.decoder};
+  const bool target_mapped_prefix =
+      auxiliary_bytes_per_block != 0 && ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block);
+  if (target_mapped_prefix) {
+    const auto& batching = *model_->config_->engine.dynamic_batching;
+    const auto& limits = batching.snapshot_cache;
+    if (limits.vram_bytes != 0 && model_->p_device_kvcache_->GetType() != DeviceType::CUDA) {
+      throw std::runtime_error("A VRAM prefix snapshot budget requires a CUDA device.");
+    }
+    if (limits.vram_bytes > std::numeric_limits<size_t>::max() - auxiliary_reserved_memory_bytes) {
+      throw std::overflow_error("Prefix snapshot reservation overflows size_t.");
+    }
+    draft_checkpoint_vram_bytes_ = limits.vram_bytes;
+    auxiliary_reserved_memory_bytes += limits.vram_bytes;
+    draft_checkpoint_capacity_ = std::min(batching.dflash2_max_snapshots, batching.max_batch_size);
+    if (batching.max_snapshots) {
+      draft_checkpoint_capacity_ = std::min(draft_checkpoint_capacity_, *batching.max_snapshots);
+    }
+  }
   const bool hybrid_prefix_caching =
       ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block) &&
       manifest.HasFixedStateGroups();

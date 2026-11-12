@@ -144,9 +144,10 @@ PagedCacheReservation::PagedCacheReservation(
 
     const PrefixCacheMatch* match =
         request.prefix_match && !request.prefix_match->Empty() ? request.prefix_match : nullptr;
-    if (match && (!request.newly_admitted || window_block_pool_)) {
+    if (match && (!request.newly_admitted ||
+                  (window_block_pool_ && !match->target_window_checkpoint))) {
       throw std::runtime_error(
-          "Cached prefixes can only be adopted by newly admitted full-attention requests.");
+          "Cached prefixes require a new request and a checkpoint for a windowed cache.");
     }
     const size_t adopted_block_offset = adopted_blocks_.size();
     const size_t adopted_block_count = match ? match->blocks.size() : 0;

@@ -15,6 +15,7 @@
 #include "models/io/kv_cache.h"
 #include "models/model_state_manifest.h"
 #include "logging.h"
+#include "dflash2_drafter.h"
 
 namespace Generators {
 namespace test {
@@ -1062,6 +1063,116 @@ TEST(PagedKeyValueCacheManifestTest, RemovalReusesCommittedSlidingWindowCapacity
   cache->Add(second);
   cache->AppendTokens(second);
   EXPECT_TRUE(cache->OwnsRequest(second.get()));
+}
+
+TEST(PagedKeyValueCacheManifestTest, DflashPrefixRestoresPrivateWindowRingsAndQuantizationScales) {
+  for (const char* path : {MODEL_PATH "engine/synthetic-paged",
+                           MODEL_PATH "engine/synthetic-paged-scales"}) {
+    SCOPED_TRACE(path);
+    auto model = CreateModel(GetOrtEnv(), path);
+    auto& batching = *model->config_->engine.dynamic_batching;
+    batching.prefix_caching = true;
+    batching.max_snapshots = 2;
+    batching.dflash2_max_snapshots = 2;
+    batching.snapshot_cache.ram_bytes = 1 << 20;
+    model->config_->model.dflash2.filename = "draft.onnx";
+    model->config_->model.dflash2.sliding_window = 0;
+    auto& decoder = model->config_->model.decoder;
+    decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+    decoder.sliding_window->window_size = 4;
+    decoder.sliding_window->layers = {1};
+    decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+    model->config_->search.chunk_size = 4;
+    // The scale fixture declares 128 blocks in both pools: 64 two-block rings and 128 primary blocks.
+    batching.max_batch_size = 64;
+    const size_t primary_block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+    batching.num_blocks = 128 + (128 + primary_block_bytes - 1) / primary_block_bytes;
+    ASSERT_TRUE(ResolvePrefixCachingEnabled(model, 1));
+    auto cache = std::make_unique<PagedKeyValueCache>(model, 1);
+    ASSERT_GT(cache->Snapshot().total_blocks, 0u);
+    ASSERT_GT(cache->Snapshot().window_blocks.blocks_per_request, 0u);
+    auto storage = std::make_shared<PrefixSnapshotCache>(
+        std::array<size_t, 3>{0, 1 << 20, 0}, 1);
+    cache->InitializeSnapshotCache(storage);
+    ASSERT_TRUE(cache->WindowPrefixSnapshotEnabled());
+    auto owner = MakeDoublesEngine(model, 2, EosToken(*model)).engine;
+    const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+    auto first = CreateRequestWithPrompt(owner, std::span<const int32_t>{prompt}.first(8));
+    {
+      const std::array requests{PagedCacheReservationRequest{first.get(), 8, true, 8}};
+      auto reservation = cache->Reserve(requests);
+      reservation.Commit();
+    }
+    const auto source = cache->Snapshot();
+    const auto& source_blocks = source.window_blocks.requests.front().block_ids;
+    auto params = CreateGeneratorParams(*model);
+    ModelIO state(*params, *model);
+    cache->UpdateState(state, {first});
+    std::vector<size_t> window_outputs;
+    std::vector<std::vector<std::vector<uint8_t>>> expected;
+    for (size_t output = 0; output < state.outputs_.size(); ++output) {
+      auto* value = state.outputs_[output];
+      const auto info = value->GetTensorTypeAndShapeInfo();
+      if (std::string{state.output_names_[output]}.find("present.1.") != 0) continue;
+      window_outputs.push_back(output);
+      const size_t block_bytes =
+          info->GetElementCount() * Ort::SizeOf(info->GetElementType()) / source.window_blocks.total_blocks;
+      auto* bytes = value->GetTensorMutableData<uint8_t>();
+      for (size_t block = 0; block < source.window_blocks.total_blocks; ++block) {
+        std::fill_n(bytes + block * block_bytes, block_bytes,
+                    static_cast<uint8_t>(17 + output * 3 + block));
+      }
+      std::vector<std::vector<uint8_t>> ring;
+      for (const auto block : source_blocks) {
+        ring.emplace_back(bytes + block * block_bytes, bytes + (block + 1) * block_bytes);
+      }
+      expected.push_back(std::move(ring));
+    }
+    ASSERT_GE(window_outputs.size(), 2u);
+    auto window = cache->CaptureWindowPrefix(first.get(), 8);
+    ASSERT_NE(window, nullptr);
+    cache->SealCommittedBlocks(first.get(), prompt);
+    auto boundary = cache->DraftBoundary(first.get(), 8);
+    ASSERT_TRUE(boundary.has_value());
+    auto generation = std::make_shared<int>(0);
+    auto checkpoint = std::make_shared<Dflash2PrefixCheckpoint>();
+    checkpoint->token_count = 8;
+    checkpoint->target_mapped = true;
+    checkpoint->target_generation = generation;
+    checkpoint->target_window = window;
+    ASSERT_TRUE(cache->AttachDraftCheckpoint(*boundary, checkpoint));
+    checkpoint.reset();
+    window.reset();
+    cache->Remove(first);
+    auto match = cache->MatchPrefix(prompt, 8);
+    ASSERT_EQ(match.token_count, 8u);
+    auto competing = std::make_shared<PagedWindowPrefixCheckpoint>();
+    competing->type = match.target_window_checkpoint->type;
+    competing->shapes = match.target_window_checkpoint->shapes;
+    EXPECT_FALSE(storage->Allocate(competing, model->p_device_kvcache_, "paged-window", 2));
+    for (size_t output : window_outputs) {
+      auto* value = state.outputs_[output];
+      const auto info = value->GetTensorTypeAndShapeInfo();
+      std::fill_n(value->GetTensorMutableData<uint8_t>(),
+                  info->GetElementCount() * Ort::SizeOf(info->GetElementType()), uint8_t{0xEE});
+    }
+    auto second = CreateRequestWithPrompt(owner, prompt);
+    const std::array requests{PagedCacheReservationRequest{second.get(), 9, true, 9, &match}};
+    auto reservation = cache->Reserve(requests);
+    cache->RestoreWindowPrefix(second.get(), match, reservation);
+    reservation.Commit();
+    const auto destination = cache->Snapshot();
+    const auto& destination_blocks = destination.window_blocks.requests.front().block_ids;
+    for (size_t output = 0; output < window_outputs.size(); ++output) {
+      const auto* bytes = state.outputs_[window_outputs[output]]->GetTensorData<uint8_t>();
+      const size_t block_bytes = expected[output].front().size();
+      for (size_t block = 0; block < destination_blocks.size(); ++block) {
+        const auto offset = destination_blocks[block] * block_bytes;
+        EXPECT_EQ(std::vector<uint8_t>(bytes + offset, bytes + offset + block_bytes), expected[output][block]);
+      }
+    }
+    cache->Remove(second);
+  }
 }
 
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingRetainsSlidingLayersAndScalesInFullPagedStorage) {
