@@ -120,11 +120,9 @@ def paged_onnx_source(tmp_path):
     return source_path, decoder
 
 
-@pytest.mark.parametrize(("quantized", "shadow"), [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("quantized", [False, True])
 @pytest.mark.parametrize("filename", [None, "imported.onnx"])
-def test_onnx_source_preserves_weights_and_applies_cache_policy(
-    tmp_path, paged_onnx_source, quantized, shadow, filename
-):
+def test_onnx_source_preserves_weights_and_applies_cache_policy(tmp_path, paged_onnx_source, quantized, filename):
     source_path, decoder = paged_onnx_source
     options = {}
     if quantized:
@@ -139,7 +137,6 @@ def test_onnx_source_preserves_weights_and_applies_cache_policy(
             )
         )
         options = {"kv_cache_quant_scheme": "int8_per_channel", "kv_cache_scale_file": str(scale_path)}
-    options["int8_prefill_shadow"] = shadow
     if filename is not None:
         options["filename"] = filename
     source_bytes = source_path.read_bytes()
@@ -150,7 +147,6 @@ def test_onnx_source_preserves_weights_and_applies_cache_policy(
         "quant_scheme": "int8_per_channel" if quantized else "none",
         "quant_mode": "PER_CHANNEL",
         "scales_path": options.get("kv_cache_scale_file", ""),
-        "prefill_shadow": shadow,
     }
     exported_path = model.save_model(tmp_path / "exported")
     assert exported_path.name == model.filename
@@ -171,12 +167,8 @@ def test_onnx_source_preserves_weights_and_applies_cache_policy(
     attention = next(node for node in exported.graph if node.op_type == "PagedAttention")
     assert attention.attributes["num_heads"].as_int() == 6
     assert attention.attributes["kv_num_heads"].as_int() == 1
+    assert len(attention.inputs) == 17
     assert len(exported.graph) == 1
-    controls = [value for value in exported.graph.inputs if value.name == "prefill_cache_control"]
-    assert len(controls) == int(shadow)
-    if shadow:
-        assert controls[0].dtype == ir.DataType.INT64 and list(controls[0].shape) == [3]
-        assert attention.inputs[17] is controls[0]
     if quantized:
         assert (model.num_layers, model.num_kv_heads, model.head_size) == (1, 1, 128)
         assert model.input_names["past_key_values.key"] == {0: "past_keys_0"}
@@ -228,7 +220,7 @@ def test_onnx_source_uses_sparse_paged_kv_state_groups(tmp_path, paged_onnx_sour
     np.testing.assert_array_equal(attention.inputs[15].const_value.numpy(), np.full((1, 1, 128), 0.25))
 
 
-def test_onnx_source_adds_shadow_to_existing_int8_target(tmp_path, paged_onnx_source):
+def test_onnx_source_preserves_existing_int8_target(tmp_path, paged_onnx_source):
     source_path, decoder = paged_onnx_source
     scales = tmp_path / "scales.json"
     scales.write_text(
@@ -248,22 +240,15 @@ def test_onnx_source_adds_shadow_to_existing_int8_target(tmp_path, paged_onnx_so
             "kv_cache_scale_file": str(scales),
         },
     ).save_model(tmp_path / "quantized")
-    shadow = OnnxSourceModel.from_pretrained(quantized, extra_options={"int8_prefill_shadow": True})
-    exported = ir.load(shadow.save_model(tmp_path / "shadow"))
+    imported = OnnxSourceModel.from_pretrained(quantized)
+    exported = ir.load(imported.save_model(tmp_path / "imported"))
     assert exported.metadata_props["onnxruntime_genai.kv_cache_quant_scheme"] == "int8_per_channel"
     attention = next(node for node in exported.graph if node.op_type == "PagedAttention")
     assert attention.inputs[3].dtype == attention.inputs[4].dtype == ir.DataType.INT8
-    assert attention.inputs[17].name == "prefill_cache_control"
+    assert len(attention.inputs) == 17
     np.testing.assert_array_equal(
         attention.inputs[14].const_value.numpy(), np.full((1, 1, 128), 0.125, dtype=np.float32)
     )
-
-
-@pytest.mark.parametrize("option", [True, "true"])
-def test_onnx_source_rejects_unsupported_shadow_policy(paged_onnx_source, option):
-    source_path, decoder = paged_onnx_source
-    with pytest.raises(ValueError, match="boolean|global causal INT8"):
-        OnnxSourceModel.from_pretrained(source_path, decoder, {"int8_prefill_shadow": option})
 
 
 @pytest.mark.parametrize("scheme", ["int4_per_channel", "int8_per_token"])

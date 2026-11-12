@@ -1280,10 +1280,6 @@ def get_args():
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
                     An optional "qmax" records the divisor the file was calibrated with (128 for int8, 8 for int4, 448 for fp8);
                     the builder then rescales to the requested scheme, so one file can serve several bit widths.
-                int8_prefill_shadow = OnnxSourceModel Python API only: boolean false (default) or true.
-                    Emits CPU int64[3] prefill_cache_control for global causal INT8 per-channel caches with constant scales.
-                    Requires the corresponding ORT/GenAI epoch-control support; other source cache policies are rejected.
-                    CUDA currently accelerates single-request H128/eight-KV-head/GQA6 eager prefill, with extra temporary BF16 memory.
                 use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 use_cuda_bf16 = Use BF16 I/O precision in quantized ONNX models for CUDA EP.
