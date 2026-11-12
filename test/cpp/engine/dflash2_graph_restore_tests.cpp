@@ -63,6 +63,9 @@ TurnResult RunGraphRestoreTurn(OgaEngine& engine, const OgaSequences& prompt) {
     throw std::runtime_error("Graph restore turn timed out.");
   }
   const auto after = engine.GetSpeculativeStats();
+  for (const char* counter : {"dflash2_failures", "dflash2_disables", "dflash2_admission_misses"}) {
+    EXPECT_EQ(after->GetCount(counter), before->GetCount(counter)) << counter;
+  }
   result.proposed = after->GetCount("draft_tokens_proposed") - proposed_before;
   result.accepted = after->GetCount("draft_tokens_accepted") - accepted_before;
   request->Close();
