@@ -283,7 +283,8 @@ C# uses `ASRPostProcessor(generator)`, `ProcessNext()`,
 `ASRPostProcessorResult` objects expose read-only `Text` and nullable `TimestampResult`
 properties. `ASRPostProcessorTimestampResult` objects expose `Words` and `Segments`; records expose `Text`,
 `FrameInterval`, and `TimeInterval`. Interval properties return named `(Start, Stop)`
-value tuples of `long` milliseconds. For example, read `record.Text` and `record.TimeInterval.Start`.
+value tuples of `long`. `FrameInterval` is in acoustic frames, while `TimeInterval` is in
+milliseconds. For example, read `record.Text` and `record.TimeInterval.Start`.
 
 C++ follows the global, method-only opaque wrapper pattern. `GetNextResults()`
 returns borrowed `const OgaASRPostProcessorResult*` pointers, not copied payloads.
