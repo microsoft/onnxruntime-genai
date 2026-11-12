@@ -290,6 +290,26 @@ controls. Compare host RSS and per-process GPU high-water marks through
 alternation/churn; neither the microbenchmark nor a single peak snapshot
 establishes a memory plateau or deployment-device fit.
 
+## Snapshot-tier validation
+
+Use the same core/add-on build and CUDA stack for cached and cache-disabled controls. Exercise simultaneous adoption leases, all-leased refusal and progress after owners are released. Include tier demotion, disk failure/retry, cancellation, CUDA graph restore and final-owner spill cleanup. Record configured and effective budgets, staged peak payload occupancy, transfer latencies and request latency; disable logging for timing measurements. CPU results do not establish CUDA transfer behavior.
+
+`examples/python/engine/prefix-cache-qa.py` provides `growing-chain` and `branching` scenarios for eviction-policy comparisons, `tier-pressure` for new prefill admissions after a peer starts decoding, and `history-capacity` for revisiting distinct histories after filling the cache:
+
+```bash
+python examples/python/engine/prefix-cache-qa.py --model-path <configured-model> \
+  --suites growing-chain branching tier-pressure history-capacity --scenario-repeats 5 \
+  --lengths 2561 4097 --chunk-sizes 512 --max-batch-size 16 --num-blocks 256 \
+  --pressure-requests 6 --generated-tokens 64 --reference-repeats 2 \
+  --build-label <source-and-policy-identity> --output <report.json>
+```
+
+Each repetition uses a fresh Engine; reports preserve every output and failure, timing samples, cached tokens and speculative counters. Host-observed token-event intervals include Engine stalls and event batching, not just GPU kernel time. Small sample counts do not establish reliable p99 latency.
+
+Compare victim selection at equal **effective** snapshot capacity with `snapshot_cache` omitted, then compare tier placement against that device-resident policy. Under a fixed total KV byte budget, report effective target blocks and retained histories alongside throughput and tail latency. Run base and head on identical prompts and the same CUDA stack; the scripts do not infer numerical root causes from cache-disabled failures. Concurrent exact-output coverage remains tracked separately in #2698.
+
+The parameterized `SnapshotTiers/Dflash2GraphRestoreTest.*` cases exercise explicit VRAM, RAM, disk and mixed placement. The mixed case creates three boundaries and revisits older RAM/disk snapshots after demotion. Set `D_FLASH2_GRAPH_TEST_MODEL` to a graph-enabled Qwen DFlash2 package with 256-token blocks and 512-token prefill, and `D_FLASH2_GRAPH_TEST_REQUIRED=1` to fail rather than skip when the model is missing. The Linux and Windows CUDA build workflows accept the `dflash2_graph_model` manual-dispatch input; provision the package on the runner before dispatch. Ordinary CI without it skips these real-model cases.
+
 ## Testing the runner
 
 ```bash

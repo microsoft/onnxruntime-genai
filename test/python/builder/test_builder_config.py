@@ -1935,6 +1935,30 @@ def test_runtime_snapshot_tiers_and_count_cap_are_preserved():
 
 
 @pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize("field", ["media_host_bytes", "media_device_bytes"])
+@pytest.mark.parametrize("value", [1, 536_870_912, 0, -1, 1.5, True, "16", 9_007_199_254_740_992])
+def test_runtime_media_limits(in_profile, field, value):
+    generated = {"engine": {"dynamic_batching": {"num_blocks": 128}}}
+    runtime = {"engine": {"dynamic_batching": {field: value}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "media", "eligibility": {"minimum_total_device_memory_bytes": 0}, "overlay": runtime}
+            ]
+        }
+    if type(value) is int and 0 < value <= 9_007_199_254_740_991:
+        updated = apply_runtime_config(generated, runtime)
+        if in_profile:
+            assert updated["runtime_profiles"] == runtime["runtime_profiles"]
+        else:
+            assert updated["engine"]["dynamic_batching"][field] == value
+    else:
+        with pytest.raises(ValueError, match="positive integer byte count"):
+            apply_runtime_config(generated, runtime)
+    assert generated == {"engine": {"dynamic_batching": {"num_blocks": 128}}}
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
 @pytest.mark.parametrize("tier", ["vram_bytes", "ram_bytes", "disk_bytes"])
 @pytest.mark.parametrize("invalid", [-1, 1.5, True, "16", 9_007_199_254_740_992])
 def test_runtime_rejects_invalid_snapshot_byte_limits(in_profile, tier, invalid):

@@ -28,7 +28,7 @@ SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
         model_->session_info_.GetInputDataType(position_ids),
         position_shape,
         model_->session_info_.GetInputSymbolicShape(position_ids));
-    if (position_shape.size() == 2 &&
+    if (position_shape.size() == 2 && !model_->vision_ &&
         (!model_->config_->model.vision.filename.empty() ||
          !model_->config_->model.vision.pipeline.empty() ||
          !model_->config_->model.speech.filename.empty())) {

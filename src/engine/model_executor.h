@@ -5,6 +5,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "../decoding/speculative_stats.h"
@@ -17,6 +18,8 @@
 #include "turn_policy.h"
 
 namespace Generators {
+
+ExecutionFailureKind ClassifyOrtExecutionFailure(std::string_view message);
 
 class ModelExecutionError : public std::runtime_error {
  public:
@@ -38,9 +41,8 @@ class ModelExecutionError : public std::runtime_error {
  * ModelExecutor is the abstract execution boundary the Engine drives each step. Production assembles
  * the real decoder-backed executor via Create; supplying an alternative implementation (for example
  * one that returns scripted outcomes or injects an execution failure) lets the Engine's execution
- * path be exercised without running a real model. Only Decode is part of the boundary because
- * Engine::Run drives decoding; encoding stays on the concrete executor until it becomes part of the
- * Engine execution path.
+ * path be exercised without running a real model. The Engine schedules media encoding separately,
+ * before reserving decoder state; only Decode participates in this transaction boundary.
  */
 struct ModelExecutor {
   static std::unique_ptr<ModelExecutor> Create(std::shared_ptr<Model> model,

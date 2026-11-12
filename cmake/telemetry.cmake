@@ -15,6 +15,8 @@
 #
 # Either way this module defines the INTERFACE target `onnxruntime-genai-telemetry`, which
 # the main library links, so the rest of the build is agnostic to how the SDK was obtained.
+# Caller-supplied packages must already contain the SDK version and auth-mutex lifetime fixes;
+# generated source replacements below cannot repair an imported binary.
 
 if(NOT ENABLE_TELEMETRY)
   return()
@@ -96,6 +98,20 @@ endif()
 if(APPLE)
   set(MATSDK_SQLITE_PROVIDER SYSTEM CACHE STRING "Use Apple's system SQLite" FORCE)
   set(MATSDK_ZLIB_PROVIDER SYSTEM CACHE STRING "Use Apple's system libz" FORCE)
+  # The SDK skips creating system targets when it detects a vcpkg toolchain.
+  # Supply the canonical targets without replacing dependencies provided by the caller.
+  if(NOT TARGET SQLite3::SQLite3)
+    add_library(SQLite3::SQLite3 INTERFACE IMPORTED)
+    if(TARGET SQLite::SQLite3)
+      target_link_libraries(SQLite3::SQLite3 INTERFACE SQLite::SQLite3)
+    else()
+      target_link_libraries(SQLite3::SQLite3 INTERFACE sqlite3)
+    endif()
+  endif()
+  if(NOT TARGET ZLIB::ZLIB)
+    add_library(ZLIB::ZLIB INTERFACE IMPORTED)
+    target_link_libraries(ZLIB::ZLIB INTERFACE z)
+  endif()
 else()
   set(MATSDK_SQLITE_PROVIDER MINIMAL CACHE STRING "Build the SDK's minimal private SQLite" FORCE)
   set(MATSDK_ZLIB_PROVIDER VENDORED CACHE STRING "Build the SDK's private zlib" FORCE)
@@ -123,37 +139,95 @@ FetchContent_Declare(
 if(DEFINED BUILD_VERSION)
   set(_ortgenai_saved_mat_build_version "${BUILD_VERSION}")
 endif()
-set(BUILD_VERSION "3.10.281.1")
+set(BUILD_VERSION "3.10.310.1")
 FetchContent_MakeAvailable(cpp_client_telemetry)
-# The SDK's lazy version string can otherwise be destroyed before GenAI joins the upload worker.
-# Compile a patched copy, leaving the downloaded source intact. Like the SDK PAL itself, this
-# immutable value uses process-lifetime storage; normal shutdown still releases SDK workers.
+
+function(_ortgenai_replace_mat_source original replacement)
+  get_target_property(sources mat SOURCES)
+  list(FIND sources "${original}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR "Update the 1DS SDK ${original} source replacement for the selected SDK target")
+  endif()
+  list(REMOVE_ITEM sources "${original}")
+  set_property(TARGET mat PROPERTY SOURCES "${sources}")
+  target_sources(mat PRIVATE "${replacement}")
+endfunction()
+
+function(_ortgenai_replace_sdk_text variable original replacement description)
+  string(FIND "${${variable}}" "${original}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR "Update the 1DS SDK ${description} patch for the selected SDK source")
+  endif()
+  string(REPLACE "${original}" "${replacement}" patched "${${variable}}")
+  set(${variable} "${patched}" PARENT_SCOPE)
+endfunction()
+
+# A literal survives late uploads without a destructor or a heap buffer leaked on library unload.
+# Change both internal PAL declarations in a generated header, leaving downloaded sources intact.
+set(ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/telemetry-sdk")
+set(_ortgenai_pal_header "${cpp_client_telemetry_SOURCE_DIR}/lib/pal/PAL.hpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ortgenai_pal_header}")
+file(READ "${_ortgenai_pal_header}" _ortgenai_pal_hpp)
+_ortgenai_replace_sdk_text(_ortgenai_pal_hpp
+  "const std::string& getSdkVersion() const;" "const char* getSdkVersion() const;"
+  "PAL version declaration")
+_ortgenai_replace_sdk_text(_ortgenai_pal_hpp
+  "inline const std::string& getSdkVersion()" "inline const char* getSdkVersion()"
+  "PAL version wrapper")
+# Preserve source-local header resolution after moving PAL.hpp out of the SDK tree.
+foreach(header DebugTrace.hpp SystemInformationImpl.hpp NetworkInformationImpl.hpp DeviceInformationImpl.hpp typename.hpp WorkerThread.hpp)
+  _ortgenai_replace_sdk_text(_ortgenai_pal_hpp
+    "#include \"${header}\"" "#include \"pal/${header}\"" "generated PAL ${header} include")
+endforeach()
+file(CONFIGURE OUTPUT "${ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR}/pal/PAL.hpp"
+  CONTENT "${_ortgenai_pal_hpp}" @ONLY)
+target_include_directories(mat BEFORE PUBLIC
+  "$<BUILD_INTERFACE:${ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR}>")
+
 set(_ortgenai_pal_source "${cpp_client_telemetry_SOURCE_DIR}/lib/pal/PAL.cpp")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ortgenai_pal_source}")
 file(READ "${_ortgenai_pal_source}" _ortgenai_pal)
 set(_ortgenai_version_original [=[        static const std::string sdkVersion(EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR);
         return sdkVersion;]=])
-set(_ortgenai_version_fixed [=[        using SdkVersion = std::string;
-        alignas(SdkVersion) static unsigned char storage[sizeof(SdkVersion)];
-        static const SdkVersion* sdkVersion = ::new (storage)
-            SdkVersion(EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR);
-        return *sdkVersion;]=])
-string(FIND "${_ortgenai_pal}" "${_ortgenai_version_original}" _ortgenai_version_position)
-if(_ortgenai_version_position EQUAL -1)
-  message(FATAL_ERROR "Update the 1DS SDK version-lifetime patch for the selected SDK source")
-endif()
-string(REPLACE "${_ortgenai_version_original}" "${_ortgenai_version_fixed}"
-  _ortgenai_pal "${_ortgenai_pal}")
+_ortgenai_replace_sdk_text(_ortgenai_pal "${_ortgenai_version_original}"
+  [=[        return EVTSDK_VERSION_PREFIX "-" OS_NAME "-C++-" ECS_SUPP "-" BUILD_VERSION_STR;]=]
+  "version-lifetime")
+_ortgenai_replace_sdk_text(_ortgenai_pal
+  "const std::string& PlatformAbstractionLayer::getSdkVersion() const"
+  "const char* PlatformAbstractionLayer::getSdkVersion() const"
+  "PAL version definition")
+_ortgenai_replace_sdk_text(_ortgenai_pal
+  "#include \"PAL.hpp\"" "#include \"pal/PAL.hpp\"" "generated PAL include")
 set(ORTGENAI_TELEMETRY_PAL_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/telemetry-sdk/PAL.cpp")
 file(CONFIGURE OUTPUT "${ORTGENAI_TELEMETRY_PAL_SOURCE}" CONTENT "${_ortgenai_pal}" @ONLY)
-get_target_property(_ortgenai_mat_sources mat SOURCES)
-list(FIND _ortgenai_mat_sources "pal/PAL.cpp" _ortgenai_pal_position)
-if(_ortgenai_pal_position EQUAL -1)
-  message(FATAL_ERROR "Update the 1DS SDK PAL source replacement for the selected SDK target")
+_ortgenai_replace_mat_source("pal/PAL.cpp" "${ORTGENAI_TELEMETRY_PAL_SOURCE}")
+
+# Upload encoding can lazily initialize this mutex after the telemetry owner's exit registration.
+# Like the PAL version, it must survive until that owner has joined the real SDK worker.
+set(_ortgenai_auth_source "${cpp_client_telemetry_SOURCE_DIR}/lib/api/AuthTokensController.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ortgenai_auth_source}")
+file(READ "${_ortgenai_auth_source}" _ortgenai_auth)
+set(_ortgenai_auth_original [=[        static std::mutex mutex;
+        return mutex;]=])
+set(_ortgenai_auth_fixed [=[        using AuthMutex = std::mutex;
+        alignas(AuthMutex) static unsigned char storage[sizeof(AuthMutex)];
+        static AuthMutex* mutex = ::new (storage) AuthMutex;
+        return *mutex;]=])
+set(_ortgenai_auth_include "#include \"AuthTokensController.hpp\"")
+string(FIND "${_ortgenai_auth}" "${_ortgenai_auth_original}" _ortgenai_auth_position)
+string(FIND "${_ortgenai_auth}" "${_ortgenai_auth_include}" _ortgenai_auth_include_position)
+if(_ortgenai_auth_position EQUAL -1 OR _ortgenai_auth_include_position EQUAL -1)
+  message(FATAL_ERROR "Update the 1DS SDK auth-mutex lifetime patch for the selected SDK source")
 endif()
-list(REMOVE_ITEM _ortgenai_mat_sources "pal/PAL.cpp")
-set_property(TARGET mat PROPERTY SOURCES "${_ortgenai_mat_sources}")
-target_sources(mat PRIVATE "${ORTGENAI_TELEMETRY_PAL_SOURCE}")
+string(REPLACE "${_ortgenai_auth_original}" "${_ortgenai_auth_fixed}"
+  _ortgenai_auth "${_ortgenai_auth}")
+# The generated copy no longer resides next to the SDK's API header.
+string(REPLACE "${_ortgenai_auth_include}" "#include \"api/AuthTokensController.hpp\"\n#include <new>"
+  _ortgenai_auth "${_ortgenai_auth}")
+set(ORTGENAI_TELEMETRY_AUTH_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/telemetry-sdk/AuthTokensController.cpp")
+file(CONFIGURE OUTPUT "${ORTGENAI_TELEMETRY_AUTH_SOURCE}" CONTENT "${_ortgenai_auth}" @ONLY)
+_ortgenai_replace_mat_source("api/AuthTokensController.cpp" "${ORTGENAI_TELEMETRY_AUTH_SOURCE}")
+
 if(DEFINED _ortgenai_saved_mat_build_version)
   set(BUILD_VERSION "${_ortgenai_saved_mat_build_version}")
   unset(_ortgenai_saved_mat_build_version)

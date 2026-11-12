@@ -17,6 +17,10 @@ parameters:
   type: string
 - name: cudaDockerImage
   type: string
+  default: ''
+- name: cudaBaseImageFamily
+  type: string
+  default: 'cuda12_x64_almalinux8_gcc14'
 - name: wheelDir
   type: string
 - name: testPath
@@ -88,6 +92,10 @@ steps:
 
   - bash: |
       set -e -x
+      cuda_docker_image="$CUDA_DOCKER_IMAGE"
+      if [ -z "$cuda_docker_image" ]; then
+        cuda_docker_image=$(python3 tools/ci_build/resolve_docker_base_image.py --family "$CUDA_BASE_IMAGE_FAMILY")
+      fi
       docker run --rm --gpus all \
         -v $(Build.Repository.LocalPath):/onnxruntime-genai \
         -v ${{ parameters.wheelDir }}:/wheel \
@@ -95,7 +103,7 @@ steps:
         -v $(Common.TestResultsDirectory):/results \
         -e ORTGENAI_MODEL_ROOT=/models \
         -w /onnxruntime-genai \
-        ${{ parameters.cudaDockerImage }} \
+        "$cuda_docker_image" \
         /bin/bash -c "
           set -e -x
           PYTHON_EXE=/opt/python/cp312-cp312/bin/python3.12
@@ -113,6 +121,10 @@ steps:
             --junitxml=/results/${{ parameters.resultPrefix }}-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}.xml
         "
     displayName: 'Run integration test in CUDA container'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    env:
+      CUDA_DOCKER_IMAGE: ${{ parameters.cudaDockerImage }}
+      CUDA_BASE_IMAGE_FAMILY: ${{ parameters.cudaBaseImageFamily }}
 
 - ${{ if and(eq(parameters.os, 'linux'), ne(parameters.ep, 'cuda')) }}:
   - bash: |

@@ -32,3 +32,37 @@ The benchmark uses separate processes sharing the selected CPU affinity, not Pyt
 Each worker is warmed up. Within each trial, the order of inference-only, preprocessing-only, and simultaneous windows rotates. JSON records inference tokens/second, preprocessing calls/second, and median/p95 operation latency. Token throughput includes prompt processing and generator restarts every 32 tokens; it is not decode-only throughput. Each window runs for at least the requested duration, finishing any in-flight operation. The processes share the CPUs as an application would, but do not share a model instance.
 
 The one-CPU run is an affinity-limited setup, not a cgroup quota experiment. Affinity and worker settings are explicit; the pool default still does not detect process quotas. Results describe CPU resource contention, not end-to-end multimodal inference or universal inference speedups. Run on an otherwise idle allocation and retain all three worker controls; faster isolated preprocessing can still slow concurrent inference.
+
+Gemma4 multi-image vision benchmark
+
+benchmark_multimodal.py accepts --image_paths for one prompt containing multiple images;
+the existing --image_path remains supported. Gemma4 prompts use one <|image|> marker
+per image and the model tokenizer's chat template. If the tokenizer reports an
+empty or unsupported template, the benchmark falls back to Gemma4's canonical single-user
+turn format. For example, on Windows:
+
+python benchmark\python\benchmark_multimodal.py -i {fixed-output Gemma4 model} --image_paths test\images\australia.jpg test\images\sheet.png -g 1,32 -m 4096,4096 -k 1 -p 1 -w 5 -r 30 -o overlap.csv
+
+For a fixed-shape decoder export, set --chunk_size and --max_lengths to the export's
+prefill chunk size and cache capacity. Dynamic exports retain their default chunking.
+
+Repeat with 1, 2, 4, and 8 image paths, including mixed geometries. Use a real fixed-output
+vision export for performance results; the tiny test graphs establish correctness only.
+Keep the model weights, provider configuration, hardware, thread settings, warmups,
+repetitions, and ordered images identical between builds.
+Verify provider placement separately and disable profiling for timed measurements.
+
+Compare independently built reference and candidate versions using the same fixed-output
+model contract. Validate correctness in both versions before collecting measurements;
+a version that cannot process the model is not a valid performance baseline.
+
+Run the same command with the reference environment to produce reference.csv, then
+with the candidate environment and --baseline_csv reference.csv -o overlap.csv.
+Comparison requires greedy generation and matching configuration, image/audio content,
+and generated-token hashes. A mismatch fails instead of reporting a speedup.
+TTFT includes vision preparation and generation/materialization of the first token.
+CSV records processing and TTFT median/p95; a one-token run leaves decode metrics empty.
+The existing sampled memory column is device/system-wide, not output-buffer allocation
+accounting, and must not be used to attribute memory savings to overlapping output.
+Report the command, hardware/provider/runtime versions, both CSVs, and any uncertainty;
+do not infer accelerator performance from CPU fixtures or enforce noisy CI speed thresholds.

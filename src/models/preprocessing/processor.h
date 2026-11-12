@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <array>
+#include <cstdint>
+
 #include "image_processor.h"
 #include "ortx_cpp_helper.h"
 #include "speech_extractor.h"
@@ -11,13 +14,28 @@
 
 namespace Generators {
 
+struct ImagePositionLayout {
+  // Relative to the next text coordinate; extent controls text after the image.
+  std::array<int64_t, 3> origin{};
+  int64_t width{};
+  int64_t extent{};
+};
+
+inline constexpr size_t kMaxEncodedImageBytes = 512 * 1024 * 1024;
+
 struct Images {
+  struct Info {
+    size_t encoded_bytes{};
+    uint32_t width{};
+    uint32_t height{};
+  };
   Images() = delete;
-  Images(ort_extensions::OrtxObjectPtr<OrtxRawImages> images, size_t num_images)
-      : images_(std::move(images)), num_images_{num_images} {}
+  Images(ort_extensions::OrtxObjectPtr<OrtxRawImages> images, size_t num_images, std::vector<Info> info = {})
+      : images_(std::move(images)), num_images_{num_images}, info_{std::move(info)} {}
 
   ort_extensions::OrtxObjectPtr<OrtxRawImages> images_;
   size_t num_images_{};
+  std::vector<Info> info_;
 };
 
 std::unique_ptr<Images> LoadImages(std::span<const char* const> image_paths);
@@ -79,6 +97,12 @@ struct Processor {
 
   virtual void ConfigureTokenizer(Tokenizer&) const {}
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;
+  virtual std::vector<int32_t> ExpandImagePrompt(const Tokenizer&, const std::string&, std::span<const int64_t>) const {
+    throw std::runtime_error("This processor does not support packed image prompts.");
+  }
+  virtual ImagePositionLayout GetImagePositionLayout(const std::array<int64_t, 3>&) const {
+    throw std::runtime_error("This processor does not support packed image positions.");
+  }
 
  protected:
   ThreadPool* thread_pool_{};

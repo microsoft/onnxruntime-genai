@@ -815,6 +815,15 @@ struct CudaInterfaceImplBase : DeviceInterface {
     return std::make_unique<CudaBatchedSampler>(static_cast<int>(max_batch_size), vocab_size);
   }
 
+  size_t GetBatchedSamplerInitialAllocationBytes(size_t max_batch_size) const override {
+    const size_t capacity = std::max(max_batch_size, size_t{1});
+    constexpr size_t bytes_per_slot = 2 * sizeof(curandState) + sizeof(int);
+    if (capacity > std::numeric_limits<size_t>::max() / bytes_per_slot) {
+      throw std::overflow_error("Batched sampler startup memory bytes overflow size_t.");
+    }
+    return capacity * bytes_per_slot;
+  }
+
   void Synchronize() override {
     CUDA_CHECK(::cudaStreamSynchronize(GetStream()));
   }

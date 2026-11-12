@@ -3,8 +3,10 @@
 
 #include "telemetry/telemetry.h"
 #include "DebugEvents.hpp"
+#include "CsProtocol_types.hpp"
 #include "ITaskDispatcher.hpp"
 #include "mat/config.h"
+#include "api/AuthTokensController.hpp"
 #include "http/HttpClientFactory.hpp"
 #include "pal/PAL.hpp"
 
@@ -12,6 +14,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -55,10 +58,14 @@ struct State {
   bool upload_at_exit = false;
   bool encode_started = false;
   bool version_destroyed = false;
+  bool auth_mutex_destroyed = false;
   int version_reads = 0;
+  int auth_mutex_reads = 0;
   int uploads_completed = 0;
   int workers_started = 0;
   int collector_events = 0;
+  int client_identity_events = 0;
+  std::string expected_process_name;
   int priming_failure = 0;
   int priming_attempts = 0;
 
@@ -78,8 +85,11 @@ struct State {
                !worker_joined || !worker.expired()) {
       Fail(32, "owner, native SDK worker, and mutex teardown were not fully exercised");
     }
-    if (upload_at_exit && (!encode_started || uploads_completed == 0 || version_reads < 2)) {
+    if (upload_at_exit && (!encode_started || uploads_completed == 0 || version_reads < 2 || auth_mutex_reads < 2)) {
       Fail(32, "shutdown did not exercise production decoration, encoding, and upload completion");
+    }
+    if (upload_at_exit && client_identity_events != 1) {
+      Fail(32, "ProcessInfo client identity was not exercised exactly once");
     }
     std::fputs("PASS: actual telemetry owner preserved SDK dependency lifetimes\n", stderr);
   }
@@ -206,6 +216,22 @@ extern "C" void TelemetryTestVersionAccess() {
   ++state.version_reads;
 }
 
+extern "C" void TelemetryTestAuthMutexDestroyed() {
+  auto& state = GetState();
+  std::lock_guard lock(state.mutex);
+  state.auth_mutex_destroyed = true;
+}
+
+extern "C" void TelemetryTestAuthMutexAccess() {
+  auto& state = GetState();
+  std::lock_guard lock(state.mutex);
+  if (state.auth_mutex_destroyed) {
+    Fail(21, "SDK accessed its auth mutex after destruction");
+  }
+
+  ++state.auth_mutex_reads;
+}
+
 extern "C" void TelemetryTestBeforeEncode() {
   auto& state = GetState();
   std::unique_lock lock(state.mutex);
@@ -258,22 +284,48 @@ extern "C" void TelemetryTestCollectorEvent(const char*) {
   ++state.collector_events;
 }
 
+void TelemetryTestDecoratedEvent(const char* name, const CsProtocol::Record& record) {
+  if (std::string_view{name} != "ProcessInfo") return;
+  auto& state = GetState();
+  std::lock_guard lock(state.mutex);
+  if (record.extApp.empty() || record.extApp.front().name != state.expected_process_name ||
+      record.data.empty()) {
+    Fail(32, "ProcessInfo application context did not contain the executable basename");
+  }
+  const auto& properties = record.data.front().properties;
+  const auto process = properties.find("processName");
+  if (process == properties.end() || process->second.stringValue != state.expected_process_name) {
+    Fail(32, "ProcessInfo processName did not contain the executable basename");
+  }
+  ++state.client_identity_events;
+}
+
 int main(int argc, char* argv[]) {
   if (argc != 2) Fail(32, "expected a shutdown regression mode");
   const std::string_view mode{argv[1]};
   if (mode != "retained" && mode != "threaded" && mode != "recreated" &&
       mode != "explicit" && mode != "prime-only" && mode != "disabled" && mode != "ci-disabled" &&
       mode != "prime-failed" && mode != "prime-allocation-failed" &&
-      mode != "upload-at-exit" && mode != "upload-after-reinit") {
+      mode != "upload-at-exit" && mode != "upload-after-reinit" && mode != "upload-overridden-argv0") {
     Fail(32, "unknown shutdown regression mode");
   }
   auto& state = GetState();
-  state.upload_at_exit = mode == "upload-at-exit" || mode == "upload-after-reinit";
-  // Register after the singleton, but before the first event lazily initializes the SDK version.
-  // The original SDK destroys that version before this callback releases the blocked encoder.
+  state.expected_process_name = std::filesystem::path(argv[0]).filename().string();
+  if (mode == "upload-overridden-argv0") {
+    constexpr char overridden[] = "host --api-key=private";
+    const auto capacity = std::string_view(argv[0]).size() + 1;
+    if (capacity < sizeof(overridden)) Fail(32, "argv[0] buffer is too small for the regression");
+    std::snprintf(argv[0], capacity, "%s", overridden);
+  }
+  state.upload_at_exit =
+      mode == "upload-at-exit" || mode == "upload-after-reinit" || mode == "upload-overridden-argv0";
+  // Register after the singleton, but before the SDK's lazy version and auth mutex.
+  // The original SDK destroys both before this callback releases the blocked encoder.
   if (state.upload_at_exit) {
     InitializeOwner(false);
     if (std::atexit(ReleaseCallback) != 0) Fail(32, "cannot register production upload release");
+    // Simulate an earlier upload initializing the auth mutex after its owner, even on non-libc++ hosts.
+    (void)sdk::AuthTokensController::GetMutex();
   }
   state.priming_failure = mode == "prime-failed" ? 1 : mode == "prime-allocation-failed" ? 2
                                                                                          : 0;

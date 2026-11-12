@@ -4,8 +4,11 @@
 #include "qwen38_ort_env.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <utility>
+
+#include "onnxruntime_api.h"
 
 namespace Generators {
 
@@ -64,6 +67,16 @@ void Qwen38OrtEnvScope::Restore() noexcept {
     }
   }
   saved_.clear();
+}
+
+bool Qwen38OrtRunHints::ApplyRunConfigEntries(OrtRunOptions& options) const {
+  const char* value = warmup_ ? "1" : "0";
+  const char* current = Ort::api->GetRunConfigEntry(&options, Qwen38OrtRunEntry::kInWarmup);
+  if (current == nullptr || std::strcmp(current, value) != 0) {
+    options.AddConfigEntry(Qwen38OrtRunEntry::kInWarmup, value);
+    return true;
+  }
+  return false;
 }
 
 std::vector<Qwen38OrtEnvVariable> Qwen38OrtRunHints::Collect(const Qwen38PromptRunHints* prompt,

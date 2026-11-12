@@ -6,9 +6,11 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -18,8 +20,19 @@
 #include <unordered_set>
 #include <unordered_map>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include "generator/generators.h"
@@ -36,6 +49,7 @@
 #include "whisper.h"
 #include "parakeet.h"
 #include "nemotron_speech.h"
+#include "nemotron_bolt.h"
 #include "moonshine_streaming.h"
 #include "multi_modal.h"
 #include "lfm2.h"
@@ -66,14 +80,499 @@ struct SharedInitializerEntry {
 std::mutex g_shared_initializers_mutex;
 std::unordered_map<std::string, std::weak_ptr<SharedInitializerEntry>> g_shared_initializers;
 
+// A GGUF tensor directory entry as read from the header. Its type, geometry, and file bounds are validated only when a
+// mapping selects it (see GgufFileEntry::Resolve), so unused tensors cannot prevent loading the ones a model uses.
+struct GgufTensorInfo {
+  std::string name;
+  uint32_t ggml_type{};
+  std::vector<uint64_t> ggml_dims;
+  uint64_t rel_offset{};
+};
+
+// A selected GGUF tensor whose type, geometry, and file bounds have been validated.
+struct GgufTensorView {
+  ONNXTensorElementDataType default_dtype{ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED};
+  std::vector<int64_t> default_shape;
+  uint64_t data_offset{};
+  size_t n_bytes{};
+};
+
+// Returns false for GGML types this loader does not know.
+bool GetGgmlTypeGeometry(uint32_t ggml_type, size_t& blck_size, size_t& type_size,
+                         ONNXTensorElementDataType& default_dtype) {
+  default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+  switch (ggml_type) {
+    case 0:  // F32
+      blck_size = 1;
+      type_size = 4;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+      return true;
+    case 1:  // F16
+      blck_size = 1;
+      type_size = 2;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+      return true;
+    case 2:  // Q4_0
+      blck_size = 32;
+      type_size = 18;
+      return true;
+    case 3:  // Q4_1
+      blck_size = 32;
+      type_size = 20;
+      return true;
+    case 6:  // Q5_0
+      blck_size = 32;
+      type_size = 22;
+      return true;
+    case 7:  // Q5_1
+      blck_size = 32;
+      type_size = 24;
+      return true;
+    case 8:  // Q8_0
+      blck_size = 32;
+      type_size = 34;
+      return true;
+    case 9:  // Q8_1
+      blck_size = 32;
+      type_size = 36;
+      return true;
+    case 10:  // Q2_K
+      blck_size = 256;
+      type_size = 84;
+      return true;
+    case 11:  // Q3_K
+      blck_size = 256;
+      type_size = 110;
+      return true;
+    case 12:  // Q4_K
+      blck_size = 256;
+      type_size = 144;
+      return true;
+    case 13:  // Q5_K
+      blck_size = 256;
+      type_size = 176;
+      return true;
+    case 14:  // Q6_K
+      blck_size = 256;
+      type_size = 210;
+      return true;
+    case 15:  // Q8_K
+      blck_size = 256;
+      type_size = 292;
+      return true;
+    case 16:  // IQ2_XXS
+      blck_size = 256;
+      type_size = 66;
+      return true;
+    case 17:  // IQ2_XS
+      blck_size = 256;
+      type_size = 74;
+      return true;
+    case 18:  // IQ3_XXS
+      blck_size = 256;
+      type_size = 98;
+      return true;
+    case 19:  // IQ1_S
+      blck_size = 256;
+      type_size = 50;
+      return true;
+    case 20:  // IQ4_NL
+      blck_size = 32;
+      type_size = 18;
+      return true;
+    case 21:  // IQ3_S
+      blck_size = 256;
+      type_size = 110;
+      return true;
+    case 22:  // IQ2_S
+      blck_size = 256;
+      type_size = 82;
+      return true;
+    case 23:  // IQ4_XS
+      blck_size = 256;
+      type_size = 136;
+      return true;
+    case 24:  // I8
+      blck_size = 1;
+      type_size = 1;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
+      return true;
+    case 25:  // I16
+      blck_size = 1;
+      type_size = 2;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
+      return true;
+    case 26:  // I32
+      blck_size = 1;
+      type_size = 4;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+      return true;
+    case 27:  // I64
+      blck_size = 1;
+      type_size = 8;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+      return true;
+    case 28:  // F64
+      blck_size = 1;
+      type_size = 8;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
+      return true;
+    case 29:  // IQ1_M
+      blck_size = 256;
+      type_size = 56;
+      return true;
+    case 30:  // BF16
+      blck_size = 1;
+      type_size = 2;
+      default_dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+      return true;
+    case 39:  // MXFP4
+      blck_size = 32;
+      type_size = 17;
+      return true;
+    case 40:  // NVFP4
+      blck_size = 64;
+      type_size = 36;
+      return true;
+    default:
+      return false;
+  }
+}
+
+size_t OrtElementByteSize(ONNXTensorElementDataType dt) {
+  switch (dt) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FNUZ:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2FNUZ:
+      return 1;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+      return 2;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+      return 4;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+      return 8;
+    default:
+      throw std::runtime_error("Unsupported ONNX tensor element data type: " + std::to_string(dt));
+  }
+}
+
+#ifdef _WIN32
+struct Win32HandleCloser {
+  void operator()(HANDLE handle) const noexcept { ::CloseHandle(handle); }
+};
+using UniqueWin32Handle = std::unique_ptr<void, Win32HandleCloser>;
+#endif
+
+struct GgufFileEntry {
+  fs::path path;
+  std::string identity;
+  uint8_t* mmap_base{nullptr};
+  size_t mmap_size{0};
+  uint64_t tensor_data_offset{0};
+  std::unordered_map<std::string, GgufTensorInfo> tensors;
+
+  explicit GgufFileEntry(const fs::path& file_path, std::string file_identity)
+      : path{file_path}, identity{std::move(file_identity)} {
+    Map();
+    try {
+      ParseHeader();
+    } catch (...) {
+      Unmap();
+      throw;
+    }
+  }
+
+  ~GgufFileEntry() { Unmap(); }
+
+  GgufFileEntry(const GgufFileEntry&) = delete;
+  GgufFileEntry& operator=(const GgufFileEntry&) = delete;
+
+  // Validates a tensor that a mapping selected. Unsupported or malformed selected tensors still fail here.
+  GgufTensorView Resolve(const GgufTensorInfo& info) const {
+    GgufTensorView view;
+    size_t blck_size = 1, type_size = 1;
+    if (!GetGgmlTypeGeometry(info.ggml_type, blck_size, type_size, view.default_dtype)) {
+      throw std::runtime_error("Unsupported GGUF tensor type " + std::to_string(info.ggml_type) + " for tensor '" +
+                               info.name + "' in " + path.string());
+    }
+    const size_t n_dims = info.ggml_dims.size();
+    if (info.ggml_dims[0] % blck_size != 0) {
+      throw std::runtime_error("GGUF tensor '" + info.name + "' dim[0] is not divisible by block size in " +
+                               path.string());
+    }
+    const uint64_t n_blocks = info.ggml_dims[0] / blck_size;
+    if (n_blocks > std::numeric_limits<size_t>::max() / type_size) {
+      throw std::runtime_error("GGUF tensor '" + info.name + "' byte size overflow in " + path.string());
+    }
+    size_t total_bytes = static_cast<size_t>(n_blocks) * type_size;
+    for (size_t d = 1; d < n_dims; ++d) {
+      const uint64_t dim = info.ggml_dims[d];
+      if (dim > std::numeric_limits<size_t>::max() ||
+          (dim > 0 && total_bytes > std::numeric_limits<size_t>::max() / static_cast<size_t>(dim))) {
+        throw std::runtime_error("GGUF tensor '" + info.name + "' byte size overflow in " + path.string());
+      }
+      total_bytes *= static_cast<size_t>(dim);
+    }
+    view.default_shape.resize(n_dims);
+    for (size_t d = 0; d + 1 < n_dims; ++d) {
+      view.default_shape[d] = static_cast<int64_t>(info.ggml_dims[n_dims - 1 - d]);
+    }
+    view.default_shape[n_dims - 1] = static_cast<int64_t>(n_blocks * (blck_size == 1 ? 1 : type_size));
+
+    if (tensor_data_offset > mmap_size || info.rel_offset > mmap_size - tensor_data_offset) {
+      throw std::runtime_error("GGUF tensor '" + info.name + "' offset exceeds file bounds in " + path.string());
+    }
+    view.data_offset = tensor_data_offset + info.rel_offset;
+    if (total_bytes > mmap_size - view.data_offset) {
+      throw std::runtime_error("GGUF tensor '" + info.name + "' exceeds file bounds in " + path.string());
+    }
+    view.n_bytes = total_bytes;
+    return view;
+  }
+
+ private:
+  // Maps the whole file read-only, so tensor pages are loaded on demand and remain reclaimable by the OS.
+  void Map() {
+#ifdef _WIN32
+    const auto win32_error = [this](const char* message) {
+      const DWORD error = ::GetLastError();
+      return std::runtime_error(message + path.string() + " (Win32 error " + std::to_string(error) + ")");
+    };
+    HANDLE file_handle = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file_handle == INVALID_HANDLE_VALUE) {
+      throw win32_error("Failed to open GGUF file: ");
+    }
+    const UniqueWin32Handle file{file_handle};
+    LARGE_INTEGER file_size{};
+    if (!::GetFileSizeEx(file.get(), &file_size)) {
+      throw win32_error("Failed to stat GGUF file: ");
+    }
+    // CreateFileMappingW rejects zero-length files, so report them like the POSIX path does.
+    if (file_size.QuadPart <= 0) {
+      throw std::runtime_error("Empty GGUF file: " + path.string());
+    }
+    if (static_cast<uint64_t>(file_size.QuadPart) > std::numeric_limits<size_t>::max()) {
+      throw std::runtime_error("GGUF file is too large to map: " + path.string());
+    }
+    mmap_size = static_cast<size_t>(file_size.QuadPart);
+    // The view keeps the mapping and the file open, so both handles can be closed once it exists.
+    const UniqueWin32Handle mapping{::CreateFileMappingW(file.get(), nullptr, PAGE_READONLY, 0, 0, nullptr)};
+    if (!mapping) {
+      throw win32_error("Failed to create GGUF file mapping: ");
+    }
+    void* mapped = ::MapViewOfFile(mapping.get(), FILE_MAP_READ, 0, 0, 0);
+    if (mapped == nullptr) {
+      throw win32_error("Failed to map GGUF file: ");
+    }
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+      throw std::runtime_error("Failed to open GGUF file: " + path.string());
+    }
+    struct stat st = {};
+    if (::fstat(fd, &st) != 0) {
+      ::close(fd);
+      throw std::runtime_error("Failed to stat GGUF file: " + path.string());
+    }
+    if (st.st_size <= 0) {
+      ::close(fd);
+      throw std::runtime_error("Empty GGUF file: " + path.string());
+    }
+    mmap_size = static_cast<size_t>(st.st_size);
+    void* mapped = ::mmap(nullptr, mmap_size, PROT_READ, MAP_SHARED, fd, 0);
+    ::close(fd);
+    if (mapped == MAP_FAILED) {
+      throw std::runtime_error("Failed to mmap GGUF file: " + path.string());
+    }
+#endif
+    mmap_base = static_cast<uint8_t*>(mapped);
+  }
+
+  void Unmap() noexcept {
+    if (mmap_base == nullptr) {
+      return;
+    }
+#ifdef _WIN32
+    ::UnmapViewOfFile(mmap_base);
+#else
+    ::munmap(mmap_base, mmap_size);
+#endif
+    mmap_base = nullptr;
+  }
+
+  void ParseHeader() {
+    size_t cursor = 0;
+    auto require_bytes = [&](size_t n) {
+      if (cursor > mmap_size || n > mmap_size - cursor) {
+        throw std::runtime_error("Truncated GGUF header in " + path.string());
+      }
+    };
+    auto read_u32 = [&]() -> uint32_t {
+      require_bytes(4);
+      uint32_t v = 0;
+      std::memcpy(&v, mmap_base + cursor, 4);
+      cursor += 4;
+      return v;
+    };
+    auto read_u64 = [&]() -> uint64_t {
+      require_bytes(8);
+      uint64_t v = 0;
+      std::memcpy(&v, mmap_base + cursor, 8);
+      cursor += 8;
+      return v;
+    };
+    auto read_str = [&]() -> std::string {
+      const uint64_t len = read_u64();
+      if (len > mmap_size - cursor) {
+        throw std::runtime_error("Truncated GGUF string in " + path.string());
+      }
+      const size_t slen = static_cast<size_t>(len);
+      std::string s(reinterpret_cast<const char*>(mmap_base + cursor), slen);
+      cursor += slen;
+      return s;
+    };
+    std::function<uint64_t(uint32_t, int)> skip_or_read_val = [&](uint32_t vtype, int depth) -> uint64_t {
+      if (depth > 4) {
+        throw std::runtime_error("GGUF metadata array nesting too deep in " + path.string());
+      }
+      switch (vtype) {
+        case 0:
+        case 1:
+        case 7: {
+          require_bytes(1);
+          uint8_t v = mmap_base[cursor];
+          cursor += 1;
+          return v;
+        }
+        case 2:
+        case 3: {
+          require_bytes(2);
+          uint16_t v = 0;
+          std::memcpy(&v, mmap_base + cursor, 2);
+          cursor += 2;
+          return v;
+        }
+        case 4:
+        case 5:
+        case 6:
+          return read_u32();
+        case 8: {
+          const uint64_t len = read_u64();
+          if (len > mmap_size - cursor) {
+            throw std::runtime_error("Truncated GGUF metadata string in " + path.string());
+          }
+          cursor += static_cast<size_t>(len);
+          return 0;
+        }
+        case 9: {
+          const uint32_t elem_type = read_u32();
+          const uint64_t count = read_u64();
+          for (uint64_t i = 0; i < count; ++i) {
+            skip_or_read_val(elem_type, depth + 1);
+          }
+          return 0;
+        }
+        case 10:
+        case 11:
+        case 12:
+          return read_u64();
+        default:
+          throw std::runtime_error("Unsupported GGUF metadata value type " + std::to_string(vtype) + " in " +
+                                   path.string());
+      }
+    };
+
+    require_bytes(4);
+    if (std::memcmp(mmap_base, "GGUF", 4) != 0) {
+      throw std::runtime_error("Invalid GGUF magic in " + path.string());
+    }
+    cursor += 4;
+    const uint32_t version = read_u32();
+    if (version < 2 || version > 3) {
+      throw std::runtime_error("Unsupported GGUF version " + std::to_string(version) + " in " + path.string());
+    }
+    const uint64_t tensor_count = read_u64();
+    const uint64_t kv_count = read_u64();
+    uint64_t alignment = 32;
+    for (uint64_t i = 0; i < kv_count; ++i) {
+      const std::string key = read_str();
+      const uint32_t vtype = read_u32();
+      const uint64_t val = skip_or_read_val(vtype, 0);
+      if (key == "general.alignment") {
+        if (val == 0 || (val & (val - 1)) != 0 || val > (1ULL << 20)) {
+          throw std::runtime_error("Invalid GGUF general.alignment in " + path.string());
+        }
+        alignment = val;
+      }
+    }
+
+    if (tensor_count > mmap_size / 16) {
+      throw std::runtime_error("GGUF tensor_count exceeds file bounds in " + path.string());
+    }
+    for (uint64_t i = 0; i < tensor_count; ++i) {
+      GgufTensorInfo info;
+      info.name = read_str();
+      const uint32_t n_dims = read_u32();
+      if (n_dims == 0 || n_dims > 8) {
+        throw std::runtime_error("Invalid GGUF tensor rank for '" + info.name + "' in " + path.string());
+      }
+      info.ggml_dims.resize(n_dims);
+      for (uint32_t d = 0; d < n_dims; ++d) {
+        info.ggml_dims[d] = read_u64();
+      }
+      info.ggml_type = read_u32();
+      info.rel_offset = read_u64();
+      auto name = info.name;
+      if (!tensors.emplace(std::move(name), std::move(info)).second) {
+        throw std::runtime_error("Duplicate GGUF tensor name in " + path.string());
+      }
+    }
+
+    if (cursor > std::numeric_limits<uint64_t>::max() - (alignment - 1)) {
+      throw std::runtime_error("GGUF tensor_data_offset overflow in " + path.string());
+    }
+    tensor_data_offset = ((cursor + alignment - 1) / alignment) * alignment;
+  }
+};
+
 std::string SharedInitializerFileIdentity(const fs::path& path) {
 #ifndef _WIN32
   struct stat file_info = {};
   if (::stat(path.c_str(), &file_info) == 0) {
     return std::to_string(file_info.st_dev) + ":" + std::to_string(file_info.st_ino);
   }
-#endif
   return path.string();
+#else
+  return fs::path{std::filesystem::canonical(path.c_str()).native()}.string();
+#endif
+}
+
+std::mutex g_gguf_files_mutex;
+std::unordered_map<std::string, std::weak_ptr<GgufFileEntry>> g_gguf_files;
+
+std::shared_ptr<GgufFileEntry> GetOrOpenGgufFile(const fs::path& path) {
+  const std::string key = SharedInitializerFileIdentity(path);
+  std::lock_guard lock{g_gguf_files_mutex};
+  if (auto it = g_gguf_files.find(key); it != g_gguf_files.end()) {
+    if (auto existing = it->second.lock()) {
+      return existing;
+    }
+  }
+  auto entry = std::make_shared<GgufFileEntry>(path, key);
+  g_gguf_files[key] = entry;
+  return entry;
 }
 
 // Session-option config keys whose values are file/folder path references. When a model is loaded
@@ -158,7 +657,7 @@ void State::DumpOutputs() {
 }
 
 void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
-                int graph_capture_variant) {
+                int graph_capture_variant, OrtIoBinding* binding) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
@@ -202,22 +701,25 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
-  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
-              output_names_.data(), outputs_.data(), output_names_.size());
+  if (binding) {
+    session.Run(run_options_.get(), *binding);
+    binding->SynchronizeOutputs();
+  } else {
+    session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+                output_names_.data(), outputs_.data(), output_names_.size());
+  }
 
   extra_outputs_.RegisterOutputs();
 
   DumpOutputs();
 }
 
-void State::SetRunOption(const char* key, const char* value) {
+void ApplyRunOption(OrtRunOptions& run_options, const char* key, const char* value) {
   if (strcmp(key, "terminate_session") == 0) {
     if (strcmp(value, "0") == 0) {
-      session_terminated_ = false;
-      run_options_->UnsetTerminate();
+      run_options.UnsetTerminate();
     } else if (strcmp(value, "1") == 0) {
-      session_terminated_ = true;
-      run_options_->SetTerminate();
+      run_options.SetTerminate();
     } else {
       // Value not expected
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
@@ -226,20 +728,27 @@ void State::SetRunOption(const char* key, const char* value) {
   } else if (strcmp(key, "enable_profiling") == 0) {
 #if ORT_API_VERSION >= 25
     if (strcmp(value, "0") == 0) {
-      run_options_->DisableProfiling();
+      run_options.DisableProfiling();
     } else {
       // Enable run-level profiling. The profiling output file is named: <prefix>_<timestamp>.json
       // Value "1" uses the default prefix; any other value is treated as a custom prefix.
       constexpr const char* default_profile_prefix = "onnxruntime_run_profile";
       const char* prefix = (strcmp(value, "1") == 0) ? default_profile_prefix : value;
-      run_options_->EnableProfiling(fs::path(prefix).c_str());
+      run_options.EnableProfiling(fs::path(prefix).c_str());
     }
 #else
     throw std::runtime_error("enable_profiling requires ONNX Runtime 1.25 or later");
 #endif
     return;
   }
-  run_options_->AddConfigEntry(key, value);
+  run_options.AddConfigEntry(key, value);
+}
+
+void State::SetRunOption(const char* key, const char* value) {
+  ApplyRunOption(*run_options_, key, value);
+  if (strcmp(key, "terminate_session") == 0) {
+    session_terminated_ = strcmp(value, "1") == 0;
+  }
 }
 
 /*
@@ -519,7 +1028,15 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
+  if (config_->engine.dynamic_batching &&
+      config_->engine.dynamic_batching->device_memory_budget_bytes &&
+      p_device_->GetType() == DeviceType::CUDA) {
+    size_t free_bytes, total_bytes;
+    p_device_->GetAvailableMemory(free_bytes, total_bytes);
+    device_memory_budget_initial_free_bytes_ = free_bytes;
+  }
   AddSharedInitializers();
+  AddGgufInitializers(*session_options_);
 
   // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
   // decode inputs in place with no per-step roundtrip. Null if the device offers no such allocator.
@@ -572,11 +1089,15 @@ void Model::AddSharedInitializers() {
     const uint64_t offset = initializer.offset.empty() ? 0 : std::stoull(initializer.offset);
     const size_t length = static_cast<size_t>(std::stoull(initializer.length));
     const auto data_type = static_cast<ONNXTensorElementDataType>(initializer.data_type);
-    auto memory_info = p_device_->GetMemoryInfo();
+    // Generic CPU-backed providers need not expose device-only memory metadata.
+    auto memory_info = p_device_->GetType() == DeviceType::CPU
+                           ? OrtMemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)
+                           : p_device_->GetMemoryInfo();
 
     std::ostringstream key;
     key << SharedInitializerFileIdentity(data_path) << ':' << offset << ':' << length << ':'
         << initializer.data_type << ':'
+        << memory_info->GetAllocatorName() << ':'
         << memory_info->GetDeviceType() << ':' << memory_info->GetDeviceId();
     for (int64_t dimension : initializer.shape) {
       key << ':' << dimension;
@@ -616,6 +1137,167 @@ void Model::AddSharedInitializers() {
   }
 }
 
+void Model::AddGgufInitializers(OrtSessionOptions& session_options) {
+  auto gguf_cfg = config_->model.decoder.gguf_initializers;
+  if (!gguf_cfg.config_file.empty()) {
+    if (config_->memory_assets_only_) {
+      throw std::runtime_error("Memory-only loading does not support GGUF initializer files.");
+    }
+    const fs::path cfg_path = config_->ResolvePath(gguf_cfg.config_file);
+    Config::Model::GgufInitializers loaded;
+    LoadGgufInitializersConfig(cfg_path, loaded);
+    if (gguf_cfg.has_share) {
+      loaded.share = gguf_cfg.share;
+      loaded.has_share = true;
+    }
+    loaded.files.insert(loaded.files.end(), gguf_cfg.files.begin(), gguf_cfg.files.end());
+    loaded.tensors.insert(loaded.tensors.end(), gguf_cfg.tensors.begin(), gguf_cfg.tensors.end());
+    gguf_cfg = std::move(loaded);
+  }
+  if (gguf_cfg.tensors.empty()) {
+    return;
+  }
+  if (!config_->model.decoder.pipeline.empty()) {
+    throw std::runtime_error("GGUF initializers are not supported for pipelined decoders.");
+  }
+  // MoonshineStreamingModel replaces session_options_ after this registration and shares it across all of its
+  // sessions, so the mappings would be lost (and would not match the non-decoder graphs).
+  if (ModelType::IsStreamingEncDecASR(config_->model.type)) {
+    throw std::runtime_error("GGUF initializers are not supported for streaming_enc_dec_asr models.");
+  }
+  if (config_->memory_assets_only_) {
+    throw std::runtime_error("Memory-only loading does not support GGUF initializers.");
+  }
+
+  std::unordered_map<std::string, std::shared_ptr<GgufFileEntry>> opened_files;
+  std::vector<std::shared_ptr<GgufFileEntry>> ordered_files;
+  auto open_file = [&](const std::string& rel_file) -> std::shared_ptr<GgufFileEntry> {
+    if (auto it = opened_files.find(rel_file); it != opened_files.end()) {
+      return it->second;
+    }
+    const fs::path resolved = config_->ResolvePath(rel_file);
+    auto entry = GetOrOpenGgufFile(resolved);
+    opened_files.emplace(rel_file, entry);
+    shared_initializer_entries_.push_back(entry);
+    return entry;
+  };
+
+  for (const auto& f : gguf_cfg.files) {
+    auto entry = open_file(f);
+    if (std::find(ordered_files.begin(), ordered_files.end(), entry) == ordered_files.end()) {
+      ordered_files.push_back(std::move(entry));
+    }
+  }
+
+  auto cpu_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  std::vector<std::string> ext_names;
+  ext_names.reserve(gguf_cfg.tensors.size());
+  std::vector<std::unique_ptr<OrtValue>> ext_values;
+  ext_values.reserve(gguf_cfg.tensors.size());
+
+  for (const auto& mapping : gguf_cfg.tensors) {
+    if (mapping.onnx_name.empty() || mapping.gguf_name.empty()) {
+      throw std::runtime_error("Invalid GGUF tensor mapping: onnx_name and gguf_name must be non-empty.");
+    }
+    const GgufFileEntry* matched_file = nullptr;
+    const GgufTensorInfo* matched_info = nullptr;
+    if (!mapping.file.empty()) {
+      auto file_entry = open_file(mapping.file);
+      if (auto it = file_entry->tensors.find(mapping.gguf_name); it != file_entry->tensors.end()) {
+        matched_file = file_entry.get();
+        matched_info = &it->second;
+      }
+    } else {
+      for (const auto& file_entry : ordered_files) {
+        if (auto it = file_entry->tensors.find(mapping.gguf_name); it != file_entry->tensors.end()) {
+          if (matched_info != nullptr) {
+            throw std::runtime_error("Ambiguous GGUF tensor '" + mapping.gguf_name +
+                                     "' found in multiple GGUF files; specify 'file' in mapping.");
+          }
+          matched_file = file_entry.get();
+          matched_info = &it->second;
+        }
+      }
+    }
+    if (matched_info == nullptr) {
+      throw std::runtime_error("GGUF tensor '" + mapping.gguf_name + "' for ONNX initializer '" +
+                               mapping.onnx_name + "' was not found in configured GGUF file(s).");
+    }
+
+    const GgufTensorView tensor = matched_file->Resolve(*matched_info);
+    const auto data_type = mapping.data_type != 0
+                               ? static_cast<ONNXTensorElementDataType>(mapping.data_type)
+                               : tensor.default_dtype;
+    const auto& shape = mapping.has_shape || !mapping.shape.empty() ? mapping.shape : tensor.default_shape;
+    size_t expected_bytes = OrtElementByteSize(data_type);
+    for (int64_t d : shape) {
+      if (d < 0) {
+        throw std::runtime_error("Negative dimension in GGUF initializer shape for '" + mapping.onnx_name + "'");
+      }
+      const size_t dim = static_cast<size_t>(d);
+      if (dim > 0 && expected_bytes > std::numeric_limits<size_t>::max() / dim) {
+        throw std::runtime_error("Byte size overflow in GGUF initializer shape for '" + mapping.onnx_name + "'");
+      }
+      expected_bytes *= dim;
+    }
+    if (expected_bytes != tensor.n_bytes) {
+      throw std::runtime_error("Byte size mismatch for GGUF initializer '" + mapping.onnx_name + "' -> '" +
+                               mapping.gguf_name + "': expected " + std::to_string(expected_bytes) +
+                               " bytes from shape/type, GGUF tensor has " + std::to_string(tensor.n_bytes) +
+                               " bytes.");
+    }
+
+    void* tensor_ptr = matched_file->mmap_base + tensor.data_offset;
+    auto cpu_view = OrtValue::CreateTensor(*cpu_memory_info, tensor_ptr, tensor.n_bytes, shape, data_type);
+    ext_names.push_back(mapping.onnx_name);
+    ext_values.push_back(std::move(cpu_view));
+
+    const bool share_tensor = mapping.has_share ? mapping.share : gguf_cfg.share;
+    if (share_tensor && p_device_ && p_device_->GetType() != DeviceType::CPU) {
+      // ~Model closes the global DML allocator while these entries (possibly held by other models) are still alive.
+      if (p_device_->GetType() == DeviceType::DML) {
+        throw std::runtime_error("GGUF initializer '" + mapping.onnx_name +
+                                 "' cannot use \"share\": true because device sharing is not supported on DML.");
+      }
+      auto memory_info = p_device_->GetMemoryInfo();
+      std::ostringstream key;
+      key << matched_file->identity << ':' << tensor.data_offset << ':' << tensor.n_bytes << ':'
+          << static_cast<int>(data_type) << ':' << memory_info->GetAllocatorName() << ':'
+          << memory_info->GetDeviceType() << ':' << memory_info->GetDeviceId();
+      for (int64_t dimension : shape) {
+        key << ':' << dimension;
+      }
+
+      std::shared_ptr<SharedInitializerEntry> shared_entry;
+      {
+        std::lock_guard lock{g_shared_initializers_mutex};
+        if (auto it = g_shared_initializers.find(key.str()); it != g_shared_initializers.end()) {
+          shared_entry = it->second.lock();
+        }
+        if (!shared_entry) {
+          shared_entry = std::make_shared<SharedInitializerEntry>();
+          shared_entry->device_data = p_device_->Allocate<uint8_t>(tensor.n_bytes);
+          // Uploads straight from the mapped file; device buffers keep no host staging copy afterwards.
+          shared_entry->device_data.CopyFromCpu(
+              std::span<const uint8_t>(static_cast<const uint8_t*>(tensor_ptr), tensor.n_bytes));
+          shared_entry->shared_view = OrtValue::CreateTensor(
+              *memory_info, shared_entry->device_data.Span().data(), tensor.n_bytes, shape, data_type);
+          g_shared_initializers[key.str()] = shared_entry;
+        }
+      }
+      session_options.AddInitializer(mapping.onnx_name.c_str(), *shared_entry->shared_view);
+      gguf_shared_device_data_.push_back(shared_entry->device_data);
+      shared_initializer_entries_.push_back(std::move(shared_entry));
+    }
+  }
+
+  session_options.AddConfigEntry("session.use_external_initializer_file_buffers_directly", "1");
+  session_options.AddExternalInitializers(ext_names, ext_values);
+  for (auto& value : ext_values) {
+    gguf_external_values_.push_back(std::move(value));
+  }
+}
+
 Model::~Model() {
   // Snapshot the type before teardown: CloseDmlInterface() frees the singleton p_device_ points to,
   // so reading p_device_->GetType() afterwards would be a use-after-free.
@@ -638,6 +1320,8 @@ Model::~Model() {
     // initializers while the AMDGPU allocator is still alive.
     pipeline_session_options_.clear();
     session_options_.reset();
+    gguf_external_values_.clear();
+    gguf_shared_device_data_.clear();
     shared_initializer_entries_.clear();
     CloseAMDGPUInterface();
   }
@@ -1077,6 +1761,14 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  const bool text_only = ModelType::IsLLM(config->model.type);
+  if (text_only && (!config->model.vision.filename.empty() || !config->model.vision.pipeline.empty())) {
+    throw std::runtime_error(
+        "Text-only model type '" + config->model.type +
+        "' cannot configure a vision encoder. Export the complete vision-language model instead.");
+  }
+  if (config->model.type == "nemotron_bolt")
+    return std::make_shared<NemotronBoltModel>(std::move(config), ort_env);
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   if (!config->model.decoder.pipeline.empty() &&
@@ -1092,8 +1784,14 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (config->model.type == "qwen38_flash_graph")
     return std::make_shared<Qwen38GraphModel>(std::move(config), ort_env);
-  if (ModelType::IsLLM(config->model.type))
+  if (text_only)
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+  if (ModelType::IsVLM(config->model.type) && config->engine.dynamic_batching) {
+    if (config->model.vision.filename.empty()) {
+      throw std::runtime_error("Packed vision requires an exported vision encoder.");
+    }
+    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+  }
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsStreamingEncDecASR(config->model.type))
