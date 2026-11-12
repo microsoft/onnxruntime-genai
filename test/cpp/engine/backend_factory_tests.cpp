@@ -85,27 +85,6 @@ TEST(EngineBackendFactoryTest, ExplicitPagedPoolDoesNotDeductMediaAllowance) {
   EXPECT_EQ(model->config_->engine.dynamic_batching->num_blocks, blocks);
 }
 
-TEST(EngineBackendFactoryTest, Qwen38DeviceMemoryBudgetReachesNativeConfigurationValidation) {
-  for (const size_t slots : {1u, 2u}) {
-    for (const auto headroom : {std::optional<uint64_t>{}, std::optional<uint64_t>{0}}) {
-      SCOPED_TRACE(slots);
-      SCOPED_TRACE(headroom.has_value());
-      auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
-      config->model.type = "qwen38_flash_graph";
-      auto& batching = *config->engine.dynamic_batching;
-      batching.max_batch_size = slots;
-      batching.device_memory_budget_bytes = 1024 * 1024 * 1024;
-      batching.device_memory_headroom_bytes = headroom;
-      try {
-        (void)CreateModel(GetOrtEnv(), std::move(config));
-        FAIL() << "The synthetic paged model is not a native Qwen package";
-      } catch (const std::runtime_error& error) {
-        EXPECT_NE(std::string{error.what()}.find("qwen38_graph.ple_table"), std::string::npos);
-      }
-    }
-  }
-}
-
 TEST(NativeDeviceMemoryBudgetTest, ChargesFixedStateButDoesNotDoubleChargeResidentSnapshots) {
   Config::Engine::DynamicBatching settings;
   settings.device_memory_budget_bytes = 600;

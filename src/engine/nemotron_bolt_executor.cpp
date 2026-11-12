@@ -148,6 +148,8 @@ struct BoltExecutor final : ModelExecutor {
     }
     stats.tokens_emitted += session->delivered;
     stats.tokens_discarded += session->discarded;
+    if (stats.rounds != 0)
+      stats.mean_emitted_tokens_per_round = static_cast<float>(stats.tokens_emitted) / stats.rounds;
   }
   std::shared_ptr<BoltSession> session;
 };

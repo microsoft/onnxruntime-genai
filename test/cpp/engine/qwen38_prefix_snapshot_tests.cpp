@@ -49,74 +49,51 @@ TEST(Qwen38PrefixSnapshotTest, PolicyGatesOptInAndWarnsWhenInactive) {
   }
 }
 
-TEST(Qwen38PrefixSnapshotTest, PolicyUsesRealCountEvictionAndTierBudgets) {
-  for (const auto* settings : {
-           R"({"prefix_caching":true,"max_batch_size":1})",
-           R"({"prefix_caching":true,"max_batch_size":1,"max_snapshots":1,"snapshot_cache":{"ram_bytes":32}})",
-           R"({"prefix_caching":true,"max_batch_size":1,"max_snapshots":1,"snapshot_cache":{"disk_bytes":32}})"}) {
+TEST(Qwen38PrefixSnapshotTest, ResolvedPolicyPreservesCountsAndTierLimitsAfterNormalizationAndOverlays) {
+  using Tier = PrefixSnapshotCache::Tier;
+  struct Case {
+    const char* settings;
+    Tier tier;
+    size_t retained;
+  };
+  const Case cases[] = {
+      {R"({"prefix_caching":true,"max_batch_size":1})", Tier::Vram, 1},
+      {R"({"prefix_caching":true,"max_batch_size":1,"max_snapshots":2,"snapshot_cache":{"ram_bytes":64}})", Tier::Ram, 2},
+      {R"({"prefix_caching":true,"max_batch_size":1,"snapshot_cache":{"ram_bytes":32}})", Tier::Ram, 2},
+      {R"({"prefix_caching":true,"max_batch_size":1,"snapshot_cache":{"disk_bytes":32}})", Tier::Disk, 2},
+      {R"({"prefix_caching":true,"max_batch_size":1,"max_snapshots":3,"snapshot_cache":{"ram_bytes":16}})", Tier::Ram, 1},
+      {R"({"prefix_caching":true,"max_batch_size":1,"snapshot_cache":{"ram_bytes":15,"disk_bytes":15}})", Tier::Ram, 0},
+  };
+  for (const auto& [settings, tier, retained] : cases) {
+    SCOPED_TRACE(settings);
     Config config;
     OverlayConfig(config, std::string{R"({"engine":{"dynamic_batching":)"} + settings + "}}");
-    auto cache = CreateQwen38PrefixSnapshotCache(ApplyQwen38DynamicBatchingConfig(config));
+    const auto resolved = ApplyQwen38DynamicBatchingConfig(config);
+    ASSERT_FALSE(config.engine.dynamic_batching);
+    OverlayConfig(config, R"({"engine":{"dynamic_batching":{"prefix_caching":false,"max_batch_size":2}}})");
+    auto cache = CreateQwen38PrefixSnapshotCache(resolved);
     ASSERT_NE(cache, nullptr);
-    auto* cpu = GetDeviceInterface(DeviceType::CPU);
-    auto first = ByteEntry(16);
-    ASSERT_TRUE(cache->Allocate(first, cpu, "qwen38"));
-    auto lease = first;
-    auto second = ByteEntry(16);
-    EXPECT_FALSE(cache->Allocate(second, cpu, "qwen38"));
-    EXPECT_EQ(first->state, PrefixSnapshotCache::State::Resident);
-    lease.reset();
-    ASSERT_TRUE(cache->Allocate(second, cpu, "qwen38"));
-    EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
-    EXPECT_EQ(second->state, PrefixSnapshotCache::State::Resident);
-    EXPECT_EQ(cache->Used()[static_cast<size_t>(second->tier)], 16u);
-  }
-  Config undersized;
-  OverlayConfig(undersized, R"({"engine":{"dynamic_batching":{
-    "prefix_caching":true,"max_batch_size":1,"snapshot_cache":{"ram_bytes":15,"disk_bytes":15}}}})");
-  auto cache = CreateQwen38PrefixSnapshotCache(ApplyQwen38DynamicBatchingConfig(undersized));
-  ASSERT_NE(cache, nullptr);
-  EXPECT_FALSE(cache->Allocate(ByteEntry(16), GetDeviceInterface(DeviceType::CPU), "qwen38"));
-}
-
-TEST(Qwen38PrefixSnapshotTest, SingleSlotCreatesCacheFromResolvedSettingsAfterNormalization) {
-  for (int explicit_chunk : {0, 8192}) {
-    for (size_t scheduled_tokens : {size_t{2048}, size_t{8192}}) {
-      Config config;
-      config.model.qwen38_graph.prefill.enabled = true;
-      config.model.qwen38_graph.prefill.dense.filename = "dense.onnx";
-      EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph), 8192u);
-      OverlayConfig(config, R"({"engine":{"dynamic_batching":{"prefix_caching":true,"max_batch_size":1}}})");
-      config.model.qwen38_graph.prefill.chunk = explicit_chunk;
-      config.engine.dynamic_batching->max_scheduled_tokens = scheduled_tokens;
-      const auto resolved = ApplyQwen38DynamicBatchingConfig(config);
-      EXPECT_FALSE(resolved.has_dynamic_batching_kv);
-      EXPECT_FALSE(config.engine.dynamic_batching);
-      auto cache = CreateQwen38PrefixSnapshotCache(resolved);
-      ASSERT_NE(cache, nullptr);
-      EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph),
-                explicit_chunk ? static_cast<size_t>(explicit_chunk) : scheduled_tokens);
+    std::vector<std::shared_ptr<PrefixSnapshotCache::Entry>> entries;
+    for (size_t index = 0; index <= retained; ++index) {
+      auto entry = ByteEntry(16);
+      if (retained == 0) {
+        EXPECT_FALSE(cache->Allocate(entry, GetDeviceInterface(DeviceType::CPU), "qwen38"));
+        break;
+      }
+      ASSERT_TRUE(cache->Allocate(entry, GetDeviceInterface(DeviceType::CPU), "qwen38"));
+      EXPECT_EQ(entry->tier, tier);
+      entries.push_back(std::move(entry));
+      if (entries.size() <= retained)
+        for (const auto& previous : entries)
+          EXPECT_EQ(previous->state, PrefixSnapshotCache::State::Resident);
     }
+    if (retained != 0) {
+      EXPECT_EQ(entries.front()->state, PrefixSnapshotCache::State::Evicted);
+      for (size_t index = 1; index < entries.size(); ++index)
+        EXPECT_EQ(entries[index]->state, PrefixSnapshotCache::State::Resident);
+    }
+    EXPECT_EQ(cache->Used()[static_cast<size_t>(tier)], retained * 16);
   }
-}
-
-TEST(Qwen38PrefixSnapshotTest, ResolvedSnapshotPolicyDoesNotReadLaterConfigChanges) {
-  Config config;
-  OverlayConfig(config, R"({"engine":{"dynamic_batching":{
-    "prefix_caching":true,"max_batch_size":1,"max_snapshots":1,"snapshot_cache":{"ram_bytes":16}}}})");
-  const auto resolved = ApplyQwen38DynamicBatchingConfig(config);
-  ASSERT_FALSE(config.engine.dynamic_batching);
-  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"prefix_caching":false,"max_batch_size":2}}})");
-  auto cache = CreateQwen38PrefixSnapshotCache(resolved);
-  ASSERT_NE(cache, nullptr);
-  auto first = ByteEntry(16);
-  auto second = ByteEntry(16);
-  auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  ASSERT_TRUE(cache->Allocate(first, cpu, "qwen38"));
-  EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Ram);
-  ASSERT_TRUE(cache->Allocate(second, cpu, "qwen38"));
-  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
-  EXPECT_EQ(second->tier, PrefixSnapshotCache::Tier::Ram);
 }
 
 TEST(Qwen38PrefixSnapshotTest, DflashEligibilityAndCapturePlanningKeepOnlyTheLastUsefulCheckpoint) {

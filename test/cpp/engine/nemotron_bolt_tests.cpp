@@ -69,28 +69,49 @@ class BoltPrefixCacheTest : public ::testing::Test {
 };
 
 TEST_F(BoltPrefixCacheTest, RestoresBothKvHeadsSelectedMixedStateRowAndAuxiliarySuffix) {
-  auto cache = Cache();
-  const std::vector<int32_t> prompt(16, 5);
-  std::vector<std::vector<uint8_t>> original;
-  for (auto* tensor : caches_) original.push_back(Bytes(*tensor));
-  const auto original_aux = Bytes(*aux_);
-  cache->Capture(prompt, caches_, 7, 42, *aux_, 0, 8);
-  auto saved = cache->Find(prompt);
-  ASSERT_NE(saved, nullptr);
-  EXPECT_EQ(saved->anchor, 42);
-  for (auto* tensor : caches_) tensor->GetByteSpan().Zero();
-  aux_->GetByteSpan().Zero();
-  cache->Restore(*saved, caches_, *aux_, 8, 8);
-  for (size_t i = 0; i < caches_.size(); ++i) {
-    std::vector<uint8_t> expected(original[i].size());
-    for (const auto& range : saved->ranges[i])
-      std::copy_n(original[i].begin() + range.tensor_offset, range.bytes, expected.begin() + range.tensor_offset);
-    EXPECT_EQ(Bytes(*caches_[i]), expected) << i;
+  for (size_t tier : {size_t{1}, size_t{2}}) {
+    SCOPED_TRACE(tier);
+    std::array<size_t, 3> limits{};
+    limits[tier] = 8192;
+    auto storage = std::make_shared<PrefixSnapshotCache>(limits, 1);
+    NemotronBoltPrefixCache cache{storage};
+    const std::vector<int32_t> prompt(16, 5);
+    std::vector<std::vector<uint8_t>> original;
+    for (auto* tensor : caches_) {
+      Fill(*tensor);
+      original.push_back(Bytes(*tensor));
+    }
+    Fill(*aux_);
+    const auto original_aux = Bytes(*aux_);
+    cache.Capture(prompt, caches_, 7, 42, *aux_, 0, 8);
+    auto saved = cache.Find(prompt);
+    ASSERT_NE(saved, nullptr);
+    EXPECT_EQ(static_cast<size_t>(saved->tier), tier);
+    EXPECT_EQ(saved->anchor, 42);
+    for (auto* tensor : caches_) tensor->GetByteSpan().Zero();
+    aux_->GetByteSpan().Zero();
+    cache.Restore(*saved, caches_, *aux_, 8, 8);
+    for (size_t i = 0; i < caches_.size(); ++i) {
+      std::vector<uint8_t> expected(original[i].size());
+      if (i == 0) {
+        constexpr size_t head_bytes = 24 * 2 * sizeof(uint16_t);
+        constexpr size_t prefix_bytes = 16 * 2 * sizeof(uint16_t);
+        for (size_t head = 0; head < 2; ++head)
+          std::copy_n(original[i].begin() + head * head_bytes, prefix_bytes,
+                      expected.begin() + head * head_bytes);
+      } else {
+        const size_t row_bytes = original[i].size() / 8;
+        std::copy_n(original[i].begin() + 7 * row_bytes, row_bytes, expected.begin() + 7 * row_bytes);
+      }
+      EXPECT_EQ(Bytes(*caches_[i]), expected) << i;
+    }
+    const auto restored_aux = Bytes(*aux_);
+    EXPECT_TRUE(std::equal(original_aux.begin() + 64, original_aux.begin() + 128, restored_aux.begin()));
+    EXPECT_TRUE(std::all_of(restored_aux.begin() + 64, restored_aux.end(), [](auto byte) { return byte == 0; }));
+    EXPECT_EQ(cache.Metrics().matched_tokens, 16u);
+    storage->Discard(*saved);
+    EXPECT_THROW(cache.Restore(*saved, caches_, *aux_, 8, 8), std::runtime_error);
   }
-  auto restored_aux = Bytes(*aux_);
-  EXPECT_TRUE(std::equal(original_aux.begin() + 64, original_aux.begin() + 128, restored_aux.begin()));
-  EXPECT_TRUE(std::all_of(restored_aux.begin() + 64, restored_aux.end(), [](auto byte) { return byte == 0; }));
-  EXPECT_EQ(cache->Metrics().matched_tokens, 16u);
 }
 
 TEST_F(BoltPrefixCacheTest, FindsLongestExactTokenPrefixAndEvictsUnleasedCheckpoints) {
@@ -142,29 +163,6 @@ TEST_F(BoltPrefixCacheTest, RefusedPublicationPrunesAndCountsEvictionsImmediatel
   EXPECT_EQ(cache.Metrics().evictions, 1u);
   EXPECT_TRUE(evicted.expired());
   EXPECT_EQ(cache.Find(prompt), nullptr);
-}
-
-TEST_F(BoltPrefixCacheTest, HostStorageTiersPreservePackedStateAndEvictedRestoreFails) {
-  for (size_t tier = 1; tier < 3; ++tier) {
-    std::array<size_t, 3> limits{};
-    limits[tier] = 8192;
-    auto storage = std::make_shared<PrefixSnapshotCache>(limits, 1, std::filesystem::temp_directory_path());
-    NemotronBoltPrefixCache cache{storage};
-    const std::vector<int32_t> prompt(8, 3);
-    Fill(*caches_[2]);
-    const auto expected = Bytes(*caches_[2]);
-    cache.Capture(prompt, caches_, 7, 11, *aux_, 0, 8);
-    auto saved = cache.Find(prompt);
-    ASSERT_NE(saved, nullptr);
-    EXPECT_EQ(static_cast<size_t>(saved->tier), tier);
-    caches_[2]->GetByteSpan().Zero();
-    cache.Restore(*saved, caches_, *aux_, 0, 8);
-    const auto actual = Bytes(*caches_[2]);
-    const size_t row_begin = expected.size() / 8 * 7;
-    EXPECT_TRUE(std::equal(expected.begin() + row_begin, expected.end(), actual.begin() + row_begin));
-    storage->Discard(*saved);
-    EXPECT_THROW(cache.Restore(*saved, caches_, *aux_, 0, 8), std::runtime_error);
-  }
 }
 
 TEST(NemotronBolt, EveryAcceptanceLengthAndBudget) {
@@ -638,11 +636,18 @@ TEST(NemotronBoltGPU, PrefixCacheAcrossGeneratorsAndEngineRequests) {
   EXPECT_EQ(request->TurnCachedPromptTokens(), history.size() / 8 * 8 - old_history);
   const auto continued = request->TokensCpu();
   EXPECT_EQ((std::vector<int32_t>{continued.begin() + history.size(), continued.end()}), reference);
-  EXPECT_GT(engine->GetSpeculativeStats().tokens_discarded, 0u);
-  EXPECT_EQ(engine->GetSpeculativeStats().tokens_emitted, 2u + reference.size());
-  EXPECT_EQ(engine->GetSpeculativeStats().effective_k, 7u);
+  const auto live = engine->GetSpeculativeStats();
+  EXPECT_GT(live.tokens_discarded, 0u);
+  EXPECT_EQ(live.tokens_emitted, 2u + reference.size());
+  EXPECT_EQ(live.effective_k, 7u);
+  ASSERT_GT(live.rounds, 0u);
+  EXPECT_FLOAT_EQ(live.mean_emitted_tokens_per_round, static_cast<float>(live.tokens_emitted) / live.rounds);
   request->Close();
-  EXPECT_EQ(engine->GetSpeculativeStats().effective_k, 0u);
+  const auto completed = engine->GetSpeculativeStats();
+  EXPECT_EQ(completed.effective_k, 0u);
+  EXPECT_EQ(completed.rounds, live.rounds);
+  EXPECT_EQ(completed.tokens_emitted, live.tokens_emitted);
+  EXPECT_FLOAT_EQ(completed.mean_emitted_tokens_per_round, live.mean_emitted_tokens_per_round);
 }
 
 TEST(NemotronBolt, GgufInitializersConfigParsingAndPathValidation) {
