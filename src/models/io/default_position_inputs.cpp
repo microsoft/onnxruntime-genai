@@ -204,6 +204,9 @@ void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> n
         }
         abs_position--;
       }
+      if (!found_first_non_pad) {
+        position_data_next[i] = 0;
+      }
     }
   }
 

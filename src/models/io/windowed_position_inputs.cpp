@@ -22,11 +22,14 @@ WindowedPositionInputs::WindowedPositionInputs(State& state)
     if (!model_.config_->model.decoder.sliding_window.has_value()) {
       throw std::runtime_error("Sliding a window over position_ids and attention_mask requires sliding_window to be set in the genai_config.json.");
     }
-    window_size_ = model_.config_->model.decoder.sliding_window->window_size;
-
-    if (window_size_ == 0) {
+    const int configured_window_size = model_.config_->model.decoder.sliding_window->window_size;
+    if (configured_window_size <= 0) {
       throw std::runtime_error("Window size must be greater than 0");
     }
+    if (has_mask_input_ && model_.config_->model.context_length < configured_window_size) {
+      throw std::runtime_error("Model context_length must be greater than or equal to sliding_window.window_size");
+    }
+    window_size_ = static_cast<size_t>(configured_window_size);
   }
 
   if (has_posid_input_) {
@@ -66,6 +69,9 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
   }
 
   if (window_index_ == 0) {
+    if (next_tokens.size() < window_size_) {
+      throw std::runtime_error("WindowedPositionInputs::Update requires next_tokens size to be at least window_size");
+    }
     num_windows_ = (next_tokens.size() + window_size_ - 1) / window_size_;
     if (has_posid_input_) {
       position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, position_ids_type_);
@@ -76,13 +82,16 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       // window_index = 0, position_ids_ -> [0, 0, 1]
       auto fill_first_window = [&](auto* position_ids_data) {
         using T = std::remove_pointer_t<decltype(position_ids_data)>;
-        for (int i = 0, j = 0; i < position_ids_shape_[1]; i++) {
-          if (next_tokens.Span()[i] == model_.config_->model.pad_token_id) {
+        auto tokens_cpu = next_tokens.CpuSpan();
+        int64_t j = 0;
+        for (size_t i = 0; i < window_size_; i++) {
+          if (tokens_cpu[i] == model_.config_->model.pad_token_id) {
             position_ids_data[i] = T{0};
           } else {
             position_ids_data[i] = static_cast<T>(j++);
           }
         }
+        next_position_id_ = j;
       };
       if (position_ids_type_ == Ort::TypeToTensorType<int64_t>)
         fill_first_window(position_ids_->GetTensorMutableData<int64_t>());
@@ -99,14 +108,15 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       // window_index = 0, attention_mask_ -> ([0] * context_length - window_size_) + [0, 1, 1]
       auto fill_first_mask = [&](auto* attention_mask_data) {
         using T = std::remove_pointer_t<decltype(attention_mask_data)>;
-        std::fill_n(attention_mask_data, attention_mask_shape_[1] - window_size_, T{0});
+        const size_t mask_length = static_cast<size_t>(attention_mask_shape_[1]);
+        auto tokens_cpu = next_tokens.CpuSpan();
+        std::fill_n(attention_mask_data, mask_length - window_size_, T{0});
+        attention_mask_valid_count_ = 0;
         for (size_t i = 0; i < window_size_; i++) {
-          attention_mask_data[attention_mask_shape_[1] - window_size_ + i] = next_tokens.CpuSpan()[i] == model_.config_->model.pad_token_id ? T{0} : T{1};
-        }
-        for (size_t i = 0; i < window_size_; i++) {
-          if (attention_mask_data[attention_mask_shape_[1] - window_size_ + i] == T{1}) {
-            attention_mask_backward_offset_ = attention_mask_shape_[1] - window_size_ + i - 1;
-            break;
+          const bool is_valid = tokens_cpu[i] != model_.config_->model.pad_token_id;
+          attention_mask_data[mask_length - window_size_ + i] = is_valid ? T{1} : T{0};
+          if (attention_mask_valid_count_ == 0 && is_valid) {
+            attention_mask_valid_count_ = window_size_ - i;
           }
         }
       };
@@ -123,8 +133,9 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       // window_index = 1, position_ids_ -> [2, 3, 4]
 
       auto fill_next_window = [&](auto* position_ids_data) {
-        const auto last_position = position_ids_data[window_size_ - 1];
-        std::iota(position_ids_data, position_ids_data + window_size_, last_position + 1);
+        using T = std::remove_pointer_t<decltype(position_ids_data)>;
+        std::iota(position_ids_data, position_ids_data + window_size_, static_cast<T>(next_position_id_));
+        next_position_id_ += static_cast<int64_t>(window_size_);
       };
       if (position_ids_type_ == Ort::TypeToTensorType<int64_t>)
         fill_next_window(position_ids_->GetTensorMutableData<int64_t>());
@@ -139,8 +150,11 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       // window_index = 1, attention_mask_ -> ([0] * context_length - (2 * window_size_)) + [0, 1, 1, 1, 1, 1]
       auto fill_next_mask = [&](auto* attention_mask_data) {
         using T = std::remove_pointer_t<decltype(attention_mask_data)>;
-        std::fill_n(attention_mask_data + attention_mask_backward_offset_ - window_size_ + 1, window_size_, T{1});
-        attention_mask_backward_offset_ -= window_size_;
+        const size_t mask_length = static_cast<size_t>(attention_mask_shape_[1]);
+        const size_t fill_count = std::min(window_size_, mask_length - attention_mask_valid_count_);
+        const size_t fill_start = mask_length - attention_mask_valid_count_ - fill_count;
+        std::fill_n(attention_mask_data + fill_start, fill_count, T{1});
+        attention_mask_valid_count_ += fill_count;
       };
       if (attention_mask_type_ == Ort::TypeToTensorType<int64_t>)
         fill_next_mask(attention_mask_->GetTensorMutableData<int64_t>());
@@ -154,13 +168,12 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       // position_ids_ -> [5]
       auto fill_generated = [&](auto* data) {
         using T = std::remove_pointer_t<decltype(data)>;
-        const auto last_position = data[position_ids_shape_[1] - 1];
         if (position_ids_shape_[1] != 1) {
           position_ids_shape_[1] = 1;
           position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, position_ids_type_);
           data = position_ids_->GetTensorMutableData<T>();
         }
-        data[0] = last_position + 1;
+        data[0] = static_cast<T>(next_position_id_++);
       };
       if (position_ids_type_ == Ort::TypeToTensorType<int64_t>)
         fill_generated(position_ids_->GetTensorMutableData<int64_t>());
@@ -173,9 +186,10 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       // attention_mask_ -> ([0] * context_length - (2 * window_size_) - 1) + [0, 1, 1, 1, 1, 1, 1]
       auto fill_generated_mask = [&](auto* data) {
         using T = std::remove_pointer_t<decltype(data)>;
-        data[attention_mask_backward_offset_] = T{1};
-        if (attention_mask_backward_offset_ > 0) {
-          attention_mask_backward_offset_ -= 1;
+        const size_t mask_length = static_cast<size_t>(attention_mask_shape_[1]);
+        if (attention_mask_valid_count_ < mask_length) {
+          data[mask_length - 1 - attention_mask_valid_count_] = T{1};
+          attention_mask_valid_count_ += 1;
         }
       };
       if (attention_mask_type_ == Ort::TypeToTensorType<int64_t>)

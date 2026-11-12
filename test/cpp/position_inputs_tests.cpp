@@ -8,7 +8,11 @@
 
 #include <gtest/gtest.h>
 
+#include "generator/generators.h"
 #include "models/io/default_position_inputs.h"
+#include "models/io/logits.h"
+#include "models/io/windowed_position_inputs.h"
+#include "models/model.h"
 
 namespace Generators {
 namespace {
@@ -655,6 +659,19 @@ TEST_P(PositionInputsTest, PositionIdsWithoutMask) {
   EXPECT_EQ(Read(*state->GetInput(name.c_str())), (std::vector<int64_t>{0, 1}));
 }
 
+TEST_P(PositionInputsTest, AllPadBatchRowInitializesNextPositions) {
+  Initialize(2, 1);
+  const auto& pos_name = model->config_->model.decoder.inputs.position_ids;
+  Update({2, 3, 0, 0, 0, 0}, 3, 3);
+  ExpectMask({{1, 1, 0}, {0, 0, 0}});
+  EXPECT_EQ(Read(*state->GetInput(pos_name.c_str())),
+            (std::vector<int64_t>{0, 1, 0, 0, 0, 0}));
+  Update({5, 6}, 4, 1);
+  ExpectMask({{1, 1, 0, 1}, {0, 0, 0, 1}});
+  EXPECT_EQ(Read(*state->GetInput(pos_name.c_str())),
+            (std::vector<int64_t>{2, 1}));
+}
+
 INSTANTIATE_TEST_SUITE_P(MaskModesAndTypes, PositionInputsTest,
                          testing::Combine(testing::Bool(), testing::Bool()));
 
@@ -676,6 +693,165 @@ TEST(PositionInputsCapacityTest, UsesExplicitCapacityAndRejectsOverflow) {
   inputs.Update(tokens.subspan(0, 1), 8, 1);
   EXPECT_THROW(inputs.Update(tokens.subspan(0, 1), 9, 1), std::runtime_error);
   EXPECT_THROW(inputs.RewindTo(9), std::runtime_error);
+}
+
+struct WindowedPositionInputsTest : testing::TestWithParam<bool> {
+  void Initialize(int context_length = 6, int window_size = 3) {
+    model = std::make_shared<PositionTestModel>(GetParam(), 1, 1);
+    model->config_->model.context_length = context_length;
+    Config::Model::Decoder::SlidingWindow sw{};
+    sw.window_size = window_size;
+    sw.slide_inputs = true;
+    model->config_->model.decoder.sliding_window = sw;
+    params = std::make_shared<GeneratorParams>(*model);
+    state = std::make_unique<PositionTestState>(*params, *model);
+    inputs = std::make_unique<WindowedPositionInputs>(*state);
+    inputs->Add();
+  }
+
+  void Update(std::vector<int32_t> values, int total_length, int new_length) {
+    auto tokens = params->p_device->Allocate<int32_t>(values.size());
+    std::copy(values.begin(), values.end(), tokens.CpuSpan().begin());
+    inputs->Update(tokens, total_length, new_length);
+  }
+
+  std::vector<int64_t> ReadInput(const std::string& name) {
+    auto& tensor = *state->GetInput(name.c_str());
+    const auto count = tensor.GetTensorTypeAndShapeInfo()->GetElementCount();
+    if (GetParam()) {
+      const auto* data = tensor.GetTensorData<int64_t>();
+      return {data, data + count};
+    }
+    const auto* data = tensor.GetTensorData<int32_t>();
+    return {data, data + count};
+  }
+
+  std::shared_ptr<PositionTestModel> model;
+  std::shared_ptr<GeneratorParams> params;
+  std::unique_ptr<PositionTestState> state;
+  std::unique_ptr<WindowedPositionInputs> inputs;
+};
+
+TEST_P(WindowedPositionInputsTest, MultiWindowPrefillAndDecode) {
+  Initialize(6, 3);
+  const auto& mask_name = model->config_->model.decoder.inputs.attention_mask;
+  const auto& pos_name = model->config_->model.decoder.inputs.position_ids;
+
+  Update({0, 2, 3, 4, 5, 6}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 0, 0, 0, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{0, 0, 1}));
+
+  Update({0, 2, 3, 4, 5, 6}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 1, 1, 1, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{2, 3, 4}));
+
+  Update({7}, 7, 1);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{1, 1, 1, 1, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{5}));
+}
+
+TEST_P(WindowedPositionInputsTest, AllPadFirstWindowDoesNotOverflow) {
+  Initialize(6, 3);
+  const auto& mask_name = model->config_->model.decoder.inputs.attention_mask;
+  const auto& pos_name = model->config_->model.decoder.inputs.position_ids;
+
+  Update({0, 0, 0, 4, 5, 6}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 0, 0, 0, 0, 0}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{0, 0, 0}));
+
+  Update({0, 0, 0, 4, 5, 6}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 0, 0, 1, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{0, 1, 2}));
+
+  Update({7}, 7, 1);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 0, 1, 1, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{3}));
+}
+
+TEST_P(WindowedPositionInputsTest, ContextLengthEqualToWindowSizeDoesNotUnderflow) {
+  Initialize(3, 3);
+  const auto& mask_name = model->config_->model.decoder.inputs.attention_mask;
+  const auto& pos_name = model->config_->model.decoder.inputs.position_ids;
+
+  Update({2, 3, 4}, 3, 3);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{1, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{0, 1, 2}));
+
+  Update({5}, 4, 1);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{1, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{3}));
+}
+
+TEST_P(WindowedPositionInputsTest, RejectsInvalidWindowDimensionsAndShortInput) {
+  EXPECT_THROW(Initialize(6, 0), std::runtime_error);
+  EXPECT_THROW(Initialize(6, -2), std::runtime_error);
+  EXPECT_THROW(Initialize(2, 3), std::runtime_error);
+
+  Initialize(6, 3);
+  EXPECT_THROW(Update({2, 3}, 2, 2), std::runtime_error);
+}
+
+INSTANTIATE_TEST_SUITE_P(IntTypes, WindowedPositionInputsTest, testing::Bool());
+
+TEST(LogitsAllPadTest, SlicesValidBoundsOnAllPadSequences) {
+  auto base_model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  const size_t vocab_size = static_cast<size_t>(base_model->config_->model.vocab_size);
+
+  // Single-sequence all-pad prefill uses the final prompt token slot.
+  {
+    auto params = std::make_shared<GeneratorParams>(*base_model);
+    PositionTestState state{*params, *base_model};
+    Logits logits{state};
+    logits.Add();
+
+    auto tokens = params->p_device->Allocate<int32_t>(3);
+    std::fill(tokens.CpuSpan().begin(), tokens.CpuSpan().end(), base_model->config_->model.pad_token_id);
+    logits.Update(tokens, 3);
+
+    auto* raw_logits = state.outputs_[0]->GetTensorMutableData<float>();
+    for (size_t pos = 0; pos < 3; ++pos) {
+      for (size_t v = 0; v < vocab_size; ++v) {
+        raw_logits[pos * vocab_size + v] = static_cast<float>(pos * 100 + v);
+      }
+    }
+
+    auto sliced = logits.Get();
+    auto sliced_cpu = sliced.CopyDeviceToCpu();
+    ASSERT_EQ(sliced_cpu.size(), vocab_size);
+    EXPECT_FLOAT_EQ(sliced_cpu[0], 200.0f);
+    EXPECT_FLOAT_EQ(sliced_cpu[vocab_size - 1], static_cast<float>(200 + vocab_size - 1));
+  }
+
+  // Batched prefill with an all-pad batch row clamps that row to slot 0 without underflowing.
+  {
+    auto params = std::make_shared<GeneratorParams>(*base_model);
+    params->search.batch_size = 2;
+    PositionTestState state{*params, *base_model};
+    Logits logits{state};
+    logits.Add();
+
+    const int32_t pad = base_model->config_->model.pad_token_id;
+    std::array<int32_t, 6> batch_tokens{2, 3, pad, pad, pad, pad};
+    auto tokens = params->p_device->Allocate<int32_t>(batch_tokens.size());
+    std::copy(batch_tokens.begin(), batch_tokens.end(), tokens.CpuSpan().begin());
+    logits.Update(tokens, 3);
+
+    auto* raw_logits = state.outputs_[0]->GetTensorMutableData<float>();
+    for (size_t b = 0; b < 2; ++b) {
+      for (size_t pos = 0; pos < 3; ++pos) {
+        for (size_t v = 0; v < vocab_size; ++v) {
+          raw_logits[(b * 3 + pos) * vocab_size + v] = static_cast<float>(b * 1000 + pos * 100 + v);
+        }
+      }
+    }
+
+    auto sliced = logits.Get();
+    auto sliced_cpu = sliced.CopyDeviceToCpu();
+    ASSERT_EQ(sliced_cpu.size(), 2 * vocab_size);
+    // Batch 0 last non-pad token is pos=1; Batch 1 is all-pad and clamps to pos=0.
+    EXPECT_FLOAT_EQ(sliced_cpu[0], 100.0f);
+    EXPECT_FLOAT_EQ(sliced_cpu[vocab_size], 1000.0f);
+  }
 }
 
 }  // namespace

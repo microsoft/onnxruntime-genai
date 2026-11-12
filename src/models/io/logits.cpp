@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 //
 // Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#include <algorithm>
+
 #include "generator/generators.h"
 #include "models/model.h"
 #include "models/io/logits.h"
@@ -36,7 +38,7 @@ DeviceSpan<float> Logits::Get(bool all_tokens_valid) {
   // The model's output logits are {batch_size*num_beams, input_seq_len, vocab_size}
   OrtValue* logits_of_last_token = output_raw_->GetOrtTensor();
   std::array<int64_t, 3> shape_last{shape_[0], 1, shape_[2]};
-  if (shape_[1] != 1) {
+  if (shape_[1] > 1) {
     const size_t seq_length = shape_[1];
     const size_t vocab_size = shape_[2];
     const size_t num_beams = state_.params_->search.num_beams;
@@ -57,7 +59,13 @@ DeviceSpan<float> Logits::Get(bool all_tokens_valid) {
 
     for (int batch_index = 0; batch_index < state_.params_->search.batch_size; batch_index++) {
       // Replayed committed tokens are valid even when their ID equals PAD.
-      size_t token_index = all_tokens_valid ? seq_length - 1 : input_sequence_lengths[batch_index] - 1;
+      size_t token_index = seq_length - 1;
+      if (!all_tokens_valid) {
+        const int batch_seq_len = input_sequence_lengths[batch_index];
+        token_index = batch_seq_len <= 0
+                          ? 0
+                          : std::min(static_cast<size_t>(batch_seq_len - 1), seq_length - 1);
+      }
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
         auto target = logits_last_tokens.subspan(vocab_index * element_size, vocab_size * element_size);
         auto source = logits_raw.subspan((vocab_index * seq_length + token_index * vocab_size) * element_size, vocab_size * element_size);
@@ -91,15 +99,27 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   }
 
   // Store length of input sequence for each batch for the get step
+  const bool right_padded = state_.params_->search.batch_size > 1 ||
+                            (model_.config_->model.decoder.sliding_window.has_value() &&
+                             model_.config_->model.decoder.sliding_window->alignment == "left");
   for (int b = 0; b < state_.params_->search.batch_size; b++) {
     // Find the first non pad token from the end
     size_t token_index = new_kv_length;
+    bool found_non_pad = false;
     while (token_index-- > 0) {
       auto next_token = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan()[b * new_kv_length + token_index];
-      if (next_token != model_.config_->model.pad_token_id)
+      if (next_token != model_.config_->model.pad_token_id) {
+        found_non_pad = true;
         break;
+      }
     }
-    input_sequence_lengths[b] = static_cast<int>(token_index + 1);
+    if (found_non_pad) {
+      input_sequence_lengths[b] = static_cast<int>(token_index + 1);
+    } else if (right_padded) {
+      input_sequence_lengths[b] = std::min<int>(1, static_cast<int>(new_kv_length));
+    } else {
+      input_sequence_lengths[b] = static_cast<int>(new_kv_length);
+    }
   }
 
   if (output_raw_->ort_tensor_ && static_cast<size_t>(output_raw_->GetShape()[1]) == new_kv_length) {

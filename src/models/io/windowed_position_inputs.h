@@ -27,7 +27,8 @@ struct WindowedPositionInputs : PositionInputs {
   std::array<int64_t, 2> attention_mask_shape_{};
   ONNXTensorElementDataType attention_mask_type_{};
   std::unique_ptr<OrtValue> attention_mask_;
-  size_t attention_mask_backward_offset_{~0U};
+  size_t attention_mask_valid_count_{};
+  int64_t next_position_id_{};
   size_t attention_mask_index_{~0U};
   size_t position_ids_index_{~0U};
   size_t window_size_{};

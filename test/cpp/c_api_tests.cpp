@@ -3760,3 +3760,38 @@ TEST(CAPITests, RequestSetDraftTokensRunsProposal) {
       0u);
   request->Close();
 }
+
+TEST(CAPITests, AllPadPrefillSingleAndBatched) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  constexpr int32_t kPadTokenId = 98;
+
+  {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("min_length", 5);
+    params->SetSearchOption("max_length", 8);
+    auto generator = OgaGenerator::Create(*model, *params);
+    const std::array<int32_t, 3> all_pad_prompt{kPadTokenId, kPadTokenId, kPadTokenId};
+    generator->AppendTokens(all_pad_prompt.data(), all_pad_prompt.size());
+    generator->GenerateNextToken();
+    generator->GenerateNextToken();
+    EXPECT_EQ(generator->GetSequenceCount(0), 5u);
+  }
+
+  {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("min_length", 5);
+    params->SetSearchOption("max_length", 8);
+    params->SetSearchOption("batch_size", 2);
+    auto generator = OgaGenerator::Create(*model, *params);
+    auto sequences = OgaSequences::Create();
+    const std::array<int32_t, 3> seq0{2, 3, 4};
+    const std::array<int32_t, 3> seq1{kPadTokenId, kPadTokenId, kPadTokenId};
+    sequences->Append(seq0.data(), seq0.size());
+    sequences->Append(seq1.data(), seq1.size());
+    generator->AppendTokenSequences(*sequences);
+    generator->GenerateNextToken();
+    generator->GenerateNextToken();
+    EXPECT_EQ(generator->GetSequenceCount(0), 5u);
+    EXPECT_EQ(generator->GetSequenceCount(1), 5u);
+  }
+}
