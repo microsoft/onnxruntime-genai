@@ -199,6 +199,27 @@ std::string Int8PleTable() {
   return text;
 }
 
+// kValidPleTable with `scale_line` in place of its scale line (which an empty string removes).
+std::string PleTableWithScaleLine(const std::string& scale_line) {
+  std::string text = kValidPleTable;
+  const std::string fp8_scale = "scale 0.5\n";
+  text.replace(text.find(fp8_scale), fp8_scale.size(), scale_line);
+  return text;
+}
+
+// The PLE table description with GGUF shards of `format` (iq4_nl or q8_0) instead of FP8 shards: the format line selects them
+// and takes the place of the scale line, which their blocks do not need, and a head holds five blocks of 32 values.
+std::string GgufPleTable(const std::string& format) {
+  std::string text = PleTableWithScaleLine("format " + format + "\n");
+  const std::string head_dim = "head_dim 4";
+  text.replace(text.find(head_dim), head_dim.size(), "head_dim 160");
+  return text;
+}
+
+std::string Iq4NlPleTable() { return GgufPleTable("iq4_nl"); }
+
+std::string Q8_0PleTable() { return GgufPleTable("q8_0"); }
+
 }  // namespace
 
 // ---- weight pool manifest and QSA constants index --------------------------------------------
@@ -319,21 +340,239 @@ TEST(Qwen38PleDescriptionTest, ParsesAValidTable) {
   ForLfAndCrlfLines(kValidPleTable, [&](const std::string& lines) {
     const auto description = ParseQwen38PleDescription(WriteFile(dir / "ple_table.txt", lines));
 
+    EXPECT_EQ(description.format, Qwen38PleFormat::kFp8);
     EXPECT_EQ(description.params.n_heads, 2);
     EXPECT_EQ(description.params.head_dim, 4);
     EXPECT_EQ(description.params.heads_per_ngram, 1);
     EXPECT_EQ(description.params.eos, 7);
     EXPECT_FLOAT_EQ(description.params.scale, 0.5f);
+    EXPECT_EQ(description.params.pad_, 0);
     EXPECT_EQ(description.params.mult[2], 3);
     EXPECT_EQ(description.params.vocab[1], 13);
     EXPECT_EQ(description.params.offset[1], 11);
     EXPECT_EQ(description.params.n_shards, 2);
+    EXPECT_EQ(Qwen38PleShardRowBytes(description), 4u);
     ASSERT_EQ(description.shards.size(), 2u);
     EXPECT_EQ(description.shards[0].path, "ple/a.safetensors");
     EXPECT_EQ(description.shards[0].offset, 128u);
     EXPECT_EQ(description.shards[1].path, "ple/b.safetensors");
     EXPECT_EQ(description.shards[1].rows, 13);
   });
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PleDescriptionTest, Iq4NlShardsRequireWholeBlocks) {
+  const auto dir = MakeScratchDir("ple_iq4_nl_blocks");
+  const auto table_path = dir / "ple_table.txt";
+  const auto with_head_dim = [](int head_dim) {
+    std::string text = Iq4NlPleTable();
+    const std::string original = "head_dim 160";
+    text.replace(text.find(original), original.size(), "head_dim " + std::to_string(head_dim));
+    return text;
+  };
+  for (const int head_dim : {32, 64, 160}) {
+    ForLfAndCrlfLines(with_head_dim(head_dim), [&](const std::string& lines) {
+      const auto description = ParseQwen38PleDescription(WriteFile(table_path, lines));
+      EXPECT_EQ(description.params.head_dim, head_dim);
+      EXPECT_EQ(description.format, Qwen38PleFormat::kIq4Nl);
+      EXPECT_EQ(Qwen38PleShardRowBytes(description), static_cast<uint64_t>(head_dim / 32 * 18));
+    });
+  }
+  for (const int head_dim : {1, 31, 33, 63, 159, 161}) {
+    ForLfAndCrlfLines(with_head_dim(head_dim), [&](const std::string& lines) {
+      EXPECT_THROW(ParseQwen38PleDescription(WriteFile(table_path, lines)), std::runtime_error) << head_dim;
+    });
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PleDescriptionTest, Q8_0ShardsRequireWholeBlocks) {
+  const auto dir = MakeScratchDir("ple_q8_0_blocks");
+  const auto table_path = dir / "ple_table.txt";
+  const auto with_head_dim = [](int head_dim) {
+    std::string text = Q8_0PleTable();
+    const std::string original = "head_dim 160";
+    text.replace(text.find(original), original.size(), "head_dim " + std::to_string(head_dim));
+    return text;
+  };
+  for (const int head_dim : {32, 64, 160}) {
+    ForLfAndCrlfLines(with_head_dim(head_dim), [&](const std::string& lines) {
+      const auto description = ParseQwen38PleDescription(WriteFile(table_path, lines));
+      EXPECT_EQ(description.params.head_dim, head_dim);
+      EXPECT_EQ(description.format, Qwen38PleFormat::kQ8_0);
+      EXPECT_EQ(Qwen38PleShardRowBytes(description), static_cast<uint64_t>(head_dim / 32 * 34));
+    });
+  }
+  for (const int head_dim : {1, 31, 33, 63, 159, 161}) {
+    ForLfAndCrlfLines(with_head_dim(head_dim), [&](const std::string& lines) {
+      EXPECT_THROW(ParseQwen38PleDescription(WriteFile(table_path, lines)), std::runtime_error) << head_dim;
+    });
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+namespace {
+
+// Parses `text` as the PLE table description at `path`, which has to be refused with a message that contains `expected`.
+void ExpectPleTableRefused(const std::filesystem::path& path, const std::string& text, const std::string& expected) {
+  try {
+    ParseQwen38PleDescription(WriteFile(path, text));
+    ADD_FAILURE() << "the PLE table was accepted: " << text;
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find(expected), std::string::npos) << message << ", for the table: " << text;
+  }
+}
+
+// A scale line of a PLE table description and the scale it holds.
+struct PleScaleLine {
+  std::string line;
+  float scale;
+};
+
+}  // namespace
+
+// A table without a format line keeps the meaning it always had: the sign of its scale selects the decoder, so a negative scale
+// is the negative of the dequantization scale of INT8 shards, whatever its value. The scales -8 and -20 are no exception, however
+// they are written, and nor is a head of 160 values, which five GGUF blocks would fill: only a format line selects a GGUF format.
+TEST(Qwen38PleDescriptionTest, WithoutAFormatLineANegativeScaleIsAnInt8Scale) {
+  const auto dir = MakeScratchDir("ple_legacy_int8");
+  const auto table_path = dir / "ple_table.txt";
+  const auto with_head_dim = [](std::string text, int head_dim) {
+    const std::string original = "head_dim 4";
+    text.replace(text.find(original), original.size(), "head_dim " + std::to_string(head_dim));
+    return text;
+  };
+  // The scale of the INT8 tables of the shipped packages, the scales -8 and -20 and the ones next to them.
+  const std::vector<PleScaleLine> scales = {{"scale -0.000703105776\n", -0.000703105776f},
+                                            {"scale -0.5\n", -0.5f},
+                                            {"scale -7.99\n", -7.99f},
+                                            {"scale -8.0\n", -8.0f},
+                                            {"scale -8\n", -8.0f},
+                                            {"scale -0.8e1\n", -8.0f},
+                                            {"scale -8.5\n", -8.5f},
+                                            {"scale -20.0\n", -20.0f},
+                                            {"scale -2e1\n", -20.0f},
+                                            {"scale -20.25\n", -20.25f}};
+  for (const PleScaleLine& scale : scales) {
+    // Heads of four values, which no GGUF block would allow, and of 160. A format line that says int8 changes nothing.
+    for (const int head_dim : {4, 160}) {
+      for (const char* format_line : {"", "format int8\n"}) {
+        const std::string what = std::string{format_line} + scale.line + "head_dim " + std::to_string(head_dim);
+        ForLfAndCrlfLines(with_head_dim(PleTableWithScaleLine(format_line + scale.line), head_dim), [&](const std::string& lines) {
+          const auto description = ParseQwen38PleDescription(WriteFile(table_path, lines));
+          EXPECT_EQ(description.format, Qwen38PleFormat::kInt8) << what;
+          EXPECT_FLOAT_EQ(description.params.scale, scale.scale) << what;
+          EXPECT_EQ(description.params.pad_, 0) << what << ": an INT8 table keeps the legacy encoding";
+          EXPECT_EQ(Qwen38PleShardRowBytes(description), static_cast<uint64_t>(head_dim))
+              << what << ": a row of an INT8 shard is head_dim bytes";
+        });
+      }
+    }
+  }
+
+  // Such a table needs the INT8 capability of the plane, and the GGUF ones do not stand in for it.
+  const auto description = ParseQwen38PleDescription(WriteFile(table_path, PleTableWithScaleLine("scale -0.000703105776\n")));
+  Qwen38Plane int8_only;
+  int8_only.capabilities = QWEN38_PLANE_CAP_INT8_PLE;
+  EXPECT_NO_THROW(RequireQwen38PleTableSupported(int8_only, description, table_path));
+  Qwen38Plane gguf_only;
+  gguf_only.capabilities = QWEN38_PLANE_CAP_IQ4_NL_PLE | QWEN38_PLANE_CAP_Q8_0_PLE;
+  gguf_only.library_path = "gguf/libqwen38_plane.so";
+  ExpectMissingCapability([&] { RequireQwen38PleTableSupported(gguf_only, description, table_path); }, "int8_ple",
+                          table_path.string(), gguf_only.library_path);
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+// A format line names the encoding of the shards, before or after the scale line. FP8 and INT8 keep the scale they are
+// dequantized with; the GGUF formats carry a scale in every block, so their scale line is optional and its value, whatever it
+// is, is ignored, and the plane learns the format from pad_ rather than from the scale.
+TEST(Qwen38PleDescriptionTest, AFormatLineSelectsTheEncodingOfTheShards) {
+  const auto dir = MakeScratchDir("ple_format_line");
+  const auto table_path = dir / "ple_table.txt";
+  const auto parse = [&](const std::string& text) { return ParseQwen38PleDescription(WriteFile(table_path, text)); };
+
+  for (const char* lines : {"format fp8\nscale 0.5\n", "scale 0.5\nformat fp8\n"}) {
+    ForLfAndCrlfLines(PleTableWithScaleLine(lines), [&](const std::string& text) {
+      const auto description = parse(text);
+      EXPECT_EQ(description.format, Qwen38PleFormat::kFp8) << lines;
+      EXPECT_FLOAT_EQ(description.params.scale, 0.5f) << lines;
+      EXPECT_EQ(description.params.pad_, 0) << lines;
+    });
+  }
+  const std::vector<PleScaleLine> int8_lines = {{"format int8\nscale -0.5\n", -0.5f}, {"scale -0.5\nformat int8\n", -0.5f}};
+  for (const PleScaleLine& lines : int8_lines) {
+    ForLfAndCrlfLines(PleTableWithScaleLine(lines.line), [&](const std::string& text) {
+      const auto description = parse(text);
+      EXPECT_EQ(description.format, Qwen38PleFormat::kInt8) << lines.line;
+      EXPECT_FLOAT_EQ(description.params.scale, lines.scale) << lines.line;
+      EXPECT_EQ(description.params.pad_, 0) << lines.line;
+    });
+  }
+
+  struct GgufFormat {
+    const char* name;
+    Qwen38PleFormat format;
+    int plane_format;
+    uint64_t row_bytes;  // of a head of 160 values
+  };
+  const std::vector<GgufFormat> gguf_formats = {{"iq4_nl", Qwen38PleFormat::kIq4Nl, QWEN38_PLANE_PLE_FORMAT_IQ4_NL, 5 * 18},
+                                                {"q8_0", Qwen38PleFormat::kQ8_0, QWEN38_PLANE_PLE_FORMAT_Q8_0, 5 * 34}};
+  for (const GgufFormat& gguf : gguf_formats) {
+    // The scale line of a GGUF table is ignored whatever it holds: -20 and -8 are no marks of a format, and 0.5 and 0 are no errors.
+    for (const char* scale_line : {"", "scale -20.0\n", "scale -8.0\n", "scale 0.5\n", "scale 0\n"}) {
+      ForLfAndCrlfLines(GgufPleTable(gguf.name) + scale_line, [&](const std::string& text) {
+        const auto description = parse(text);
+        EXPECT_EQ(description.format, gguf.format) << gguf.name << " [" << scale_line << "]";
+        EXPECT_FLOAT_EQ(description.params.scale, 1.0f) << gguf.name << " [" << scale_line << "]";
+        EXPECT_EQ(description.params.pad_, QWEN38_PLANE_PLE_PAD_OF_FORMAT(gguf.plane_format)) << gguf.name;
+        EXPECT_EQ(QWEN38_PLANE_PLE_FORMAT_OF(description.params.pad_), gguf.plane_format) << gguf.name;
+        EXPECT_EQ(description.params.pad_ & QWEN38_PLANE_PLE_STAGED, 0) << "staging is decided when the shards are mapped";
+        EXPECT_EQ(Qwen38PleShardRowBytes(description), gguf.row_bytes) << gguf.name;
+      });
+    }
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PleDescriptionTest, RejectsAFormatLineThatIsUnknownRepeatedOrContradictsTheScale) {
+  const auto dir = MakeScratchDir("ple_format_errors");
+  const auto table_path = dir / "ple_table.txt";
+
+  // The names are fp8, int8, iq4_nl and q8_0, exactly.
+  for (const char* name : {"FP8", "Int8", "IQ4_NL", "Q8_0", "q4_0", "iq4_xs", "bf16", "-8.0"}) {
+    ExpectPleTableRefused(table_path, PleTableWithScaleLine(std::string{"format "} + name + "\nscale 0.5\n"),
+                          "unknown PLE format");
+  }
+  ExpectPleTableRefused(table_path, PleTableWithScaleLine("format\nscale 0.5\n"), "malformed PLE format line");
+  ExpectPleTableRefused(table_path, PleTableWithScaleLine("format fp8 int8\nscale 0.5\n"), "malformed PLE format line");
+
+  // One format line at most, even when a second one agrees with the first.
+  ExpectPleTableRefused(table_path, PleTableWithScaleLine("format fp8\nformat fp8\nscale 0.5\n"), "more than one format line");
+  ExpectPleTableRefused(table_path, GgufPleTable("q8_0") + "format iq4_nl\n", "more than one format line");
+
+  // FP8 needs a positive scale and INT8 a negative one: a scale of the other sign is the encoding of the other format.
+  ExpectPleTableRefused(table_path, PleTableWithScaleLine("format fp8\nscale -0.5\n"),
+                        "declares format fp8 but its scale is negative");
+  ExpectPleTableRefused(table_path, PleTableWithScaleLine("format int8\nscale 0.5\n"),
+                        "declares format int8 but its scale is positive");
+
+  // FP8 and INT8 shards are dequantized with the scale, which has to be there, finite and non-zero.
+  for (const char* format : {"fp8", "int8"}) {
+    const std::string format_line = std::string{"format "} + format + "\n";
+    ExpectPleTableRefused(table_path, PleTableWithScaleLine(format_line), "needs a finite, non-zero scale line");
+    for (const char* scale_line : {"scale 0\n", "scale -0.0\n", "scale 1e999\n", "scale abc\n"}) {
+      ExpectPleTableRefused(table_path, PleTableWithScaleLine(format_line + scale_line), "malformed PLE scale line");
+    }
+  }
+
+  // A GGUF table ignores the value of its scale line, but not a scale line that holds no number.
+  ExpectPleTableRefused(table_path, GgufPleTable("iq4_nl") + "scale abc\n", "malformed PLE scale line");
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
@@ -411,8 +650,8 @@ TEST(Qwen38PleDescriptionTest, RejectsMalformedTables) {
                          "../a.safetensors");
   EXPECT_THROW(parse_raw(WithCrlfLines(escaping_shard)), std::runtime_error);
 
-  // The scale picks the decoder of the shards (negative: INT8), so a table without a usable one is refused instead of
-  // decoding every PLE row to zero or NaN.
+  // Without a format line the scale picks the decoder of the shards (negative: INT8), so a table without a usable one is
+  // refused instead of decoding every PLE row to zero or NaN.
   const auto with_scale_line = [&](const std::string& scale_line) {
     std::string text = kValidPleTable;
     const std::string valid = "scale 0.5\n";
@@ -430,6 +669,85 @@ TEST(Qwen38PleDescriptionTest, RejectsMalformedTables) {
 }
 
 #if !defined(QWEN38_GRAPH_NO_POSIX)
+TEST(Qwen38PleTableTest, Iq4NlShardsUsePackedRowSizesAndRequireCapabilityBeforeMapping) {
+#if defined(_WIN32)
+  ScopedEnvironmentVariable pin_ple{"ORT_QMOE_WIN_PIN_PLE", "1"};
+#endif
+  const auto dir = MakeScratchDir("ple_iq4_nl_map");
+  std::filesystem::create_directories(dir / "ple");
+  const auto table_path = WriteFile(dir / "ple_table.txt", Iq4NlPleTable());
+
+  Qwen38Plane int8;
+  InitCurrentStubPlane(int8);
+  int8.capabilities &= ~QWEN38_PLANE_CAP_IQ4_NL_PLE;
+  ExpectMissingCapability([&] { Qwen38PleTable table{int8, table_path, dir, 64}; }, "iq4_nl_ple", table_path.string(),
+                          int8.library_path);
+  EXPECT_TRUE(StubPlaneState::registered_ptrs.empty());
+
+  constexpr size_t row_bytes = 160 / 32 * 18;
+  WriteFile(dir / "ple" / "a.safetensors", std::string(128 + 11 * row_bytes, 'a'));
+  WriteFile(dir / "ple" / "b.safetensors", std::string(13 * row_bytes - 1, 'b'));
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  EXPECT_THROW((Qwen38PleTable{current, table_path, dir, 64}), std::runtime_error);
+  EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 1u);
+  EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
+
+  WriteFile(dir / "ple" / "b.safetensors", std::string(13 * row_bytes, 'b'));
+  InitCurrentStubPlane(current);
+  {
+    Qwen38PleTable table{current, table_path, dir, 64};
+    // The format reaches the plane in pad_; the pin keeps a Windows table resident, so the staged bit is clear everywhere.
+    EXPECT_EQ(table.params.pad_, QWEN38_PLANE_PLE_PAD_OF_FORMAT(QWEN38_PLANE_PLE_FORMAT_IQ4_NL));
+    EXPECT_FLOAT_EQ(table.params.scale, 1.0f);
+    EXPECT_EQ(table.params.head_dim, 160);
+    EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 2u);
+  }
+  EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PleTableTest, Q8_0ShardsUsePackedRowSizesAndRequireCapabilityBeforeMapping) {
+#if defined(_WIN32)
+  ScopedEnvironmentVariable pin_ple{"ORT_QMOE_WIN_PIN_PLE", "1"};
+#endif
+  const auto dir = MakeScratchDir("ple_q8_0_map");
+  std::filesystem::create_directories(dir / "ple");
+  const auto table_path = WriteFile(dir / "ple_table.txt", Q8_0PleTable());
+
+  Qwen38Plane iq4;
+  InitCurrentStubPlane(iq4);
+  iq4.capabilities &= ~QWEN38_PLANE_CAP_Q8_0_PLE;
+  ExpectMissingCapability([&] { Qwen38PleTable table{iq4, table_path, dir, 64}; }, "q8_0_ple", table_path.string(),
+                          iq4.library_path);
+  EXPECT_TRUE(StubPlaneState::registered_ptrs.empty());
+
+  constexpr size_t row_bytes = 160 / 32 * 34;
+  WriteFile(dir / "ple" / "a.safetensors", std::string(128 + 11 * row_bytes, 'a'));
+  WriteFile(dir / "ple" / "b.safetensors", std::string(13 * row_bytes - 1, 'b'));
+  Qwen38Plane current;
+  InitCurrentStubPlane(current);
+  EXPECT_THROW((Qwen38PleTable{current, table_path, dir, 64}), std::runtime_error);
+  EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 1u);
+  EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
+
+  WriteFile(dir / "ple" / "b.safetensors", std::string(13 * row_bytes, 'b'));
+  InitCurrentStubPlane(current);
+  {
+    Qwen38PleTable table{current, table_path, dir, 64};
+    EXPECT_EQ(table.params.pad_, QWEN38_PLANE_PLE_PAD_OF_FORMAT(QWEN38_PLANE_PLE_FORMAT_Q8_0));
+    EXPECT_FLOAT_EQ(table.params.scale, 1.0f);
+    EXPECT_EQ(table.params.head_dim, 160);
+    EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 2u);
+  }
+  EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
 TEST(Qwen38PleTableTest, ValidatesShardFileBoundsAndUsesDevicePointer) {
 #if defined(_WIN32)
   // Without the pin the Windows table maps its shards without registering them; the assertions below are about registration.
@@ -679,6 +997,31 @@ TEST(Qwen38PleTableTest, Int8ShardsAreRefusedBeforeAnyShardIsMappedWhenThePlaneL
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }
+
+// The scales -8 and -20 are INT8 scales like any other negative one: a table with such a scale gets its shards mapped as rows of
+// head_dim bytes and the plane gets the scale in the legacy encoding, whether or not the table has a format line that says int8.
+TEST(Qwen38PleTableTest, Int8ShardsAtTheScalesMinus8AndMinus20AreMappedAsInt8RowsWithOrWithoutAFormatLine) {
+  const auto dir = MakeScratchDir("ple_int8_minus_8_and_20");
+  WritePleShards(dir);
+  Qwen38Plane current;
+  for (const char* scale : {"-8.0", "-20.0"}) {
+    for (const char* format_line : {"", "format int8\n"}) {
+      InitCurrentStubPlane(current);
+      const std::string lines = std::string{format_line} + "scale " + scale + "\n";
+      const auto int8_path = WriteFile(dir / "int8_table.txt", PleTableWithScaleLine(lines));
+      {
+        Qwen38PleTable table{current, int8_path, dir, 64};
+        EXPECT_FLOAT_EQ(table.params.scale, std::stof(scale)) << lines;
+        EXPECT_EQ(table.params.pad_, 0) << lines;
+        EXPECT_EQ(table.params.head_dim, 4) << lines;
+        EXPECT_EQ(StubPlaneState::registered_ptrs.size(), 2u) << lines;
+      }
+      EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs) << lines;
+    }
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
 #endif
 #endif
 
@@ -708,8 +1051,10 @@ TEST(Qwen38PlaneCapabilityTest, DescribesCapabilitiesByName) {
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_BATCHED_PREP), "batched_prep");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY), "conv_history_first_replay");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE), "ctx_slot_stride");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_IQ4_NL_PLE), "iq4_nl_ple");
+  EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_Q8_0_PLE), "q8_0_ple");
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_ALL_CAPABILITIES),
-            "int8_embedding, int8_ple, negative_pos_add_batch, batched_prep, conv_history_first_replay, ctx_slot_stride");
+            "int8_embedding, int8_ple, negative_pos_add_batch, batched_prep, conv_history_first_replay, ctx_slot_stride, iq4_nl_ple, q8_0_ple");
   // A bit that this build has no name for is reported, not dropped.
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_INT8_PLE | (1ull << 40)), "int8_ple, unknown bits 0x10000000000");
 }
@@ -742,7 +1087,7 @@ TEST(Qwen38PlaneCapabilityTest, RequireCapabilitiesNamesTheMissingCapabilityWhat
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();
     EXPECT_NE(message.find("the fold package requires the plane capability int8_embedding, negative_pos_add_batch, "
-                           "batched_prep, conv_history_first_replay, ctx_slot_stride, which"),
+                           "batched_prep, conv_history_first_replay, ctx_slot_stride, iq4_nl_ple, q8_0_ple, which"),
               std::string::npos)
         << message;
   }
@@ -757,7 +1102,8 @@ TEST(Qwen38PlaneCapabilityTest, TheSlotStrideCapabilityHasTheBitAndTheNameOfItsC
   EXPECT_NE(QWEN38_PLANE_ALL_CAPABILITIES & QWEN38_PLANE_CAP_CTX_SLOT_STRIDE, 0ull);
   EXPECT_EQ(DescribeQwen38PlaneCapabilities(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE), "ctx_slot_stride");
   // A library that reports every capability of the generation before it (what the plane of the preceding PR reports) lacks it.
-  const unsigned long long before_the_stride = QWEN38_PLANE_ALL_CAPABILITIES & ~QWEN38_PLANE_CAP_CTX_SLOT_STRIDE;
+  const unsigned long long before_the_stride =
+      QWEN38_PLANE_ALL_CAPABILITIES & (QWEN38_PLANE_CAP_CTX_SLOT_STRIDE - 1ull);
   EXPECT_EQ(before_the_stride, 0x1full);
 }
 
@@ -1041,6 +1387,48 @@ TEST(Qwen38PleDescriptionTest, Int8ShardsNeedTheInt8PleCapability) {
   capable.capabilities = QWEN38_PLANE_CAP_INT8_PLE;
   EXPECT_NO_THROW(RequireQwen38PleTableSupported(capable, int8_table, int8_path));
   EXPECT_NO_THROW(RequireQwen38PleTableSupported(capable, fp8_table, fp8_path));
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PleDescriptionTest, Iq4NlShardsNeedTheirOwnCapability) {
+  const auto dir = MakeScratchDir("ple_iq4_nl_capability");
+  const auto table_path = WriteFile(dir / "ple_table.txt", Iq4NlPleTable());
+  const auto description = ParseQwen38PleDescription(table_path);
+
+  Qwen38Plane legacy;
+  legacy.library_path = "legacy/libqwen38_plane.so";
+  for (const unsigned long long capabilities : {0ull, QWEN38_PLANE_CAP_INT8_PLE}) {
+    legacy.capabilities = capabilities;
+    ExpectMissingCapability([&] { RequireQwen38PleTableSupported(legacy, description, table_path); }, "iq4_nl_ple",
+                            table_path.string(), legacy.library_path);
+  }
+
+  Qwen38Plane capable;
+  capable.capabilities = QWEN38_PLANE_CAP_IQ4_NL_PLE;
+  EXPECT_NO_THROW(RequireQwen38PleTableSupported(capable, description, table_path));
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(Qwen38PleDescriptionTest, Q8_0ShardsNeedTheirOwnCapability) {
+  const auto dir = MakeScratchDir("ple_q8_0_capability");
+  const auto table_path = WriteFile(dir / "ple_table.txt", Q8_0PleTable());
+  const auto description = ParseQwen38PleDescription(table_path);
+
+  Qwen38Plane legacy;
+  legacy.library_path = "legacy/libqwen38_plane.so";
+  for (const unsigned long long capabilities : {0ull, QWEN38_PLANE_CAP_INT8_PLE, QWEN38_PLANE_CAP_IQ4_NL_PLE}) {
+    legacy.capabilities = capabilities;
+    ExpectMissingCapability([&] { RequireQwen38PleTableSupported(legacy, description, table_path); }, "q8_0_ple",
+                            table_path.string(), legacy.library_path);
+  }
+
+  Qwen38Plane capable;
+  capable.capabilities = QWEN38_PLANE_CAP_Q8_0_PLE;
+  EXPECT_NO_THROW(RequireQwen38PleTableSupported(capable, description, table_path));
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
@@ -4720,6 +5108,24 @@ float Fp8E4M3Value(uint8_t code) {
 using FoldState = std::array<int64_t, StagedPleRig::kStateWords>;
 using FoldContext = std::array<int64_t, 2>;
 
+// The value of an fp16 number (the scale of a GGUF block) that is neither infinite nor NaN: a sign, five exponent bits (bias 15)
+// and ten mantissa bits, where exponent 0 denotes a subnormal number. Every such value is exact in a float.
+float HalfValue(uint16_t bits) {
+  const int exponent = (bits >> 10) & 0x1F;
+  const int mantissa = bits & 0x3FF;
+  const float magnitude = exponent == 0 ? std::ldexp(static_cast<float>(mantissa), -24)
+                                        : std::ldexp(static_cast<float>(0x400 + mantissa), exponent - 25);
+  return (bits & 0x8000) != 0 ? -magnitude : magnitude;
+}
+
+// The values that the 4-bit indices of a GGUF IQ4_NL block select, times the scale of the block (kvalues_iq4nl of ggml).
+constexpr std::array<int, 16> kIq4NlValues = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+
+// The plane capability that decodes PLE shards of the GGUF `format`.
+unsigned long long GgufPleCapability(Qwen38PlanePleFormat format) {
+  return format == QWEN38_PLANE_PLE_FORMAT_IQ4_NL ? QWEN38_PLANE_CAP_IQ4_NL_PLE : QWEN38_PLANE_CAP_Q8_0_PLE;
+}
+
 // What the preparation of the rows of a fold step leaves in device memory, read back. Every buffer is filled with 0xAB first, so
 // that a word the preparation does not write shows.
 struct FoldPrepOutputs {
@@ -4732,30 +5138,59 @@ struct FoldPrepOutputs {
   int32_t committed{};
 };
 
+// What ple_rows leaves in device memory, read back.
+struct PleRowsOutputs {
+  std::vector<uint16_t> ple;     // bfloat16 bits, a row per token
+  std::vector<int64_t> context;  // the token before the last one, then the last one
+};
+
 // A PLE table in which a row depends on the token and on the two tokens before it, as in the models, so that the preparation of
-// a fold step shows whether every row sees the right n-gram context. It has four heads of eight values: heads 0 and 1 hash the
-// token and the one before it, heads 2 and 3 also hash the one before that. The heads index 61, 53, 47 and 59 rows of a table
-// that is split into two shards at row 100, so that head 1 reads from both. A head selects its row as the plane does: the token
-// and the contexts times the multipliers, xor-ed, modulo the vocabulary of the head. The rows are FP8 codes, or INT8 values for a
-// negative scale. The table is addressed by the GPU or, when `staged`, kept in host memory for the module to gather from.
+// a fold step shows whether every row sees the right n-gram context. It has four heads: heads 0 and 1 hash the token and the one
+// before it, heads 2 and 3 also hash the one before that. The heads index 61, 53, 47 and 59 rows of a table that is split into
+// two shards at row 100, so that head 1 reads from both. A head selects its row as the plane does: the token and the contexts
+// times the multipliers, xor-ed, modulo the vocabulary of the head. A head of a row is eight FP8 codes, or INT8 values for a
+// negative scale, or two GGUF blocks of 32 values (IQ4_NL or Q8_0; see FillGgufBlocks). The table is addressed by the GPU or,
+// when `staged`, kept in host memory for the module to gather from.
 class HashedPleTable {
  public:
   static constexpr size_t kHeads = 4;
-  static constexpr size_t kHeadDim = 8;
-  static constexpr size_t kRowValues = kHeads * kHeadDim;
+  static constexpr size_t kLegacyHeadDim = 8;     // the values of a head of FP8 or INT8 codes
+  static constexpr size_t kGgufHeadDim = 64;      // the values of a head of GGUF blocks: two blocks
   static constexpr size_t kTableRows = 220;       // the vocabularies of the heads, one after the other
   static constexpr size_t kFirstShardRows = 100;  // the rows after these are in the second shard
   static constexpr size_t kMaxRows = StagedPleRig::kMaxFoldRows;
   static constexpr int64_t kEos = 99;
 
+  // A table of FP8 codes (a positive scale) or INT8 values (a negative scale).
   HashedPleTable(Qwen38Plane& plane, KernelTestDevice& device, float scale, bool staged)
-      : plane_{plane}, device_{device}, staged_{staged}, table_(kTableRows * kHeadDim) {
-    WordStream words{12345};
-    // Clearing the lowest bit of a code keeps it away from the NaNs of E4M3 (0x7F and 0xFF).
-    for (uint8_t& code : table_) code = static_cast<uint8_t>((words.Next() >> 24) & 0xFEu);
+      : HashedPleTable{plane, device, QWEN38_PLANE_PLE_FORMAT_LEGACY, scale, staged} {}
+
+  // A table of GGUF blocks of `format` (QWEN38_PLANE_PLE_FORMAT_IQ4_NL or QWEN38_PLANE_PLE_FORMAT_Q8_0), which the plane is told
+  // in pad_; the scale of the table is unused.
+  HashedPleTable(Qwen38Plane& plane, KernelTestDevice& device, Qwen38PlanePleFormat format, bool staged)
+      : HashedPleTable{plane, device, format, 1.0f, staged} {}
+
+  // A table of `format`, with the scale of the legacy format (unused by the GGUF formats).
+  HashedPleTable(Qwen38Plane& plane, KernelTestDevice& device, Qwen38PlanePleFormat format, float scale, bool staged)
+      : plane_{plane},
+        device_{device},
+        staged_{staged},
+        format_{format},
+        head_dim_{format == QWEN38_PLANE_PLE_FORMAT_LEGACY ? kLegacyHeadDim : kGgufHeadDim},
+        block_bytes_{format == QWEN38_PLANE_PLE_FORMAT_IQ4_NL ? size_t{18} : size_t{34}},
+        head_bytes_{format == QWEN38_PLANE_PLE_FORMAT_LEGACY ? head_dim_ : head_dim_ / 32 * block_bytes_},
+        row_values_{kHeads * head_dim_},
+        table_(kTableRows * head_bytes_) {
+    if (format_ == QWEN38_PLANE_PLE_FORMAT_LEGACY) {
+      WordStream words{12345};
+      // Clearing the lowest bit of a code keeps it away from the NaNs of E4M3 (0x7F and 0xFF).
+      for (uint8_t& code : table_) code = static_cast<uint8_t>((words.Next() >> 24) & 0xFEu);
+    } else {
+      FillGgufBlocks();
+    }
 
     params_.n_heads = static_cast<int>(kHeads);
-    params_.head_dim = static_cast<int>(kHeadDim);
+    params_.head_dim = static_cast<int>(head_dim_);
     params_.heads_per_ngram = 2;
     params_.n_shards = 2;
     // Large multipliers, so that the hash is often negative as a signed word.
@@ -4771,7 +5206,7 @@ class HashedPleTable {
     }
     params_.shard_end[0] = static_cast<long long>(kFirstShardRows);
     params_.shard_end[1] = static_cast<long long>(kTableRows);
-    const size_t first_shard_bytes = kFirstShardRows * kHeadDim;
+    const size_t first_shard_bytes = kFirstShardRows * head_bytes_;
     if (staged_) {
       params_.shard_ptr[0] = table_.data();
       params_.shard_ptr[1] = table_.data() + first_shard_bytes;
@@ -4782,7 +5217,7 @@ class HashedPleTable {
       params_.shard_ptr[1] = second_shard_.data();
     }
     params_.scale = scale;
-    params_.pad_ = staged_ ? 1 : 0;
+    params_.pad_ = QWEN38_PLANE_PLE_PAD_OF_FORMAT(format_) | (staged_ ? QWEN38_PLANE_PLE_STAGED : 0);
     params_.eos = kEos;
     params_.capacity = static_cast<long long>(StagedPleRig::kPositions);
     device_params_ = device.UploadBytes(&params_, sizeof(params_));
@@ -4793,7 +5228,7 @@ class HashedPleTable {
     input_ids_ = device.Filled(kMaxRows * sizeof(int64_t), 0);
     position_ids_ = device.Filled(kMaxRows * sizeof(int64_t), 0);
     contexts_ = device.Filled(2 * kMaxRows * sizeof(int64_t), 0);
-    ple_ = device.Filled(kMaxRows * kRowValues * sizeof(uint16_t), 0);
+    ple_ = device.Filled(kMaxRows * row_values_ * sizeof(uint16_t), 0);
     past_pos_ = device.Filled(StagedPleRig::kPositions * sizeof(int64_t), 0);
     committed_ = device.Filled(sizeof(int32_t), 0);
     spare_committed_ = device.Filled(sizeof(int32_t), 0);
@@ -4805,6 +5240,15 @@ class HashedPleTable {
 
   HashedPleTable(const HashedPleTable&) = delete;
   HashedPleTable& operator=(const HashedPleTable&) = delete;
+
+  // "staged table, IQ4_NL" and the like, for the messages of a test.
+  std::string Describe() const {
+    const char* format = format_ == QWEN38_PLANE_PLE_FORMAT_IQ4_NL ? "IQ4_NL"
+                         : format_ == QWEN38_PLANE_PLE_FORMAT_Q8_0 ? "Q8_0"
+                         : params_.scale < 0.0f                    ? "INT8"
+                                                                   : "FP8";
+    return std::string{staged_ ? "staged table, " : "device table, "} + format;
+  }
 
   // The PLE row of `token` after `previous` and `before_previous`, as bfloat16 bits: what the host computes from the table.
   std::vector<uint16_t> ExpectedRow(int64_t token, int64_t previous, int64_t before_previous) const {
@@ -4819,11 +5263,35 @@ class HashedPleTable {
       long long remainder = static_cast<long long>(mixed) % vocabulary;
       if (remainder < 0) remainder += vocabulary;
       const size_t row = static_cast<size_t>(remainder + params_.offset[head]);
-      for (size_t component = 0; component < kHeadDim; ++component) {
-        values.push_back(Dequantized(table_[row * kHeadDim + component]));
-      }
+      for (size_t component = 0; component < head_dim_; ++component) values.push_back(ExpectedValue(row, component));
     }
     return values;
+  }
+
+  // ple_rows of `tokens` after `context` (the older token first): the rows it writes and the context it leaves.
+  PleRowsOutputs PleRows(const std::vector<int64_t>& tokens, const FoldContext& context) {
+    const PlaneBuffer tokens_in = device_.Upload(tokens);
+    const PlaneBuffer context_in = device_.UploadBytes(context.data(), sizeof(context));
+    const PlaneBuffer context_out = device_.Filled(sizeof(context), 0xAB);
+    const PlaneBuffer ple = device_.Filled(tokens.size() * row_values_ * sizeof(uint16_t), 0xAB);
+    EXPECT_EQ(plane_.ple_rows(device_.stream(), device_params_.data(), tokens_in.data(), static_cast<int>(tokens.size()),
+                              context_in.data(), context_out.data(), ple.data()),
+              0);
+    return {device_.Download<uint16_t>(ple, tokens.size() * row_values_), device_.Download<int64_t>(context_out, 2)};
+  }
+
+  // What ple_rows has to leave for `tokens` after `context`: row i is the PLE row of token i after the two tokens in front of
+  // it, which the context supplies for the first two rows, and the context out is the last two tokens.
+  PleRowsOutputs ExpectedPleRows(const std::vector<int64_t>& tokens, const FoldContext& context) const {
+    PleRowsOutputs expected;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+      const int64_t previous = i >= 1 ? tokens[i - 1] : context[1];
+      const int64_t before_previous = i >= 2 ? tokens[i - 2] : (i == 1 ? context[1] : context[0]);
+      const std::vector<uint16_t> row = ExpectedRow(tokens[i], previous, before_previous);
+      expected.ple.insert(expected.ple.end(), row.begin(), row.end());
+    }
+    expected.context = {tokens.size() >= 2 ? tokens[tokens.size() - 2] : context[1], tokens.back()};
+    return expected;
   }
 
   // What the preparation of the first `rows` rows of a fold step has to leave in the buffers that Reset filled with 0xAB: for
@@ -4837,7 +5305,7 @@ class HashedPleTable {
     expected.contexts.assign(2 * kMaxRows, filled);
     expected.past_pos.assign(StagedPleRig::kPositions, filled);
     expected.state.assign(state.begin(), state.end());
-    expected.ple.assign(kMaxRows * kRowValues, 0xABAB);
+    expected.ple.assign(kMaxRows * row_values_, 0xABAB);
     expected.committed = static_cast<int32_t>(0xABABABABu);
     std::vector<int64_t> tokens;
     for (size_t r = 0; r < static_cast<size_t>(rows); ++r) {
@@ -4851,7 +5319,7 @@ class HashedPleTable {
       expected.contexts[2 * r] = previous;
       expected.contexts[2 * r + 1] = token;
       const std::vector<uint16_t> row = ExpectedRow(token, previous, before_previous);
-      std::copy(row.begin(), row.end(), expected.ple.begin() + static_cast<std::ptrdiff_t>(r * kRowValues));
+      std::copy(row.begin(), row.end(), expected.ple.begin() + static_cast<std::ptrdiff_t>(r * row_values_));
       if (position >= 0 && position < static_cast<int64_t>(StagedPleRig::kPositions)) {
         expected.past_pos[static_cast<size_t>(position)] = position;
       } else {
@@ -4872,7 +5340,7 @@ class HashedPleTable {
       EXPECT_EQ(Prepare(token, static_cast<int>(r), context_in, contexts_.data() + 2 * r * sizeof(int64_t),
                         input_ids_.data() + r * sizeof(int64_t), position_ids_.data() + r * sizeof(int64_t),
                         r == 0 ? committed_.data() : spare_committed_.data(),
-                        ple_.data() + r * kRowValues * sizeof(uint16_t)),
+                        ple_.data() + r * row_values_ * sizeof(uint16_t)),
                 0)
           << "row " << r;
     }
@@ -4926,7 +5394,7 @@ class HashedPleTable {
     const PlaneBuffer position_ids = device_.Filled(batch * n * sizeof(int64_t), 0xAB);
     const PlaneBuffer committed = device_.Filled(batch * sizeof(int32_t), 0xAB);
     const PlaneBuffer past_pos = device_.Filled(batch * StagedPleRig::kPositions * sizeof(int64_t), 0xAB);
-    const PlaneBuffer ple = device_.Filled(batch * n * kRowValues * sizeof(uint16_t), 0xAB);
+    const PlaneBuffer ple = device_.Filled(batch * n * row_values_ * sizeof(uint16_t), 0xAB);
     EXPECT_EQ(plane_.prep_batched(device_.stream(), device_params_.data(), rows, static_cast<int>(selected),
                                   ctx_in.data() + first_slot * 2 * sizeof(int64_t),
                                   ctx_out.data() + first_slot * kCtxWords * sizeof(int64_t),
@@ -4934,7 +5402,7 @@ class HashedPleTable {
                                   position_ids.data() + first_slot * n * sizeof(int64_t),
                                   with_committed ? committed.data() + first_slot * sizeof(int32_t) : nullptr,
                                   past_pos.data() + first_slot * StagedPleRig::kPositions * sizeof(int64_t),
-                                  ple.data() + first_slot * n * kRowValues * sizeof(uint16_t),
+                                  ple.data() + first_slot * n * row_values_ * sizeof(uint16_t),
                                   state.data() + first_slot * kCtlWords * sizeof(int64_t)),
               0);
 
@@ -4943,7 +5411,7 @@ class HashedPleTable {
     const auto positions = device_.Download<int64_t>(position_ids, batch * n);
     const auto committed_out = device_.Download<int32_t>(committed, batch);
     const auto past = device_.Download<int64_t>(past_pos, batch * StagedPleRig::kPositions);
-    const auto ple_out = device_.Download<uint16_t>(ple, batch * n * kRowValues);
+    const auto ple_out = device_.Download<uint16_t>(ple, batch * n * row_values_);
     const auto control_out = device_.Download<int64_t>(state, batch * kCtlWords);
     if (prefixes != nullptr) *prefixes = contexts_out;
 
@@ -4954,11 +5422,11 @@ class HashedPleTable {
       slot.input_ids.assign(kMaxRows, filled);
       slot.position_ids.assign(kMaxRows, filled);
       slot.contexts.assign(2 * kMaxRows, filled);
-      slot.ple.assign(kMaxRows * kRowValues, 0xABAB);
+      slot.ple.assign(kMaxRows * row_values_, 0xABAB);
       std::copy_n(ids.begin() + static_cast<std::ptrdiff_t>(b * n), n, slot.input_ids.begin());
       std::copy_n(positions.begin() + static_cast<std::ptrdiff_t>(b * n), n, slot.position_ids.begin());
       std::copy_n(contexts_out.begin() + static_cast<std::ptrdiff_t>(b * kCtxWords), kCtxWords, slot.contexts.begin());
-      std::copy_n(ple_out.begin() + static_cast<std::ptrdiff_t>(b * n * kRowValues), n * kRowValues, slot.ple.begin());
+      std::copy_n(ple_out.begin() + static_cast<std::ptrdiff_t>(b * n * row_values_), n * row_values_, slot.ple.begin());
       slot.past_pos.assign(past.begin() + static_cast<std::ptrdiff_t>(b * StagedPleRig::kPositions),
                            past.begin() + static_cast<std::ptrdiff_t>((b + 1) * StagedPleRig::kPositions));
       slot.state.assign(control_out.begin() + static_cast<std::ptrdiff_t>(b * kCtlWords),
@@ -4980,7 +5448,7 @@ class HashedPleTable {
       expected.position_ids[r] = static_cast<int64_t>(r);
       expected.contexts[2 * r] = kEos;
       expected.contexts[2 * r + 1] = 0;
-      std::fill_n(expected.ple.begin() + static_cast<std::ptrdiff_t>(r * kRowValues), kRowValues, uint16_t{0});
+      std::fill_n(expected.ple.begin() + static_cast<std::ptrdiff_t>(r * row_values_), row_values_, uint16_t{0});
       expected.past_pos[r] = static_cast<int64_t>(r);
     }
     if (with_committed) expected.committed = 0;
@@ -5002,7 +5470,7 @@ class HashedPleTable {
     const PlaneBuffer position_ids = device_.Filled(kSlots * kMaxRows * sizeof(int64_t), 0xAB);
     const PlaneBuffer committed = device_.Filled(kSlots * sizeof(int32_t), 0xAB);
     const PlaneBuffer past_pos = device_.Filled(kSlots * StagedPleRig::kPositions * sizeof(int64_t), 0xAB);
-    const PlaneBuffer ple = device_.Filled(kSlots * kMaxRows * kRowValues * sizeof(uint16_t), 0xAB);
+    const PlaneBuffer ple = device_.Filled(kSlots * kMaxRows * row_values_ * sizeof(uint16_t), 0xAB);
     const auto pointer = [&](const char* name, const PlaneBuffer& buffer) -> void* {
       return null_argument == name ? nullptr : buffer.data();
     };
@@ -5022,9 +5490,53 @@ class HashedPleTable {
   }
 
  private:
-  uint16_t Dequantized(uint8_t code) const {
-    if (params_.scale < 0.0f) return Bf16Bits(static_cast<float>(static_cast<int8_t>(code)) * -params_.scale);
-    return Bf16Bits(Fp8E4M3Value(code) * params_.scale);
+  // The GGUF blocks of the table, block k (of all, row by row) with an fp16 scale of its own: its mantissa 37k mod 1024 sets it
+  // apart from every other block of every head and row, the exponents span 2^-11 to 2^-3 with one block in ten subnormal, and
+  // every third scale is negative. The 16 low nibbles of an IQ4_NL block (values 0..15) and its 16 high nibbles (values 16..31)
+  // each select all 16 values of the IQ4_NL table, in orders that differ from each other and from block to block. The int8
+  // values of a Q8_0 block are 32 different numbers of both signs.
+  void FillGgufBlocks() {
+    const size_t blocks = head_dim_ / 32;
+    for (size_t row = 0; row < kTableRows; ++row) {
+      for (size_t block = 0; block < blocks; ++block) {
+        const size_t k = row * blocks + block;
+        uint8_t* bytes = table_.data() + row * head_bytes_ + block * block_bytes_;
+        const unsigned exponent = k % 10 == 9 ? 0u : static_cast<unsigned>(4 + k % 10);
+        const unsigned scale = (k % 3 == 1 ? 0x8000u : 0u) | (exponent << 10) | static_cast<unsigned>((37 * k) & 0x3FF);
+        bytes[0] = static_cast<uint8_t>(scale & 0xFF);  // little-endian
+        bytes[1] = static_cast<uint8_t>(scale >> 8);
+        if (format_ == QWEN38_PLANE_PLE_FORMAT_IQ4_NL) {
+          for (size_t j = 0; j < 16; ++j) {
+            const size_t low = (7 * j + k) & 15;
+            const size_t high = (5 * j + 3 * k + 1) & 15;
+            bytes[2 + j] = static_cast<uint8_t>(low | (high << 4));
+          }
+        } else {
+          for (size_t j = 0; j < 32; ++j) bytes[2 + j] = static_cast<uint8_t>(8 * j + 13 * k);
+        }
+      }
+    }
+  }
+
+  // Value `component` of the head stored at `row` of the table, as bfloat16 bits: the host decoder of every format.
+  uint16_t ExpectedValue(size_t row, size_t component) const {
+    const uint8_t* head = table_.data() + row * head_bytes_;
+    if (format_ == QWEN38_PLANE_PLE_FORMAT_LEGACY) {
+      const uint8_t code = head[component];
+      if (params_.scale < 0.0f) return Bf16Bits(static_cast<float>(static_cast<int8_t>(code)) * -params_.scale);
+      return Bf16Bits(Fp8E4M3Value(code) * params_.scale);
+    }
+    const uint8_t* block = head + component / 32 * block_bytes_;
+    const size_t index = component % 32;
+    const float scale = HalfValue(static_cast<uint16_t>(block[0] | (block[1] << 8)));
+    int value = 0;
+    if (format_ == QWEN38_PLANE_PLE_FORMAT_IQ4_NL) {
+      const uint8_t nibbles = block[2 + index % 16];
+      value = kIq4NlValues[index < 16 ? (nibbles & 15) : (nibbles >> 4)];
+    } else {
+      value = static_cast<int8_t>(block[2 + index]);
+    }
+    return Bf16Bits(scale * static_cast<float>(value));
   }
 
   void Reset(const FoldState& state, const FoldContext& context) {
@@ -5048,7 +5560,7 @@ class HashedPleTable {
     outputs.contexts = device_.Download<int64_t>(contexts_, 2 * kMaxRows);
     outputs.past_pos = device_.Download<int64_t>(past_pos_, StagedPleRig::kPositions);
     outputs.state = device_.Download<int64_t>(state_, StagedPleRig::kStateWords);
-    outputs.ple = device_.Download<uint16_t>(ple_, kMaxRows * kRowValues);
+    outputs.ple = device_.Download<uint16_t>(ple_, kMaxRows * row_values_);
     outputs.committed = device_.Download<int32_t>(committed_, 1)[0];
     return outputs;
   }
@@ -5056,6 +5568,11 @@ class HashedPleTable {
   Qwen38Plane& plane_;
   KernelTestDevice& device_;
   const bool staged_;
+  const Qwen38PlanePleFormat format_;
+  const size_t head_dim_;
+  const size_t block_bytes_;  // of a GGUF block
+  const size_t head_bytes_;   // of a head of a row of the table
+  const size_t row_values_;   // of a PLE row: kHeads * head_dim_
   std::vector<uint8_t> table_;
   Qwen38PleParams params_{};
   PlaneBuffer first_shard_, second_shard_, device_params_;
@@ -5099,11 +5616,24 @@ const std::vector<FoldScenario>& FoldScenarios() {
 class Qwen38PlaneFoldPrepTest : public PlaneKernelFixture<::testing::Test> {
  protected:
   // The fused prep (k_prep_fold, or the per-row staging for a staged table) of 2 to 8 rows against the prep of the same rows one
-  // call at a time and against the PLE rows, graph inputs and contexts that the host computes from the table.
+  // call at a time and against the PLE rows, graph inputs and contexts that the host computes from the table: of FP8 codes for
+  // a positive scale, of INT8 values for a negative one.
   void ExpectTheFusedPrepToMatchEveryRowSeparately(bool staged, float scale) {
-    ASSERT_NE(plane_->capabilities & QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, 0ull);
     KernelTestDevice device{*plane_};
     HashedPleTable table{*plane_, device, scale, staged};
+    ExpectTheFusedPrepToMatchEveryRowSeparately(table);
+  }
+
+  // The same for a table of GGUF blocks of `format`.
+  void ExpectTheFusedPrepToMatchEveryRowSeparately(bool staged, Qwen38PlanePleFormat format) {
+    if ((plane_->capabilities & GgufPleCapability(format)) == 0) GTEST_SKIP() << "the plane library has no such PLE format";
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, format, staged};
+    ExpectTheFusedPrepToMatchEveryRowSeparately(table);
+  }
+
+  void ExpectTheFusedPrepToMatchEveryRowSeparately(HashedPleTable& table) {
+    ASSERT_NE(plane_->capabilities & QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, 0ull);
     // The rows of the table have to depend on each of the three tokens, or a wrong context could go unnoticed.
     ASSERT_NE(table.ExpectedRow(7, 11, 13), table.ExpectedRow(8, 11, 13)) << "the token";
     ASSERT_NE(table.ExpectedRow(7, 11, 13), table.ExpectedRow(7, 12, 13)) << "the previous token";
@@ -5112,8 +5642,7 @@ class Qwen38PlaneFoldPrepTest : public PlaneKernelFixture<::testing::Test> {
         << "the positions behind an end of sequence are masked";
     for (const FoldScenario& scenario : FoldScenarios()) {
       for (int rows = 2; rows <= static_cast<int>(HashedPleTable::kMaxRows); ++rows) {
-        const std::string what = std::string{staged ? "staged table" : "device table"} + ", " +
-                                 (scale < 0.0f ? "INT8" : "FP8") + ", " + scenario.name + ", " + std::to_string(rows) + " rows";
+        const std::string what = table.Describe() + ", " + scenario.name + ", " + std::to_string(rows) + " rows";
         const FoldPrepOutputs expected = table.Expected(scenario.state, scenario.context, rows);
         const FoldPrepOutputs separate = table.PrepEveryRowSeparately(scenario.state, scenario.context, rows);
         const FoldPrepOutputs fused = table.PrepInOneCall(scenario.state, scenario.context, rows);
@@ -5141,6 +5670,179 @@ TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepMatchesEveryRowSeparatelyForAnInt8Devic
 TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepMatchesEveryRowSeparatelyForAnInt8StagedTable) {
   if ((plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE) == 0) GTEST_SKIP() << "the plane library has no INT8 PLE";
   ExpectTheFusedPrepToMatchEveryRowSeparately(/*staged=*/true, -0.0123f);
+}
+
+// The scales -8 and -20 are INT8 scales to the plane like any other negative one: it decodes the tables of the legacy format that
+// have them as INT8 rows of head_dim bytes.
+TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepMatchesEveryRowSeparatelyForInt8TablesAtTheScalesMinus8AndMinus20) {
+  if ((plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE) == 0) GTEST_SKIP() << "the plane library has no INT8 PLE";
+  for (const float scale : {-8.0f, -20.0f}) {
+    SCOPED_TRACE("scale " + std::to_string(scale));
+    ExpectTheFusedPrepToMatchEveryRowSeparately(/*staged=*/false, scale);
+    ExpectTheFusedPrepToMatchEveryRowSeparately(/*staged=*/true, scale);
+  }
+}
+
+TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepMatchesEveryRowSeparatelyForAnIq4NlDeviceTable) {
+  ExpectTheFusedPrepToMatchEveryRowSeparately(/*staged=*/false, QWEN38_PLANE_PLE_FORMAT_IQ4_NL);
+}
+
+TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepMatchesEveryRowSeparatelyForAnIq4NlStagedTable) {
+  ExpectTheFusedPrepToMatchEveryRowSeparately(/*staged=*/true, QWEN38_PLANE_PLE_FORMAT_IQ4_NL);
+}
+
+TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepMatchesEveryRowSeparatelyForAQ8_0DeviceTable) {
+  ExpectTheFusedPrepToMatchEveryRowSeparately(/*staged=*/false, QWEN38_PLANE_PLE_FORMAT_Q8_0);
+}
+
+TEST_F(Qwen38PlaneFoldPrepTest, FusedPrepMatchesEveryRowSeparatelyForAQ8_0StagedTable) {
+  ExpectTheFusedPrepToMatchEveryRowSeparately(/*staged=*/true, QWEN38_PLANE_PLE_FORMAT_Q8_0);
+}
+
+// ple_rows against the host decoder: the kernel of a device table and, for a staged table, the gather of fewer than 32 tokens
+// on the calling thread and of 32 or more by the worker threads, and the same tokens again, whose rows the n-gram cache holds.
+class Qwen38PlanePleRowsTest : public PlaneKernelFixture<::testing::Test> {
+ protected:
+  void ExpectEveryRowToMatchTheHost(HashedPleTable& table) {
+    WordStream words{2913};
+    std::vector<int64_t> tokens(40);
+    for (int64_t& token : tokens) token = static_cast<int64_t>(words.Next() % 262144);
+    tokens[5] = HashedPleTable::kEos;  // the row after an end of sequence masks the token in front of it
+    tokens[33] = HashedPleTable::kEos;
+    const FoldContext context{{11, 13}};
+    for (const size_t count : {size_t{1}, size_t{2}, size_t{7}, size_t{31}, size_t{32}, tokens.size()}) {
+      const std::vector<int64_t> prefix(tokens.begin(), tokens.begin() + static_cast<std::ptrdiff_t>(count));
+      const PleRowsOutputs expected = table.ExpectedPleRows(prefix, context);
+      for (const char* pass : {"first call", "second call"}) {
+        const std::string what = table.Describe() + ", " + std::to_string(count) + " tokens, " + pass;
+        const PleRowsOutputs gathered = table.PleRows(prefix, context);
+        ExpectSameElements(expected.ple, gathered.ple, what + ": the PLE rows");
+        ExpectSameElements(expected.context, gathered.context, what + ": the context out");
+      }
+    }
+  }
+
+  void ExpectEveryRowToMatchTheHost(bool staged, Qwen38PlanePleFormat format) {
+    if ((plane_->capabilities & GgufPleCapability(format)) == 0) GTEST_SKIP() << "the plane library has no such PLE format";
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, format, staged};
+    ExpectEveryRowToMatchTheHost(table);
+  }
+};
+
+TEST_F(Qwen38PlanePleRowsTest, EveryRowOfAnIq4NlDeviceTableMatchesTheHostDecoder) {
+  ExpectEveryRowToMatchTheHost(/*staged=*/false, QWEN38_PLANE_PLE_FORMAT_IQ4_NL);
+}
+
+TEST_F(Qwen38PlanePleRowsTest, EveryRowOfAnIq4NlStagedTableMatchesTheHostDecoder) {
+  ExpectEveryRowToMatchTheHost(/*staged=*/true, QWEN38_PLANE_PLE_FORMAT_IQ4_NL);
+}
+
+TEST_F(Qwen38PlanePleRowsTest, EveryRowOfAQ8_0DeviceTableMatchesTheHostDecoder) {
+  ExpectEveryRowToMatchTheHost(/*staged=*/false, QWEN38_PLANE_PLE_FORMAT_Q8_0);
+}
+
+TEST_F(Qwen38PlanePleRowsTest, EveryRowOfAQ8_0StagedTableMatchesTheHostDecoder) {
+  ExpectEveryRowToMatchTheHost(/*staged=*/true, QWEN38_PLANE_PLE_FORMAT_Q8_0);
+}
+
+TEST_F(Qwen38PlanePleRowsTest, EveryRowOfAnInt8TableAtTheScalesMinus8AndMinus20MatchesTheHostDecoder) {
+  if ((plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE) == 0) GTEST_SKIP() << "the plane library has no INT8 PLE";
+  for (const float scale : {-8.0f, -20.0f}) {
+    for (const bool staged : {false, true}) {
+      SCOPED_TRACE("scale " + std::to_string(scale));
+      KernelTestDevice device{*plane_};
+      HashedPleTable table{*plane_, device, scale, staged};
+      ExpectEveryRowToMatchTheHost(table);
+    }
+  }
+}
+
+// The n-gram cache of the host gather holds the rows of the widest table there can be: 16 heads of 192 values in GGUF Q8_0 are
+// 3,072 values in 3,264 bytes, more than the 3,072 bytes that a row of as many FP8 codes takes. The table is changed after its
+// rows were gathered. A row that the next gather returns as it was comes from the cache; one that it returns changed was read
+// from the table again, as every such row was while a slot of the cache could not hold it. Fewer than 32 tokens are gathered on
+// the calling thread and 32 or more by the worker threads, which check the size of a row on their own.
+TEST_F(Qwen38PlanePleRowsTest, TheNgramCacheHoldsRowsOfTheWidestQ8_0Table) {
+  if ((plane_->capabilities & QWEN38_PLANE_CAP_Q8_0_PLE) == 0) GTEST_SKIP() << "the plane library has no Q8_0 PLE";
+  constexpr int kHeads = 16;
+  constexpr int kHeadDim = 192;
+  constexpr size_t kBlockBytes = 34;
+  constexpr size_t kHeadBytes = kHeadDim / 32 * kBlockBytes;
+  constexpr size_t kRowValues = kHeads * kHeadDim;
+  constexpr size_t kRowsPerHead = 8;
+  static_assert(kRowValues == 3072 && kHeads * kHeadBytes == 3264, "the widest row of a table, in the widest encoding");
+
+  // Two rows that hash to one slot would evict each other, which a cache of fewer slots makes likelier.
+  Generators::test::ScopedEnvironmentVariable slots{"ORT_QWEN38_PLE_CACHE_SLOTS", "65536"};
+
+  for (const size_t count : {size_t{3}, size_t{33}}) {
+    SCOPED_TRACE(std::to_string(count) + " tokens");
+    // Every block has a scale of its own, and the sign of a scale is what the table is changed by below.
+    std::vector<uint8_t> table(kHeads * kRowsPerHead * kHeadBytes);
+    for (size_t block = 0; block < table.size() / kBlockBytes; ++block) {
+      uint8_t* bytes = table.data() + block * kBlockBytes;
+      const unsigned scale = (4u + block % 8u) << 10 | static_cast<unsigned>((37 * block) & 0x3FF);
+      bytes[0] = static_cast<uint8_t>(scale & 0xFF);
+      bytes[1] = static_cast<uint8_t>(scale >> 8);
+      for (size_t j = 0; j < 32; ++j) bytes[2 + j] = static_cast<uint8_t>(8 * j + 13 * block);
+    }
+
+    Qwen38PleParams params{};
+    params.n_heads = kHeads;
+    params.head_dim = kHeadDim;
+    params.heads_per_ngram = kHeads / 2;
+    params.n_shards = 1;
+    params.mult[0] = static_cast<long long>(0x9E3779B97F4A7C15ull);
+    params.mult[1] = static_cast<long long>(0xC2B2AE3D27D4EB4Full);
+    params.mult[2] = static_cast<long long>(0x165667B19E3779F9ull);
+    for (int head = 0; head < kHeads; ++head) {
+      params.vocab[head] = static_cast<long long>(kRowsPerHead);
+      params.offset[head] = static_cast<long long>(head * kRowsPerHead);
+    }
+    params.shard_end[0] = static_cast<long long>(kHeads * kRowsPerHead);
+    params.shard_ptr[0] = table.data();
+    params.scale = 1.0f;
+    params.pad_ = QWEN38_PLANE_PLE_PAD_OF_FORMAT(QWEN38_PLANE_PLE_FORMAT_Q8_0) | QWEN38_PLANE_PLE_STAGED;
+    params.eos = 1 << 30;
+    params.capacity = 16;
+
+    KernelTestDevice device{*plane_};
+    const PlaneBuffer device_params = device.UploadBytes(&params, sizeof(params));
+    plane_->set_ple_host_params(&params);
+    struct Registration {
+      Qwen38Plane& plane;
+      Qwen38PleParams& params;
+      ~Registration() { plane.unset_ple_host_params(&params); }
+    } registration{*plane_, params};
+
+    WordStream words{2913};
+    std::vector<int64_t> tokens(count);
+    for (int64_t& token : tokens) token = static_cast<int64_t>(words.Next() % 262144);
+    const FoldContext context{{11, 13}};
+    const auto gather = [&] {
+      const PlaneBuffer tokens_in = device.Upload(tokens);
+      const PlaneBuffer context_in = device.UploadBytes(context.data(), sizeof(context));
+      const PlaneBuffer context_out = device.Filled(sizeof(context), 0xAB);
+      const PlaneBuffer ple = device.Filled(count * kRowValues * sizeof(uint16_t), 0xAB);
+      EXPECT_EQ(plane_->ple_rows(device.stream(), device_params.data(), tokens_in.data(), static_cast<int>(count),
+                                 context_in.data(), context_out.data(), ple.data()),
+                0);
+      return device.Download<uint16_t>(ple, count * kRowValues);
+    };
+
+    const std::vector<uint16_t> first = gather();
+    for (size_t block = 0; block < table.size() / kBlockBytes; ++block) table[block * kBlockBytes + 1] ^= 0x80;
+    ExpectSameElements(first, gather(), "the rows of the second gather, after the table was changed");
+
+    // Registering the table again empties the cache: the rows are read from the changed table, and each of them differs.
+    plane_->unset_ple_host_params(&params);
+    plane_->set_ple_host_params(&params);
+    const std::vector<uint16_t> changed = gather();
+    size_t same = 0;
+    for (size_t i = 0; i < first.size(); ++i) same += first[i] == changed[i] ? 1 : 0;
+    EXPECT_EQ(same, 0u) << same << " of " << first.size() << " values did not change with the table";
+  }
 }
 
 // The prep of one row skips the committed length when it is given no place for it, and so does the prep of a whole step.
@@ -5208,14 +5910,25 @@ class Qwen38PlaneBatchedPrepKernelTest : public PlaneKernelFixture<::testing::Te
   void ExpectEverySlotToMatchItsOwnPrep(bool staged, float scale) {
     KernelTestDevice device{*plane_};
     HashedPleTable table{*plane_, device, scale, staged};
+    ExpectEverySlotToMatchItsOwnPrep(table);
+  }
+
+  void ExpectEverySlotToMatchItsOwnPrep(bool staged, Qwen38PlanePleFormat format) {
+    if ((plane_->capabilities & GgufPleCapability(format)) == 0) GTEST_SKIP() << "the plane library has no such PLE format";
+    KernelTestDevice device{*plane_};
+    HashedPleTable table{*plane_, device, format, staged};
+    ExpectEverySlotToMatchItsOwnPrep(table);
+  }
+
+  void ExpectEverySlotToMatchItsOwnPrep(HashedPleTable& table) {
     for (int rows = 1; rows <= static_cast<int>(HashedPleTable::kMaxRows); ++rows) {
       for (size_t batch = 1; batch <= QWEN38_PLANE_MAX_PREP_BATCH; ++batch) {
         const BatchedFoldSlots slots = MakeBatchedFoldSlots(batch, static_cast<size_t>(rows));
         const std::vector<FoldPrepOutputs> prepared = table.PrepBatched(slots.states, slots.contexts, rows);
         ASSERT_EQ(prepared.size(), batch);
         for (size_t b = 0; b < batch; ++b) {
-          const std::string what = Describe(staged, scale) + ", " + std::to_string(rows) + " rows of slot " +
-                                   std::to_string(b) + " of " + std::to_string(batch);
+          const std::string what = table.Describe() + ", " + std::to_string(rows) + " rows of slot " + std::to_string(b) +
+                                   " of " + std::to_string(batch);
           ExpectSameFoldPrepOutputs(table.Expected(slots.states[b], slots.contexts[b], rows), prepared[b],
                                     what + ", against the host");
           ExpectSameFoldPrepOutputs(table.PrepEveryRowSeparately(slots.states[b], slots.contexts[b], rows), prepared[b],
@@ -5242,6 +5955,22 @@ TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAnInt8Devi
 TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAnInt8StagedTable) {
   if ((plane_->capabilities & QWEN38_PLANE_CAP_INT8_PLE) == 0) GTEST_SKIP() << "the plane library has no INT8 PLE";
   ExpectEverySlotToMatchItsOwnPrep(/*staged=*/true, -0.0123f);
+}
+
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAnIq4NlDeviceTable) {
+  ExpectEverySlotToMatchItsOwnPrep(/*staged=*/false, QWEN38_PLANE_PLE_FORMAT_IQ4_NL);
+}
+
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAnIq4NlStagedTable) {
+  ExpectEverySlotToMatchItsOwnPrep(/*staged=*/true, QWEN38_PLANE_PLE_FORMAT_IQ4_NL);
+}
+
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAQ8_0DeviceTable) {
+  ExpectEverySlotToMatchItsOwnPrep(/*staged=*/false, QWEN38_PLANE_PLE_FORMAT_Q8_0);
+}
+
+TEST_F(Qwen38PlaneBatchedPrepKernelTest, EverySlotMatchesItsOwnPrepForAQ8_0StagedTable) {
+  ExpectEverySlotToMatchItsOwnPrep(/*staged=*/true, QWEN38_PLANE_PLE_FORMAT_Q8_0);
 }
 
 TEST_F(Qwen38PlaneBatchedPrepKernelTest, OffsetIntervalsLeaveExcludedSlotsCompletelyUntouched) {
