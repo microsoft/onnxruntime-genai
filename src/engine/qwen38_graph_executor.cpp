@@ -51,6 +51,10 @@ void Qwen38GraphSession::Poison() noexcept {
 
 void Qwen38GraphSession::Acknowledge(const TokenCommitAck& ack) {
   completions_.Acknowledge(ack);
+  if (pending_cached_prefix_ != 0) {
+    ++prefix_metrics_.hits;
+    prefix_metrics_.matched_tokens += std::exchange(pending_cached_prefix_, 0);
+  }
   if (ack.disposition != ContinuationDisposition::Continue || ack.turn_finished) {
     // Stop useful work immediately. Already queued lookahead is retained until explicit retirement quiesces it.
     // A later turn replays Request's authoritative history; no physical-device-length equality is assumed here.
@@ -72,10 +76,16 @@ std::vector<BackendPlannedRow> Qwen38GraphSession::Plan(std::span<const Qwen38St
     }
     bool needs_prefill;
     size_t prefilled;
+    size_t adopted = 0;
     if (MaxBatchSize() == 1) {
       const bool same_turn = request.owner == owner_ && request.turn_id == turn_id_;
       needs_prefill = !same_turn || !decoding_;
       prefilled = same_turn ? prefilled_ : 0;
+      if (!same_turn) {
+        if (const auto* prefix = FindPrefix(request.tokens)) {
+          adopted = prefilled = prefix->tokens.size();
+        }
+      }
     } else {
       const auto& state = slot_states_.at(request.slot);
       const bool same_turn = request.owner == state.owner && request.turn_id == state.turn_id;
@@ -95,13 +105,46 @@ std::vector<BackendPlannedRow> Qwen38GraphSession::Plan(std::span<const Qwen38St
     const size_t remaining = needs_prefill ? request.tokens.size() - prefilled : 0;
     const size_t chunk = std::min(options_.prefill_chunk_tokens, remaining);
     plan.push_back(completions_.Plan(request_rows[i], request.slot, request.owner, request.turn_id,
-                                     chunk, needs_prefill && chunk == remaining));
+                                     adopted + chunk, needs_prefill && chunk == remaining));
   }
   return plan;
 }
 
 bool Qwen38GraphSession::IsStopToken(int32_t token) const {
   return std::find(options_.stop_tokens.begin(), options_.stop_tokens.end(), token) != options_.stop_tokens.end();
+}
+
+const Qwen38GraphSession::PrefixEntry* Qwen38GraphSession::FindPrefix(std::span<const int32_t> tokens) const {
+  const PrefixEntry* best = nullptr;
+  for (const auto& entry : prefixes_) {
+    if (entry.state->IsResident() && entry.tokens.size() <= tokens.size() &&
+        (!best || entry.tokens.size() > best->tokens.size()) &&
+        std::equal(entry.tokens.begin(), entry.tokens.end(), tokens.begin())) {
+      best = &entry;
+    }
+  }
+  return best;
+}
+
+void Qwen38GraphSession::SavePrefix(std::span<const int32_t> tokens) {
+  if (!device_->PrefixCachingEnabled()) return;
+  try {
+    auto state = device_->CapturePrefix();
+    if (!state) {
+      ++prefix_metrics_.publication_refusals;
+      return;
+    }
+    auto entry = PrefixEntry{std::vector<int32_t>{tokens.begin(), tokens.end()}, std::move(state)};
+    prefixes_.erase(std::remove_if(prefixes_.begin(), prefixes_.end(), [this](const PrefixEntry& existing) {
+                      if (existing.state->IsResident()) return false;
+                      ++prefix_metrics_.evictions;
+                      return true;
+                    }),
+                    prefixes_.end());
+    prefixes_.push_back(std::move(entry));
+  } catch (const std::bad_alloc&) {
+    ++prefix_metrics_.publication_refusals;
+  }
 }
 
 void Qwen38GraphSession::RethrowDeferredError() {
@@ -187,6 +230,19 @@ void Qwen38GraphSession::Begin(const Qwen38StepRequest& request) {
   turn_id_ = request.turn_id;
   prefilled_ = 0;
   decoding_ = false;
+  adopted_prefix_ = 0;
+  pending_cached_prefix_ = 0;
+  if (device_->PrefixCachingEnabled()) {
+    ++prefix_metrics_.lookups;
+    prefix_metrics_.queried_tokens += request.tokens.size();
+    if (const auto* prefix = FindPrefix(request.tokens)) {
+      device_dirty_ = true;
+      device_->RestorePrefix(*prefix->state, prefix->tokens);
+      prefilled_ = adopted_prefix_ = prefix->tokens.size();
+      ++prefix_metrics_.matches;
+    }
+  }
+  device_->ExpectPrefillTokens(request.tokens.size());
 }
 
 void Qwen38GraphSession::BeginSlot(size_t slot, const Qwen38StepRequest& request) {
@@ -377,16 +433,17 @@ Qwen38StepResult Qwen38GraphSession::Step(const Qwen38StepRequest& request) {
     const size_t remaining = request.tokens.size() - prefilled_;
     const size_t chunk = std::min(options_.prefill_chunk_tokens, remaining);
     device_dirty_ = true;
-    if (prefilled_ == 0) {
-      // The device keeps the turn's prompt length for its chunks (Reset() and BeginDecode() drop it): the value belongs
-      // to this device, so Engines running in one process never see each other's.
-      device_->ExpectPrefillTokens(request.tokens.size());
+    if (chunk != 0) {
+      device_->PrefillChunk(request.tokens.subspan(prefilled_, chunk));
+      prefilled_ += chunk;
+      ++work_metrics_.work_records;
+      work_metrics_.prefill_tokens += chunk;
+      if (device_->ShouldCapturePrefix(request.tokens.size() - prefilled_))
+        SavePrefix(request.tokens.first(prefilled_));
     }
-    device_->PrefillChunk(request.tokens.subspan(prefilled_, chunk));
-    prefilled_ += chunk;
-    ++work_metrics_.work_records;
-    work_metrics_.prefill_tokens += chunk;
-    result.prompt_tokens_processed = chunk;
+    result.cached_prefix_tokens = std::exchange(adopted_prefix_, 0);
+    pending_cached_prefix_ = result.cached_prefix_tokens;
+    result.prompt_tokens_processed = result.cached_prefix_tokens + chunk;
     result.prompt_complete = prefilled_ == request.tokens.size();
     if (prefilled_ < request.tokens.size()) {
       return result;
@@ -781,7 +838,7 @@ void Qwen38GraphExecutor::Decode(ScheduledRequests& scheduled_requests, Executio
     BackendRowResult row;
     row.key = operation.key;
     if (result.prompt_tokens_processed > 0 || result.prompt_complete) {
-      row.prefill = PrefillProgress{result.prompt_tokens_processed, result.prompt_complete};
+      row.prefill = PrefillProgress{result.prompt_tokens_processed, result.prompt_complete, result.cached_prefix_tokens};
     }
     if (result.count > 0) {
       SelectedTokenBlock tokens;
