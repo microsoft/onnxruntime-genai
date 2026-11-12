@@ -192,6 +192,59 @@ TEST(ConfigTest, ModelProviderSelectionSurvivesUnrelatedEngramOverlays) {
   EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"WebGPU", "cuda", "CPU"}));
 }
 
+TEST(ConfigTest, ModelProviderSelectionSurvivesNonProviderComponentOverlays) {
+  for (bool select : {false, true}) {
+    Config config;
+    OverlayConfig(config, R"({"model":{
+      "encoder":{"session_options":{}},"embedding":{"session_options":{}},
+      "vision":{"session_options":{}},"speech":{"session_options":{}},
+      "joiner":{"session_options":{}},"vad":{"session_options":{}},
+      "audio_output":{"depthformer":{"session_options":{}},"embedding":{"session_options":{}}},
+      "qwen38_graph":{"head":{"session_options":{}},"fold":{"head_r2":{"session_options":{}}},
+        "prefill":{"dense":{"session_options":{}},"head_kv":{"session_options":{}}}}
+    }})");
+    auto& model = config.model;
+    const std::vector<Config::SessionOptions*> sessions{
+        &*model.encoder.session_options, &*model.embedding.session_options,
+        &*model.vision.session_options, &*model.speech.session_options,
+        &*model.joiner.session_options, &*model.vad.session_options,
+        &*model.audio_output.depthformer.session_options, &*model.audio_output.embedding.session_options,
+        &*model.qwen38_graph.head.session_options, &*model.qwen38_graph.fold.head_r2.session_options,
+        &*model.qwen38_graph.prefill.dense.session_options, &*model.qwen38_graph.prefill.head_kv.session_options};
+    for (auto* session : sessions) {
+      session->log_id = "preserved";
+    }
+    if (select) {
+      ClearProviders(config);
+      SetProviderOption(config, "cuda", "device_id", "2");
+    }
+    OverlayConfig(config, R"({"model":{
+      "encoder":{"session_options":{"intra_op_num_threads":2}},
+      "embedding":{"session_options":{"intra_op_num_threads":2}},
+      "vision":{"session_options":{"intra_op_num_threads":2}},
+      "speech":{"session_options":{"intra_op_num_threads":2}},
+      "joiner":{"session_options":{"intra_op_num_threads":2}},
+      "vad":{"session_options":{"intra_op_num_threads":2}},
+      "audio_output":{"depthformer":{"session_options":{"intra_op_num_threads":2}},
+        "embedding":{"session_options":{"intra_op_num_threads":2}}},
+      "qwen38_graph":{"head":{"session_options":{"intra_op_num_threads":2}},
+        "fold":{"head_r2":{"session_options":{"intra_op_num_threads":2}}},
+        "prefill":{"dense":{"session_options":{"intra_op_num_threads":2}},
+          "head_kv":{"session_options":{"intra_op_num_threads":2}}}}
+    }})");
+    for (const auto* session : sessions) {
+      EXPECT_EQ(session->intra_op_num_threads, 2);
+      EXPECT_EQ(session->providers_explicitly_selected, select);
+      EXPECT_EQ(session->log_id, select ? std::optional<std::string>{"preserved"} : std::nullopt);
+      if (select) {
+        EXPECT_EQ(session->providers, (std::vector<std::string>{"cuda"}));
+        ASSERT_EQ(session->provider_options.size(), 1u);
+        EXPECT_EQ(session->provider_options.front().options, (std::vector<Config::NamedString>{{"device_id", "2"}}));
+      }
+    }
+  }
+}
+
 TEST(ConfigTest, ModelProviderSelectionSurvivesAuxiliarySessionResolution) {
   Config config;
   config.model.decoder.session_options.provider_options = {{"WebGPU", {}}};

@@ -1171,7 +1171,9 @@ struct Encoder_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -1793,7 +1795,9 @@ struct Vision_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -1888,7 +1892,9 @@ struct Speech_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -1927,7 +1933,9 @@ struct AudioOutputGraph_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2021,7 +2029,9 @@ struct Joiner_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2066,7 +2076,9 @@ struct VAD_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2457,7 +2469,9 @@ struct Embedding_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2576,7 +2590,9 @@ struct Qwen38GraphHead_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2622,7 +2638,9 @@ struct Qwen38GraphFoldHeadR2_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2682,7 +2700,9 @@ struct Qwen38GraphPrefillModel_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
