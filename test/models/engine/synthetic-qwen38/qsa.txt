@@ -1,0 +1,10 @@
+qwen38_qsa_consts 1
+file qsa.data
+epsilon 0.000001
+width 2
+tensor target cos 0 128
+tensor head cos 0 128
+tensor target sin 128 128
+tensor head sin 128 128
+tensor target knorm.0 256 256
+tensor head knorm.0 256 256

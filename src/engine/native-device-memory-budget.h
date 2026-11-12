@@ -14,8 +14,9 @@ std::optional<size_t> NativeSnapshotDeviceMemoryLimit(
 
 class NativeDeviceMemoryBudget {
  public:
-  explicit NativeDeviceMemoryBudget(const Model& model);
-  void SetSnapshotCache(const std::shared_ptr<PrefixSnapshotCache>& cache) { snapshots_ = cache; }
+  explicit NativeDeviceMemoryBudget(const Model& model) : model_{model} {}
+  void Configure(const std::optional<Config::Engine::DynamicBatching>& settings,
+                 const std::shared_ptr<PrefixSnapshotCache>& cache);
   void Refresh() const;
 
  private:

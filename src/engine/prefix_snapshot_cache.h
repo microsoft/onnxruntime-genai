@@ -49,6 +49,7 @@ class PrefixSnapshotCache {
     void Write(size_t layer, Tensor& source, std::span<const Range> ranges);
     void Read(size_t layer, Tensor& destination, std::span<const Range> ranges) const;
     void Flush();
+    void AddPackedBuffer(std::span<const Range> ranges);
 
     State state{State::Empty};
     Tier tier{Tier::Ram};
@@ -105,5 +106,7 @@ class PrefixSnapshotCache {
   std::vector<std::weak_ptr<Entry>> entries_;
   uint64_t clock_{};
 };
+
+std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config::Engine::DynamicBatching& config);
 
 }  // namespace Generators

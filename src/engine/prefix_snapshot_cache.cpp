@@ -17,6 +17,7 @@
 #endif
 
 #include "../logging.h"
+#include "../filesystem.h"
 
 namespace Generators {
 namespace {
@@ -249,6 +250,34 @@ void PrefixSnapshotCache::Entry::Read(
 
 void PrefixSnapshotCache::Entry::Flush() {
   if (disk) disk->file.flush();
+}
+
+void PrefixSnapshotCache::Entry::AddPackedBuffer(std::span<const Range> ranges) {
+  if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8)
+    throw std::invalid_argument("Packed prefix snapshot buffers require the byte element type.");
+  size_t packed = 0;
+  for (const auto& range : ranges) {
+    if (range.bytes > std::numeric_limits<size_t>::max() - packed)
+      throw std::overflow_error("Prefix snapshot size overflow.");
+    packed += range.bytes;
+  }
+  if (packed > static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
+      packed > std::numeric_limits<size_t>::max() - bytes)
+    throw std::overflow_error("Prefix snapshot size overflow.");
+  shapes.push_back({static_cast<int64_t>(packed)});
+  bytes += packed;
+}
+
+std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config::Engine::DynamicBatching& config) {
+  const auto& limits = config.snapshot_cache;
+  if (!config.prefix_caching.value_or(false) || config.max_snapshots.value_or(1) == 0 ||
+      (limits.Configured() && !limits.Enabled()))
+    return nullptr;
+  const bool resident = !limits.Configured();
+  return std::make_shared<PrefixSnapshotCache>(
+      std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
+      config.max_snapshots.value_or(resident ? 1 : std::numeric_limits<size_t>::max()),
+      std::filesystem::path{fs::path{limits.directory}.c_str()}, resident);
 }
 
 PrefixSnapshotCache::PrefixSnapshotCache(

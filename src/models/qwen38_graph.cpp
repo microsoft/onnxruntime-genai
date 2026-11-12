@@ -1910,17 +1910,7 @@ std::shared_ptr<const Qwen38PrefixState> Qwen38GraphEngine::CapturePrefix() {
                        ONNXTensorElementDataType element_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
     if (bytes == 0) return;
     if (ranges.empty()) ranges = PlanQwen38PrefixRanges("", {}, 1, bytes, length);
-    size_t packed = 0;
-    for (const auto& range : ranges) {
-      if (range.bytes > std::numeric_limits<size_t>::max() - packed)
-        throw std::overflow_error("Qwen prefix snapshot size overflow.");
-      packed += range.bytes;
-    }
-    if (packed > static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
-        packed > std::numeric_limits<size_t>::max() - snapshot->bytes)
-      throw std::overflow_error("Qwen prefix snapshot size overflow.");
-    snapshot->bytes += packed;
-    snapshot->shapes.push_back({static_cast<int64_t>(packed)});
+    snapshot->AddPackedBuffer(ranges);
     snapshot->buffers.push_back({address, bytes, std::move(ranges), std::move(dense_name), std::move(shape), element_type});
   };
   const auto add_cache = [&](const std::string& name, const DevTensor& tensor, bool index) {
@@ -3599,19 +3589,14 @@ std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Qwen3
       Log("warning", "Native Qwen prefix caching is inactive: %s.", disabled);
     return nullptr;
   }
-  const auto& limits = batching->snapshot_cache;
-  const bool resident = !limits.Configured();
-  return std::make_shared<PrefixSnapshotCache>(
-      std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
-      batching->max_snapshots.value_or(resident ? 1 : std::numeric_limits<size_t>::max()),
-      std::filesystem::path{fs::path{limits.directory}.c_str()}, resident);
+  return CreateNativePrefixSnapshotCache(*batching);
 }
 
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{PreflightQwen38GraphModelConfig(std::move(config))}, memory_budget_{*this} {
   const auto batching = ApplyQwen38DynamicBatchingConfig(*config_);
   prefix_snapshot_cache_ = CreateQwen38PrefixSnapshotCache(batching);
-  memory_budget_.SetSnapshotCache(prefix_snapshot_cache_);
+  memory_budget_.Configure(batching.batching, prefix_snapshot_cache_);
   const bool has_dynamic_batching_kv = batching.has_dynamic_batching_kv;
   const auto& q = config_->model.qwen38_graph;
   const bool separate_prefill_sessions =

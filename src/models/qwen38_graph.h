@@ -668,6 +668,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   double ple_register_seconds{};
 
  private:
+  friend struct Qwen38GraphNativeTestAccess;
   struct PrefixState;
   static constexpr int kMaxBatch = Config::Model::Qwen38Graph::kMaxBatchSize;
   // The int64 control words of one request slot in ctl_ (the `state` of the plane's prep): the slots lie this far apart for

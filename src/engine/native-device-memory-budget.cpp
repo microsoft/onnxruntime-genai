@@ -47,13 +47,15 @@ std::optional<size_t> NativeSnapshotDeviceMemoryLimit(
              : available;
 }
 
-NativeDeviceMemoryBudget::NativeDeviceMemoryBudget(const Model& model) : model_{model} {
-  if (model.config_->engine.dynamic_batching)
-    settings_ = *model.config_->engine.dynamic_batching;
+void NativeDeviceMemoryBudget::Configure(
+    const std::optional<Config::Engine::DynamicBatching>& settings,
+    const std::shared_ptr<PrefixSnapshotCache>& cache) {
+  settings_ = settings.value_or(Config::Engine::DynamicBatching{});
+  snapshots_ = cache;
   if (!settings_.device_memory_budget_bytes && !settings_.gpu_utilization_factor &&
       !settings_.device_memory_headroom_bytes)
     return;
-  if (model.p_device_->GetType() != DeviceType::CUDA)
+  if (model_.p_device_->GetType() != DeviceType::CUDA)
     throw std::runtime_error("Native device memory controls require the CUDA execution provider.");
   if (settings_.device_memory_budget_bytes && !settings_.device_memory_headroom_bytes)
     throw std::runtime_error("device_memory_budget_bytes requires an explicit device_memory_headroom_bytes allowance.");

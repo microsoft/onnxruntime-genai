@@ -2421,6 +2421,47 @@ tombstone.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
+### Enabling prefix caching for another native backend
+
+Native backends share snapshot storage and checkpoint publication, not an execution layout.
+Qwen and Bolt use the following internal integration contract:
+
+1. Resolve configuration once into owned settings, before clearing or normalizing the public
+   `engine.dynamic_batching` section. Keep model-specific capacity and chunk mapping separate.
+   Pass those same settings to `CreateNativePrefixSnapshotCache` and
+   `NativeDeviceMemoryBudget::Configure`. Configure the budget before loading weights/sessions;
+   the base Model captures its before-load free-memory baseline. Refresh after native warmup and
+   before checkpoint admission, including when prefix caching is disabled.
+2. Define safe capture boundaries and the complete resumable state. Include token identity,
+   pending predictions, positions, recurrent state, and any speculative-context features, not
+   just KV tensors. The backend declares its packed ranges; `Entry::AddPackedBuffer` checks sizes
+   and accounts for them, and shared `Entry::Write`/`Read` perform tier-independent transfers.
+3. Use `PrefixCheckpointIndex<Entry>` with entries exposing `Tokens()` and `IsResident()`.
+   `Find` returns a borrowed match without creating a lease or refreshing recency. Acquire a
+   strong checkpoint reference before restoring; touch storage only after successful adoption.
+   Keep identity model-local and preserve the backend's owner scope: Qwen indexes belong to an
+   Engine session, while Bolt's index belongs to the Model and is shared with Generators.
+4. Publish through `TryPublish`: prepare token identity before capture, return an optional entry,
+   and use a non-throwing move for final publication. The shared helper reserves index capacity,
+   handles optional allocation/spill failures, and prunes/counts stale entries even after refusal.
+   The backend records the refusal reason and remains responsible for stream synchronization and
+   discarding partially written storage before a transfer exception escapes. Device/restore
+   failures must still fail execution; optional caching must not corrupt live state.
+5. Restore the backend's full state and perform its required handoff. Separate dense prefill
+   restores dynamically sized dense tensors before rebuilding packed decode storage; unified
+   prefill restores its already-active packed buffers. Do not retain idle packed buffers as a
+   substitute for dense state, and do not infer a new model's layout from tensor names alone.
+
+The shared index/policy tests cover identity, lease/recency behavior, tier/count settings and
+publication failure cleanup once. A new backend should add focused tests for its boundary rules,
+state geometry and restore/handoff, plus native inference parity and cached-token accounting.
+The tiny Qwen CUDA fixture exercises real dense ONNX prefill, RAM/disk checkpoint restoration,
+compression-boundary handoff and resumed decode; its white-box handoff invocation is not a full
+folded-package end-to-end test. Large-model Bolt/Qwen probes remain an additional validation layer.
+
+These are internal helpers, not a new public configuration or automatic support for arbitrary
+models. Paged execution retains its separate block identity and scheduling contracts.
+
 ### Native Bolt prefix caching
 
 The `nemotron_bolt` CUDA backend supports the single-slot Engine as well as the classic Generator.
