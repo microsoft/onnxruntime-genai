@@ -28,13 +28,28 @@ class RecordingSemanticContext {
 
 TEST(TelemetryContextTests, SuppressesUnneededCommonContext) {
   RecordingSemanticContext context;
+  context.SetCommonField("AppInfo.Name", "host-app");
   EXPECT_TRUE(TelemetryInternal::TrySuppressContext(
       [&]() { TelemetryInternal::SuppressUnneededCommonContext(context); }));
 
-  ASSERT_EQ(context.Fields().size(), TelemetryInternal::kSuppressedCommonContextFields.size());
+  ASSERT_EQ(context.Fields().size(), TelemetryInternal::kSuppressedCommonContextFields.size() + 1);
+  EXPECT_EQ(context.Fields().at("AppInfo.Name"), "host-app");
   for (const char* field : TelemetryInternal::kSuppressedCommonContextFields) {
     EXPECT_EQ(context.Fields().at(field), "");
   }
+}
+
+TEST(TelemetryContextTests, SetsApplicationNameFromProcessName) {
+  RecordingSemanticContext context;
+  TelemetryInternal::SetApplicationNameFromProcessName(context, "host-app");
+  EXPECT_EQ(context.Fields().at("AppInfo.Name"), "host-app");
+
+  TelemetryInternal::SetApplicationNameFromProcessName(context, "");
+  EXPECT_EQ(context.Fields().at("AppInfo.Name"), "host-app");
+
+  TelemetryInternal::SetApplicationNameFromProcessName(
+      context, std::string(kMaxTelemetryStringLength + 1, 'x'));
+  EXPECT_EQ(context.Fields().at("AppInfo.Name"), std::string(kMaxTelemetryStringLength, 'x'));
 }
 
 TEST(TelemetryContextTests, SuppressesNetworkContextAfterProcessInfo) {

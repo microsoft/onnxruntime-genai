@@ -77,37 +77,31 @@ struct WebGPUMemory final : DeviceBuffer {
       throw std::runtime_error("WebGPU allocator not initialized");
     }
     assert(p_cpu_);
-
-    // Create source tensor (CPU memory) - treat as 1D uint8 array
-    int64_t shape_val = static_cast<int64_t>(size_in_bytes_);
-    std::span<const int64_t> shape{&shape_val, 1};
-    auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
-    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, p_cpu_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-
-    // Create destination tensor (WebGPU device memory)
-    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-
-    // Use ORT C++ wrapper for CopyTensors (synchronous copy, stream = nullptr)
-    const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
-    const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
-    GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);
+    UploadFromHost(p_cpu_);
   }
 
-  // Uploads straight from `source`, as CUDA does: the base version stages through p_cpu_, which then
-  // stays allocated as long as the buffer (a whole host copy of a shared initializer, for example).
+  // Uploads straight from `source`, so no host mirror is allocated or retained (unlike the base implementation).
   void CopyFromCpu(const void* source, size_t size_in_bytes) override {
     if (!ort_allocator_) {
       throw std::runtime_error("WebGPU allocator not initialized");
     }
     assert(size_in_bytes == size_in_bytes_);
+    UploadFromHost(source);
+  }
 
-    int64_t shape_val = static_cast<int64_t>(size_in_bytes);
+  // CopyTensors without a stream is synchronous, so `source` may be released once this returns.
+  void UploadFromHost(const void* source) {
+    // Create source tensor (CPU memory) - treat as 1D uint8 array
+    int64_t shape_val = static_cast<int64_t>(size_in_bytes_);
     std::span<const int64_t> shape{&shape_val, 1};
     auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
-    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, const_cast<void*>(source), size_in_bytes, shape,
+    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, const_cast<void*>(source), size_in_bytes_, shape,
                                              ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes, shape,
-                                             ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+    // Create destination tensor (WebGPU device memory)
+    auto dst_tensor = OrtValue::CreateTensor(*ort_memory_info_, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+    // Use ORT C++ wrapper for CopyTensors (synchronous copy, stream = nullptr)
     const std::vector<const OrtValue*> src_ptrs = {src_tensor.get()};
     const std::vector<OrtValue*> dst_ptrs = {dst_tensor.get()};
     GetOrtEnv().CopyTensors(src_ptrs, dst_ptrs, nullptr);

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 #include "image_processor.h"
@@ -12,6 +13,13 @@
 #include "models/model.h"
 
 namespace Generators {
+
+struct ImagePositionLayout {
+  // Relative to the next text coordinate; extent controls text after the image.
+  std::array<int64_t, 3> origin{};
+  int64_t width{};
+  int64_t extent{};
+};
 
 inline constexpr size_t kMaxEncodedImageBytes = 512 * 1024 * 1024;
 
@@ -89,6 +97,12 @@ struct Processor {
 
   virtual void ConfigureTokenizer(Tokenizer&) const {}
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;
+  virtual std::vector<int32_t> ExpandImagePrompt(const Tokenizer&, const std::string&, std::span<const int64_t>) const {
+    throw std::runtime_error("This processor does not support packed image prompts.");
+  }
+  virtual ImagePositionLayout GetImagePositionLayout(const std::array<int64_t, 3>&) const {
+    throw std::runtime_error("This processor does not support packed image positions.");
+  }
 
  protected:
   ThreadPool* thread_pool_{};

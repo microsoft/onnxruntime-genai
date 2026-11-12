@@ -50,19 +50,19 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
     if (!cpu_embedding_ || !config_->engine.dynamic_batching || !config_->model.vision.pipeline.empty() ||
         !config_->model.speech.filename.empty()) {
       throw std::runtime_error(
-          "Packed vision requires a Qwen dynamic-batching decoder with pure CPU embeddings.");
+          "Packed vision requires a dynamic-batching decoder with pure CPU embeddings.");
     }
     const auto& inputs = config_->model.decoder.inputs;
     if (!session_info_.HasInput(inputs.position_ids) ||
         session_info_.GetInputShape(inputs.position_ids) != std::vector<int64_t>{3, -1} ||
         session_info_.GetInputDataType(inputs.position_ids) != Ort::TypeToTensorType<int64_t>) {
-      throw std::runtime_error("Packed Qwen vision requires three-axis int64 decoder position IDs.");
+      throw std::runtime_error("Packed vision requires three-axis int64 decoder position IDs.");
     }
-    if (config_->model.type == "qwen4_exp" &&
+    if (!inputs.rotary_position_ids.empty() &&
         (!session_info_.HasInput(inputs.rotary_position_ids) ||
          session_info_.GetInputShape(inputs.rotary_position_ids) != std::vector<int64_t>{3, -1, -1} ||
          session_info_.GetInputDataType(inputs.rotary_position_ids) != Ort::TypeToTensorType<int64_t>)) {
-      throw std::runtime_error("Packed Qwen4-Exp vision requires three-axis int64 sparse-indexer rotary history.");
+      throw std::runtime_error("Packed vision rotary history must use three-axis int64 positions.");
     }
     vision_ = std::make_unique<PackedVision>();
     vision_->session_options = OrtSessionOptions::Create();

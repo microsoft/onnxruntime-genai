@@ -95,17 +95,13 @@ struct ScopedWeights {
   std::filesystem::path dir;
 };
 
-TEST(SharedInitializerTests, SessionsViewOneDeviceCopyOfAFileRangeWithTheirOwnShapes) {
-  if (!HasWebGpu()) {
-    GTEST_SKIP() << "Needs a device EP; WebGPU is not available.";
-  }
-  ScopedWeights weights;
-  SharedInitializerTestModel model{ConfigFor("WebGPU")};
-  ASSERT_EQ(model.p_device_->GetType(), Generators::DeviceType::WEBGPU);
+// Two sessions read one range as [2, 3] and [6]: one copy on the model's device, a view per session, and both graphs
+// see the file's bytes. A different range gets its own copy.
+void ExpectOneCopyViewedWithEachShape(SharedInitializerTestModel& model, const ScopedWeights& weights) {
   auto table_options = OptionsFor(model);
   auto head_options = OptionsFor(model);
-  model.AddSharedInitializers({weights.Range("table", {2, 3})}, *table_options, model.p_device_);
-  model.AddSharedInitializers({weights.Range("head", {6})}, *head_options, model.p_device_);
+  model.AddSharedInitializers({weights.Range("table", {2, 3})}, *table_options, *model.p_device_);
+  model.AddSharedInitializers({weights.Range("head", {6})}, *head_options, *model.p_device_);
 
   // One buffer (the entry of each call) and a view per session.
   ASSERT_EQ(model.shared_initializer_entries_.size(), 4u);
@@ -116,22 +112,28 @@ TEST(SharedInitializerTests, SessionsViewOneDeviceCopyOfAFileRangeWithTheirOwnSh
   EXPECT_EQ(RunGraph(model, "rows.onnx", *table_options, {2, 3}), expected);
   EXPECT_EQ(RunGraph(model, "flat.onnx", *head_options, {6}), expected);
 
-  // A different range gets its own buffer.
   auto other_options = OptionsFor(model);
-  model.AddSharedInitializers({weights.Range("head", {6}, "4")}, *other_options, model.p_device_);
+  model.AddSharedInitializers({weights.Range("head", {6}, "4")}, *other_options, *model.p_device_);
   ASSERT_EQ(model.shared_initializer_entries_.size(), 6u);
   EXPECT_NE(model.shared_initializer_entries_[4], model.shared_initializer_entries_[0]);
   EXPECT_EQ(RunGraph(model, "flat.onnx", *other_options, {6}), (std::vector<float>{1, 2, 3, 4, 5, 6}));
 }
 
-TEST(SharedInitializerTests, CpuSessionsReadTheirOwnGraphData) {
+TEST(SharedInitializerTests, CpuSessionsViewOneCopyOfAFileRangeWithTheirOwnShapes) {
   ScopedWeights weights;
   SharedInitializerTestModel model{ConfigFor(nullptr)};
   ASSERT_EQ(model.p_device_->GetType(), Generators::DeviceType::CPU);
-  auto options = OptionsFor(model);
-  model.AddSharedInitializers({weights.Range("table", {2, 3})}, *options, model.p_device_);
-  EXPECT_TRUE(model.shared_initializer_entries_.empty());
-  EXPECT_EQ(RunGraph(model, "rows.onnx", *options, {2, 3}), std::vector<float>(6, 0.0f));
+  ExpectOneCopyViewedWithEachShape(model, weights);
+}
+
+TEST(SharedInitializerTests, WebGpuSessionsViewOneCopyOfAFileRangeWithTheirOwnShapes) {
+  if (!HasWebGpu()) {
+    GTEST_SKIP() << "WebGPU is not available.";
+  }
+  ScopedWeights weights;
+  SharedInitializerTestModel model{ConfigFor("WebGPU")};
+  ASSERT_EQ(model.p_device_->GetType(), Generators::DeviceType::WEBGPU);
+  ExpectOneCopyViewedWithEachShape(model, weights);
 }
 
 TEST(SharedInitializerTests, EmbeddingAcceptsSharedInitializers) {

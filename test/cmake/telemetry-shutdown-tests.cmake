@@ -5,6 +5,14 @@ if(NOT ENABLE_TELEMETRY OR CMAKE_CROSSCOMPILING OR ANDROID OR IOS)
   return()
 endif()
 
+foreach(mode missing preserved sqlite-preserved zlib-preserved sqlite-alternate sqlite-both)
+  add_test(NAME TelemetryAppleDependencies-${mode}
+    COMMAND ${CMAKE_COMMAND}
+      -S "${CMAKE_CURRENT_LIST_DIR}/telemetry-dependencies"
+      -B "${CMAKE_CURRENT_BINARY_DIR}/telemetry-apple-dependencies-${mode}"
+      "-DGENAI_SOURCE_DIR=${CMAKE_SOURCE_DIR}" "-DMODE=${mode}")
+endforeach()
+
 set(TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR "${cpp_client_telemetry_SOURCE_DIR}" CACHE PATH
   "Matching 1DS source tree for deterministic shutdown regressions (also supports static CONFIG packages)")
 if(NOT TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR)
@@ -19,10 +27,13 @@ endif()
 
 set(shutdown_sdk_dir "${CMAKE_CURRENT_BINARY_DIR}/telemetry_shutdown_sdk")
 file(MAKE_DIRECTORY "${shutdown_sdk_dir}")
-foreach(source callbacks/DebugSource.cpp pal/WorkerThread.cpp api/Logger.cpp pal/PAL.cpp http/HttpRequestEncoder.cpp)
+foreach(source callbacks/DebugSource.cpp pal/WorkerThread.cpp api/Logger.cpp pal/PAL.cpp
+    api/AuthTokensController.cpp http/HttpRequestEncoder.cpp)
   set(source_path "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/${source}")
   if(source STREQUAL "pal/PAL.cpp" AND ORTGENAI_TELEMETRY_PAL_SOURCE)
     set(source_path "${ORTGENAI_TELEMETRY_PAL_SOURCE}")
+  elseif(source STREQUAL "api/AuthTokensController.cpp" AND ORTGENAI_TELEMETRY_AUTH_SOURCE)
+    set(source_path "${ORTGENAI_TELEMETRY_AUTH_SOURCE}")
   endif()
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${source_path}")
   file(READ "${source_path}" instrumented)
@@ -65,8 +76,18 @@ foreach(source callbacks/DebugSource.cpp pal/WorkerThread.cpp api/Logger.cpp pal
     string(REPLACE "${log_site}"
       "${log_site}\n        TelemetryTestCollectorEvent(properties.GetName().c_str());"
       instrumented "${instrumented}")
-    string(PREPEND instrumented "extern \"C\" void TelemetryTestCollectorEvent(const char*);\n")
+    set(decorated_site "DispatchEvent(DebugEvent(DebugEventType::EVT_LOG_EVENT, size_t(latency), size_t(0), static_cast<void*>(&record), sizeof(record)));")
+    string(FIND "${instrumented}" "${decorated_site}" decorated_position)
+    if(decorated_position EQUAL -1)
+      message(FATAL_ERROR "Update telemetry client-identity decoration interception")
+    endif()
+    string(REPLACE "${decorated_site}"
+      "TelemetryTestDecoratedEvent(properties.GetName().c_str(), record);\n        ${decorated_site}"
+      instrumented "${instrumented}")
+    string(PREPEND instrumented
+      "namespace CsProtocol { struct Record; }\nextern \"C\" void TelemetryTestCollectorEvent(const char*);\nvoid TelemetryTestDecoratedEvent(const char*, const CsProtocol::Record&);\n")
   elseif(source STREQUAL "pal/PAL.cpp")
+    # Keep destructor observers for the original/immortal-string negative controls.
     string(REPLACE "using SdkVersion = std::string;" "using SdkVersion = TelemetryTestSdkVersion;"
       instrumented "${instrumented}")
     string(REPLACE "static const std::string sdkVersion(" "static const TelemetryTestSdkVersion sdkVersion("
@@ -74,6 +95,9 @@ foreach(source callbacks/DebugSource.cpp pal/WorkerThread.cpp api/Logger.cpp pal
     string(REPLACE "return *sdkVersion;" "TelemetryTestVersionAccess();\n        return *sdkVersion;"
       instrumented "${instrumented}")
     string(REPLACE "return sdkVersion;" "TelemetryTestVersionAccess();\n        return sdkVersion;"
+      instrumented "${instrumented}")
+    set(version_entry "const char* PlatformAbstractionLayer::getSdkVersion() const\n    {")
+    string(REPLACE "${version_entry}" "${version_entry}\n        TelemetryTestVersionAccess();"
       instrumented "${instrumented}")
     string(REGEX MATCHALL "TelemetryTestVersionAccess\\(\\)" sites "${instrumented}")
     list(LENGTH sites count)
@@ -87,6 +111,29 @@ extern "C" void TelemetryTestVersionAccess();
 struct TelemetryTestSdkVersion : std::string {
     using std::string::string;
     ~TelemetryTestSdkVersion() { TelemetryTestVersionDestroyed(); }
+};
+]=])
+  elseif(source STREQUAL "api/AuthTokensController.cpp")
+    # A real destructor observer makes the libc++ failure deterministic on every host.
+    string(REPLACE "static std::mutex mutex;" "static TelemetryTestAuthMutex mutex;"
+      instrumented "${instrumented}")
+    string(REPLACE "using AuthMutex = std::mutex;" "using AuthMutex = TelemetryTestAuthMutex;"
+      instrumented "${instrumented}")
+    string(REPLACE "return mutex;" "TelemetryTestAuthMutexAccess();\n        return mutex;"
+      instrumented "${instrumented}")
+    string(REPLACE "return *mutex;" "TelemetryTestAuthMutexAccess();\n        return *mutex;"
+      instrumented "${instrumented}")
+    string(REGEX MATCHALL "TelemetryTestAuthMutexAccess\\(\\)" sites "${instrumented}")
+    list(LENGTH sites count)
+    if(NOT count EQUAL 1)
+      message(FATAL_ERROR "Update shutdown regression auth-mutex lifetime instrumentation")
+    endif()
+    string(PREPEND instrumented [=[
+#include <mutex>
+extern "C" void TelemetryTestAuthMutexDestroyed();
+extern "C" void TelemetryTestAuthMutexAccess();
+struct TelemetryTestAuthMutex : std::mutex {
+    ~TelemetryTestAuthMutex() { TelemetryTestAuthMutexDestroyed(); }
 };
 ]=])
   else()
@@ -105,7 +152,8 @@ endforeach()
 
 add_library(telemetry_shutdown_sdk OBJECT
   "${shutdown_sdk_dir}/DebugSource.cpp" "${shutdown_sdk_dir}/WorkerThread.cpp" "${shutdown_sdk_dir}/Logger.cpp"
-  "${shutdown_sdk_dir}/PAL.cpp" "${shutdown_sdk_dir}/HttpRequestEncoder.cpp")
+  "${shutdown_sdk_dir}/PAL.cpp" "${shutdown_sdk_dir}/AuthTokensController.cpp"
+  "${shutdown_sdk_dir}/HttpRequestEncoder.cpp")
 target_link_libraries(telemetry_shutdown_sdk PRIVATE ${shutdown_sdk_target})
 target_include_directories(telemetry_shutdown_sdk PRIVATE
   "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib" "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/api"
@@ -117,6 +165,9 @@ if(TARGET mat)
   target_compile_options(telemetry_shutdown_sdk PRIVATE $<TARGET_PROPERTY:mat,COMPILE_OPTIONS>)
   target_include_directories(telemetry_shutdown_sdk PRIVATE $<TARGET_PROPERTY:mat,INCLUDE_DIRECTORIES>)
 endif()
+if(ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR)
+  target_include_directories(telemetry_shutdown_sdk BEFORE PRIVATE "${ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR}")
+endif()
 add_executable(telemetry_shutdown_tests
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry-shutdown-tests.cpp"
   $<TARGET_OBJECTS:telemetry_shutdown_sdk>)
@@ -125,11 +176,56 @@ target_include_directories(telemetry_shutdown_tests PRIVATE
   "${CMAKE_SOURCE_DIR}/src"
   "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib" "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/include"
   "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/include/mat")
+if(ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR)
+  target_include_directories(telemetry_shutdown_tests BEFORE PRIVATE "${ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR}")
+endif()
 add_dependencies(telemetry_shutdown_tests onnxruntime-genai)
 set_target_properties(telemetry_shutdown_tests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>" FOLDER "Tests")
 
-foreach(mode retained threaded recreated explicit prime-only disabled ci-disabled prime-failed prime-allocation-failed upload-at-exit upload-after-reinit)
+# Exercise real DLL/DSO unload so a heap-backed "immortal" string cannot hide behind live roots.
+if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_library(telemetry_version_reload_fixture SHARED
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry-version-reload-fixture.cpp")
+  target_link_libraries(telemetry_version_reload_fixture PRIVATE ${shutdown_sdk_target})
+  target_include_directories(telemetry_version_reload_fixture PRIVATE
+    "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib"
+    "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/include"
+    "${TELEMETRY_SHUTDOWN_SDK_SOURCE_DIR}/lib/include/mat")
+  if(TARGET mat)
+    target_compile_definitions(telemetry_version_reload_fixture PRIVATE $<TARGET_PROPERTY:mat,COMPILE_DEFINITIONS>)
+  endif()
+  if(ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR)
+    target_include_directories(telemetry_version_reload_fixture BEFORE PRIVATE "${ORTGENAI_TELEMETRY_SDK_INCLUDE_DIR}")
+  endif()
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(TARGET mat)
+      # GNU-unique symbols would mark the fixture NODELETE and mask unload leaks.
+      target_compile_options(mat PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-fno-gnu-unique>)
+    endif()
+    target_link_options(telemetry_version_reload_fixture PRIVATE
+      "LINKER:--exclude-libs,ALL" "LINKER:-Bsymbolic")
+  endif()
+  add_executable(telemetry_version_reload_tests
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry/telemetry-version-reload-tests.cpp")
+  target_compile_features(telemetry_version_reload_fixture PRIVATE cxx_std_17)
+  target_compile_features(telemetry_version_reload_tests PRIVATE cxx_std_17)
+  target_link_libraries(telemetry_version_reload_tests PRIVATE ${CMAKE_DL_LIBS})
+  add_dependencies(telemetry_version_reload_tests telemetry_version_reload_fixture)
+  set(reload_version_args)
+  if(ORTGENAI_TELEMETRY_PAL_SOURCE)
+    list(APPEND reload_version_args "3.10.310.1")
+  endif()
+  add_test(NAME TelemetryVersionReload
+    COMMAND telemetry_version_reload_tests $<TARGET_FILE:telemetry_version_reload_fixture> ${reload_version_args})
+  set_tests_properties(TelemetryVersionReload PROPERTIES TIMEOUT 30)
+endif()
+
+set(shutdown_modes retained threaded recreated explicit prime-only disabled ci-disabled prime-failed prime-allocation-failed upload-at-exit upload-after-reinit)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  list(APPEND shutdown_modes upload-overridden-argv0)
+endif()
+foreach(mode IN LISTS shutdown_modes)
   set(home "${CMAKE_CURRENT_BINARY_DIR}/telemetry-shutdown-${mode}")
   file(MAKE_DIRECTORY "${home}")
   set(disabled 0)

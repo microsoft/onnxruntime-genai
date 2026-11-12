@@ -21,12 +21,37 @@
 // its size: a smaller buffer is an out-of-bounds read of the device allocation.
 #define QWEN38_PLANE_STATE_MIN_WORDS 14
 
+// The encoding of the shard bytes of a PLE table, kept in bits 8..15 of Qwen38PleParams::pad_ (see below).
+typedef enum Qwen38PlanePleFormat {
+  // FP8 E4M3 codes times Qwen38PleParams::scale when it is positive, int8 values times -scale when it is negative
+  // (QWEN38_PLANE_CAP_INT8_PLE). A head of a row is head_dim bytes. Every table that predates the field has this format.
+  QWEN38_PLANE_PLE_FORMAT_LEGACY = 0,
+  // GGUF IQ4_NL blocks (QWEN38_PLANE_CAP_IQ4_NL_PLE): 32 values in 18 bytes, a little-endian fp16 scale d and 16 bytes whose
+  // low nibbles index values 0..15 and whose high nibbles index values 16..31 of the block in the IQ4_NL table; a value is
+  // d * table[index]. A head of a row is head_dim / 32 blocks, and the scale field is ignored.
+  QWEN38_PLANE_PLE_FORMAT_IQ4_NL = 1,
+  // GGUF Q8_0 blocks (QWEN38_PLANE_CAP_Q8_0_PLE): 32 values in 34 bytes, a little-endian fp16 scale d and 32 int8 values q; a
+  // value is d * q. A head of a row is head_dim / 32 blocks, and the scale field is ignored.
+  QWEN38_PLANE_PLE_FORMAT_Q8_0 = 2,
+} Qwen38PlanePleFormat;
+
+// The bits of Qwen38PleParams::pad_, which is not padding: QWEN38_PLANE_PLE_STAGED marks a "staged" table, one the GPU cannot
+// address, whose rows the host gathers (see prep below), bits 8..15 hold the Qwen38PlanePleFormat of the shards, and the other
+// bits are zero. The format of every table that predates the field is the legacy 0, so a word of 0 or 1 keeps its meaning.
+// The loader writes another format only for a library that reports its capability: a library without it would take every
+// word but 1 for a resident table and decode the blocks as FP8 rows of head_dim bytes.
+#define QWEN38_PLANE_PLE_STAGED 0x1
+#define QWEN38_PLANE_PLE_FORMAT_SHIFT 8
+#define QWEN38_PLANE_PLE_FORMAT_MASK 0xFF
+#define QWEN38_PLANE_PLE_FORMAT_OF(pad) (((pad) >> QWEN38_PLANE_PLE_FORMAT_SHIFT) & QWEN38_PLANE_PLE_FORMAT_MASK)
+#define QWEN38_PLANE_PLE_PAD_OF_FORMAT(format) ((int)(format) << QWEN38_PLANE_PLE_FORMAT_SHIFT)
+
 // Host-registered PLE (per-layer embedding) table description, copied to the device once. The library trusts the loader
 // for its invariants and does not validate them (ParseQwen38PleDescription enforces them): 1 <= n_heads <= 32,
 // n_heads * head_dim <= 3072 (one 1024-thread block gathers a row, and a staged row must fit an 8192-byte ring slot),
 // 0 <= heads_per_ngram <= n_heads, vocab[h] > 0 with the rows of every head inside the shards, 1 <= n_shards <= 256 with
-// ascending shard_end, and a non-null shard_ptr for every shard.
-// pad_ is not padding: 1 marks a "staged" table, one the GPU cannot address, whose rows the host gathers (see below).
+// ascending shard_end, a non-null shard_ptr for every shard, a format of pad_ that the library reports the capability of,
+// and a head_dim that is a multiple of 32 for the GGUF formats.
 typedef struct Qwen38PleParams {
   int n_heads, head_dim, heads_per_ngram, n_shards;
   long long mult[4];
@@ -34,10 +59,11 @@ typedef struct Qwen38PleParams {
   long long offset[32];
   long long shard_end[256];
   const unsigned char* shard_ptr[256];
-  // Dequantisation scale of the shard bytes, which are FP8 E4M3 when it is positive. A negative value marks INT8 shards
-  // whose scale is |scale| (QWEN38_PLANE_CAP_INT8_PLE); a library without that capability would decode them as FP8.
+  // Dequantisation scale of the shard bytes of the legacy format, which are FP8 E4M3 when it is positive. A negative value
+  // marks INT8 shards whose scale is |scale| (QWEN38_PLANE_CAP_INT8_PLE); a library without that capability would decode them
+  // as FP8. The GGUF formats keep a scale in every block and ignore this one (the loader sets it to 1).
   float scale;
-  int pad_;
+  int pad_;  // QWEN38_PLANE_PLE_STAGED and the Qwen38PlanePleFormat (see above)
   long long eos;
   long long capacity;
 } Qwen38PleParams;
@@ -150,8 +176,9 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // X(return type, name, parameter list). The exported symbol is "qwen38_plane_" + name. `stream` is a cudaStream_t.
 // CUDA runtime helpers return the cudaError_t as int (0 = success).
 //
-// prep and ple_rows return 0 on success. A PLE table that is not GPU-addressable (Qwen38PleParams::pad_ == 1) is "staged":
-// the token and context words are read back to the host and the FP8 rows are gathered there (a gather of 32 or more
+// prep and ple_rows return 0 on success. A PLE table that is not GPU-addressable (QWEN38_PLANE_PLE_STAGED in
+// Qwen38PleParams::pad_) is "staged": the token and context words are read back to the host and the shard rows are gathered
+// there, in the format of the table, for the kernel to decode (a gather of 32 or more
 // rows by worker threads that the module starts when it first needs them). Every step of that staging (pinned
 // allocation, device alias, creation of the completion event, copy, synchronisation, starting the worker threads, which
 // fails with cudaErrorMemoryAllocation) is checked; when one fails, or when the table was never registered with
@@ -170,7 +197,7 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // table on several GPUs is not supported. The binding ends when the staged state of the table is dropped (by
 // unset_ple_host_params, by release_ple_workspace or by the detach of the last loader), after which registering the table
 // again with set_ple_host_params lets it bind to another GPU; registering a table that is still registered keeps the binding.
-// A resident table (pad_ != 1) is not bound to a GPU.
+// A resident table (QWEN38_PLANE_PLE_STAGED clear) is not bound to a GPU.
 //
 // A staged table is not usable while the stream is being captured into a CUDA graph: the host gathers its rows when the call
 // is made, which a replay would not repeat, and the read backs and waits of the call are not allowed on a capturing stream.
@@ -259,7 +286,7 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // the library reports every listed bit with no further change), implement it, call RequireCapabilities where the loader
 // selects it, and cover a library with and a library without the bit in the qwen38_plane tests.
 #define QWEN38_PLANE_CAP_INT8_EMBEDDING 0x1ull  // embed_gather: per-row INT8 embedding tables (any row count)
-#define QWEN38_PLANE_CAP_INT8_PLE 0x2ull        // a negative Qwen38PleParams::scale marks INT8 PLE shards
+#define QWEN38_PLANE_CAP_INT8_PLE 0x2ull        // a negative Qwen38PleParams::scale marks INT8 PLE shards (legacy format)
 // prep: a pos_add in [-8, -2] prepares the -pos_add rows of one folded verify step in a single call (see the notes on prep
 // above). A library without it reads that pos_add as an offset of one row and leaves the other rows of the step stale.
 #define QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH 0x4ull
@@ -276,6 +303,11 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
 // the other offset for 1 to 7 rows and several slots, so the n-gram context a slot commits would be wrong without any error
 // (8 rows give both strides the same value). The host requires it with QWEN38_PLANE_CAP_BATCHED_PREP.
 #define QWEN38_PLANE_CAP_CTX_SLOT_STRIDE 0x20ull
+// prep, prep_batched and ple_rows: PLE shards of the GGUF block format that Qwen38PleParams::pad_ names (Qwen38PlanePleFormat).
+// A library without the bit would take a staged table for a resident one and decode the blocks as FP8 rows of head_dim bytes,
+// so the loader requires the bit of a table whose description names the format in its `format` line, before it maps a shard.
+#define QWEN38_PLANE_CAP_IQ4_NL_PLE 0x40ull  // QWEN38_PLANE_PLE_FORMAT_IQ4_NL: 18 bytes per 32 values
+#define QWEN38_PLANE_CAP_Q8_0_PLE 0x80ull    // QWEN38_PLANE_PLE_FORMAT_Q8_0: 34 bytes per 32 values
 
 // X(bit, name), in bit order.
 #define QWEN38_PLANE_CAPABILITIES(X)                                         \
@@ -284,7 +316,9 @@ typedef int (*Qwen38PlaneReplayStateUpdatesFn)(void* stream, const void* descs, 
   X(QWEN38_PLANE_CAP_NEGATIVE_POS_ADD_BATCH, "negative_pos_add_batch")       \
   X(QWEN38_PLANE_CAP_BATCHED_PREP, "batched_prep")                           \
   X(QWEN38_PLANE_CAP_CONV_HISTORY_FIRST_REPLAY, "conv_history_first_replay") \
-  X(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE, "ctx_slot_stride")
+  X(QWEN38_PLANE_CAP_CTX_SLOT_STRIDE, "ctx_slot_stride")                     \
+  X(QWEN38_PLANE_CAP_IQ4_NL_PLE, "iq4_nl_ple")                               \
+  X(QWEN38_PLANE_CAP_Q8_0_PLE, "q8_0_ple")
 
 #define QWEN38_PLANE_CAPABILITY_BIT_(bit, name) | (bit)
 #define QWEN38_PLANE_ALL_CAPABILITIES (0ull QWEN38_PLANE_CAPABILITIES(QWEN38_PLANE_CAPABILITY_BIT_))
