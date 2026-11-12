@@ -78,6 +78,26 @@ TEST(Qwen38PrefixSnapshotTest, PolicyUsesRealCountEvictionAndTierBudgets) {
   EXPECT_FALSE(cache->Allocate(ByteEntry(16), GetDeviceInterface(DeviceType::CPU), "qwen38"));
 }
 
+TEST(Qwen38PrefixSnapshotTest, SingleSlotOptInResolvesPrefillChunkBeforeDiscardingBatchingSettings) {
+  for (int explicit_chunk : {0, 8192}) {
+    for (size_t scheduled_tokens : {size_t{2048}, size_t{8192}}) {
+      Config config;
+      config.model.qwen38_graph.prefill.enabled = true;
+      config.model.qwen38_graph.prefill.dense.filename = "dense.onnx";
+      EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph), 8192u);
+      OverlayConfig(config, R"({"engine":{"dynamic_batching":{"prefix_caching":true,"max_batch_size":1}}})");
+      config.model.qwen38_graph.prefill.chunk = explicit_chunk;
+      config.engine.dynamic_batching->max_scheduled_tokens = scheduled_tokens;
+      auto cache = CreateQwen38PrefixSnapshotCache(config);
+      ASSERT_NE(cache, nullptr);
+      EXPECT_FALSE(ApplyQwen38DynamicBatchingConfig(config));
+      EXPECT_FALSE(config.engine.dynamic_batching);
+      EXPECT_EQ(EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph),
+                explicit_chunk ? static_cast<size_t>(explicit_chunk) : scheduled_tokens);
+    }
+  }
+}
+
 TEST(Qwen38PrefixSnapshotTest, DflashEligibilityAndCapturePlanningKeepOnlyTheLastUsefulCheckpoint) {
   using Chunk = Qwen38DflashPromptFeatures::Chunk;
   EXPECT_TRUE(Qwen38PrefixCheckpointEligible(false, std::nullopt, 0));

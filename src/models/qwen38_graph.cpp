@@ -798,6 +798,14 @@ void Qwen38GraphEngine::Initialize(bool is_session_recreation) {
     const size_t dflash_context_window =
         dflash_config.sliding_window > 0 ? static_cast<size_t>(dflash_config.sliding_window + dflash_config.block_size) : 0;
     for (auto& features : slot_dflash_prompt_) features = Qwen38DflashPromptFeatures{dflash_context_window};
+    if (!is_session_recreation && PrefixCachingEnabled() && PrefillChunkTokens() < dflash_->ContextWindow() &&
+        g_log.enabled && g_log.warning) {
+      Log("warning",
+          "Native Qwen DFlash prefix reuse is limited to the first prefill chunk: "
+          "effective prefill chunk (%zu) is smaller than the drafter context window (%zu). "
+          "Set model.qwen38_graph.prefill.chunk to at least sliding_window + block_size, subject to the backend chunk cap.",
+          PrefillChunkTokens(), dflash_->ContextWindow());
+    }
   }
   Reset();
   if (dflash_) {
@@ -1918,9 +1926,13 @@ std::shared_ptr<const Qwen38PrefixState> Qwen38GraphEngine::CapturePrefix() {
   const auto add_cache = [&](const std::string& name, const DevTensor& tensor, bool index) {
     add(tensor.ptr, tensor.Bytes(), PlanQwen38PrefixRanges(name, tensor.shape, Ort::SizeOf(tensor.type), tensor.Bytes(), length, index));
   };
-  for (const auto& [name, tensor] : store_) add_cache(name, *tensor, false);
-  for (const auto& [name, tensor] : shared_) add_cache(name, *tensor, true);
-  for (const auto& bank : banks_) add(bank.arena.data(), bank.arena.size());
+  const bool dense_handoff = fast_ && !fast_->unified;
+  // Separate dense prefill rebuilds decode storage from fast_->states in FastHandoff().
+  if (!dense_handoff) {
+    for (const auto& [name, tensor] : store_) add_cache(name, *tensor, false);
+    for (const auto& [name, tensor] : shared_) add_cache(name, *tensor, true);
+    for (const auto& bank : banks_) add(bank.arena.data(), bank.arena.size());
+  }
   add(ctx_commit_.data(), ctx_commit_.size());
   add(d_last_hidden_.data(), d_last_hidden_.size());
   if (keep_hidden_ && !dflash_)
@@ -1929,7 +1941,7 @@ std::shared_ptr<const Qwen38PrefixState> Qwen38GraphEngine::CapturePrefix() {
   if (saved)
     add(d_dflash_prompt_.data(), d_dflash_prompt_.size(),
         PlanQwen38PrefixRanges("d_dflash_prompt", {kDflashWidth}, 2, d_dflash_prompt_.size(), saved->rows));
-  if (fast_ && !fast_->unified) {
+  if (dense_handoff) {
     for (const auto& [name, value] : fast_->states) {
       const auto info = value->GetTensorTypeAndShapeInfo();
       const size_t bytes = info->GetElementCount() * Ort::SizeOf(info->GetElementType());
@@ -3598,6 +3610,7 @@ std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Confi
 
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{PreflightQwen38GraphModelConfig(std::move(config))} {
+  // Must precede ApplyQwen38DynamicBatchingConfig, which resets engine.dynamic_batching for a single slot.
   prefix_snapshot_cache_ = CreateQwen38PrefixSnapshotCache(*config_);
   const bool has_dynamic_batching_kv = ApplyQwen38DynamicBatchingConfig(*config_);
   const auto& q = config_->model.qwen38_graph;

@@ -70,8 +70,10 @@ struct BoltSearch : GreedySearch_Cpu {
 }  // namespace
 
 void NemotronBoltPrefixCache::Prune() {
-  entries_.erase(std::remove_if(entries_.begin(), entries_.end(), [](const auto& entry) {
-                   return entry->state != PrefixSnapshotCache::State::Resident;
+  entries_.erase(std::remove_if(entries_.begin(), entries_.end(), [this](const auto& entry) {
+                   if (entry->state == PrefixSnapshotCache::State::Resident) return false;
+                   ++metrics_.evictions;
+                   return true;
                  }),
                  entries_.end());
 }
@@ -142,6 +144,7 @@ void NemotronBoltPrefixCache::Capture(std::span<const int32_t> tokens, std::span
     entries_.reserve(entries_.size() + 1);
     if (!storage_->Allocate(entry, device, "nemotron_bolt")) {
       ++metrics_.retention_refusals;
+      Prune();
       return;
     }
     try {
@@ -154,7 +157,6 @@ void NemotronBoltPrefixCache::Capture(std::span<const int32_t> tokens, std::span
       storage_->Discard(*entry);
       throw;
     }
-    Prune();
     entries_.push_back(std::move(entry));
     metrics_.registered_blocks += tokens.size() / kBoltVerifyRows;
   } catch (const std::bad_alloc&) {
@@ -164,6 +166,7 @@ void NemotronBoltPrefixCache::Capture(std::span<const int32_t> tokens, std::span
     ++metrics_.publication_refusals;
     // Unavailable spill storage must not fail generation.
   }
+  Prune();
 }
 
 void NemotronBoltPrefixCache::Restore(const Entry& entry, std::span<Tensor* const> caches,

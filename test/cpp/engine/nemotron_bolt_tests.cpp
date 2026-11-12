@@ -124,6 +124,26 @@ TEST_F(BoltPrefixCacheTest, RefusedStorageAndUnalignedPublicationDoNotCreateHits
   }
 }
 
+TEST_F(BoltPrefixCacheTest, RefusedPublicationPrunesAndCountsEvictionsImmediately) {
+  auto storage = std::make_shared<PrefixSnapshotCache>(std::array<size_t, 3>{0, 400, 0}, 2);
+  NemotronBoltPrefixCache cache{storage};
+  const std::vector<int32_t> prompt(8, 3);
+  cache.Capture(prompt, caches_, 7, 11, *aux_, 0, 8);
+  std::weak_ptr<NemotronBoltPrefixCache::Entry> evicted = cache.Find(prompt);
+  ASSERT_FALSE(evicted.expired());
+
+  auto other = std::make_shared<PrefixSnapshotCache::Entry>();
+  other->type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+  other->shapes = {{128}};
+  ASSERT_TRUE(storage->Allocate(other, aux_->p_device_, "other"));
+  auto lease = other;
+  cache.Capture(std::vector<int32_t>(16, 4), caches_, 7, 12, *aux_, 0, 8);
+  EXPECT_EQ(cache.Metrics().retention_refusals, 1u);
+  EXPECT_EQ(cache.Metrics().evictions, 1u);
+  EXPECT_TRUE(evicted.expired());
+  EXPECT_EQ(cache.Find(prompt), nullptr);
+}
+
 TEST_F(BoltPrefixCacheTest, HostStorageTiersPreservePackedStateAndEvictedRestoreFails) {
   for (size_t tier = 1; tier < 3; ++tier) {
     std::array<size_t, 3> limits{};

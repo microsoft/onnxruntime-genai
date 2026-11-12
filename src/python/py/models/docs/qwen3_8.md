@@ -54,20 +54,33 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
 
 - Single-slot native prefix reuse is opt-in: set `engine.dynamic_batching.prefix_caching` to `true` and
   `engine.dynamic_batching.max_batch_size` to `1` (the dynamic-batching default is 16).
+  Set `model.qwen38_graph.prefill.chunk` (or `engine.dynamic_batching.max_scheduled_tokens`) explicitly:
+  if both `prefill.chunk` and `search.chunk_size` are unset, creating this section supplies its default
+  2,048-token scheduling budget as the prefill chunk, replacing the separate dense-prefill default of 8,192.
+  Keep the effective chunk identical in cache-off/on cold-TTFT comparisons.
   Within one Engine, it restores committed prompt checkpoints across turns and separate Requests, including after `Close()`;
   it does not restore speculative decode state. Exact hits reuse the saved next-token prediction without an empty
   prefill. Partial hits ingest only the remaining suffix. `cached_prompt_tokens` counts reused tokens from the current
   turn's input, not retained earlier-turn history.
   The existing `max_snapshots` and `snapshot_cache` VRAM/RAM/disk limits bound checkpoint storage; without explicit
   tier budgets or a count, at most one device-resident checkpoint is retained. `max_snapshots: 0` disables publication.
-  Native checkpoint allocations, including default device-resident checkpoints, are not charged to
-  `device_memory_budget_bytes`; leave additional device headroom or configure RAM/disk snapshot tiers.
+  This backend does not accept `device_memory_budget_bytes`. Native checkpoints, including the default
+  device-resident ones, are allocated from free device memory at publish time, so leave headroom or
+  configure RAM/disk snapshot tiers.
   With warning logging enabled, an explicit opt-in that is inactive because of multiple slots, zero snapshot count,
   or all-zero tier budgets emits a warning.
   DFlash checkpoints must retain enough target features to reconstruct its complete context window (or start at
   position zero). A short final prefill chunk can therefore reuse an earlier eligible checkpoint instead of the
   entire prompt. Intermediate captures are skipped except for the last eligible DFlash checkpoint when the final
   chunk cannot reconstruct the drafter. Several-slot configurations retain replay-only behavior.
+  Reuse beyond the first chunk requires an effective `prefill.chunk >= sliding_window + block_size`
+  for the DFlash drafter; unified prefill otherwise defaults to 2,048 tokens. For a 2,048-token sliding
+  window, that default is too small, so a repeated long prompt reuses only the first chunk.
+  Unified prefill caps chunks at 8,192 tokens (4,096 when KV capacity exceeds 65,536); setting a larger
+  configured value cannot bypass that cap. With warning logging enabled, Engine initialization warns
+  once when the effective chunk is smaller than the drafter context window.
+  The H100 prefix-reuse checks reported in #2937 used an explicit 8,192-token prefill chunk, including
+  the 8,192- and 10,450-token checkpoint results; those are not results for the default chunk.
 - MoE offload requires an explicit `session.moe.offload.mode` of `required`, `auto`, `1` or `on` (case-insensitive).
   A budget alone does not enable offload, matching ORT's disabled default; `disabled`, `0` and `off` preserve that behavior.
   Only enabled offload changes target-graph selection, synthetic warmup options or session budgets.
