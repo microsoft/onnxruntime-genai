@@ -46,7 +46,9 @@ struct TimestampPostProcessorConfig {
 // Model-derived metadata options copied into each processor.
 struct MetadataCoreConfig {
   TimestampPostProcessorConfig timestamps;
-  int64_t samples_per_frame{};
+  // Exact frame duration: milliseconds_per_frame + millisecond_remainder / sample_rate.
+  int64_t milliseconds_per_frame{};
+  int millisecond_remainder{};
   int sample_rate{};
 };
 

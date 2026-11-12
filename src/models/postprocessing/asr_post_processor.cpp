@@ -3,6 +3,8 @@
 #include "generator/token_outputs.h"
 #include "models/model.h"
 
+#include <limits>
+
 namespace Generators {
 
 namespace {
@@ -17,8 +19,14 @@ MetadataCoreConfig GetPostProcessorConfig(const Generator& generator) {
   config.timestamps.level = source.timestamp_level;
   config.timestamps.segment_separators = source.segment_separators;
   if (source.timestamp_level != Config::TimestampLevel::Off) {
-    config.samples_per_frame = static_cast<int64_t>(source.hop_length) * source.subsampling_factor;
     config.sample_rate = source.sample_rate;
+    const auto samples_per_frame = static_cast<int64_t>(source.hop_length) * source.subsampling_factor;
+    const auto whole_seconds = samples_per_frame / source.sample_rate;
+    const auto remainder = (samples_per_frame % source.sample_rate) * 1000;
+    if (whole_seconds > (std::numeric_limits<int64_t>::max() - remainder / source.sample_rate) / 1000)
+      throw std::overflow_error("Timestamp interval exceeds the signed 64-bit millisecond range");
+    config.milliseconds_per_frame = whole_seconds * 1000 + remainder / source.sample_rate;
+    config.millisecond_remainder = static_cast<int>(remainder % source.sample_rate);
     config.timestamps.segment_gap_threshold_frames = GetSegmentGapThresholdFrames(source);
   }
   return config;

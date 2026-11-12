@@ -110,10 +110,11 @@ Nemotron continues to supply zero or one token per step. The private overload ac
 ordered token/timing values and can process a whole offline batch or incremental
 batches with the same finalization rules. This does not add a public offline producer API.
 
-At setup, the processor constructor calculates `seconds_per_frame` and the
-rounded gap threshold once from the existing model configuration. The internal
-timestamp code receives those derived values, not another copy of sample rate,
-hop length, and subsampling factor. Native token input uses an optional
+At setup, the processor constructor calculates an exact millisecond timebase and the
+rounded gap threshold once from the existing model configuration. The timebase
+stores whole milliseconds per frame plus an integer remainder over the sample rate;
+rounding is applied once to each final frame endpoint, with exact halves rounded up.
+Native token input uses an optional
 `std::pair<int64_t, int64_t>`; timestamp records also contain a
 `std::pair<int64_t, int64_t>` for millisecond bounds. Native interval layouts are not
 exposed by the public C output handles or field accessors.

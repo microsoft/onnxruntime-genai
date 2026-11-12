@@ -8,25 +8,14 @@
 namespace Generators {
 
 namespace {
-int64_t TimestampMilliseconds(int64_t frame, int64_t samples_per_frame, int sample_rate) {
-  constexpr auto max_milliseconds = std::numeric_limits<int64_t>::max();
-  int64_t whole_seconds = 0;
-  const auto add_seconds = [&](int64_t count, int64_t factor) {
-    if (factor != 0 && count > (max_milliseconds / 1000 - whole_seconds) / factor)
-      throw std::overflow_error("Timestamp interval exceeds the signed 64-bit millisecond range");
-    whole_seconds += count * factor;
-  };
-  const auto samples_remainder = samples_per_frame % sample_rate;
-  const auto fractional_samples = (frame % sample_rate) * samples_remainder;
-  add_seconds(frame, samples_per_frame / sample_rate);
-  add_seconds(frame / sample_rate, samples_remainder);
-  add_seconds(fractional_samples / sample_rate, 1);
-  const auto fractional_milliseconds = ((fractional_samples % sample_rate) * 1000 + sample_rate / 2) / sample_rate;
-  const auto milliseconds = whole_seconds * 1000;
-  if (fractional_milliseconds > max_milliseconds - milliseconds) {
+int64_t TimestampMilliseconds(int64_t frame, const MetadataCoreConfig& config) {
+  const auto fractional = (frame / config.sample_rate) * config.millisecond_remainder +
+                          ((frame % config.sample_rate) * config.millisecond_remainder + config.sample_rate / 2) / config.sample_rate;
+  if (config.milliseconds_per_frame != 0 &&
+      frame > (std::numeric_limits<int64_t>::max() - fractional) / config.milliseconds_per_frame) {
     throw std::overflow_error("Timestamp interval exceeds the signed 64-bit millisecond range");
   }
-  return milliseconds + fractional_milliseconds;
+  return frame * config.milliseconds_per_frame + fractional;
 }
 
 bool EndsWithSeparator(std::string_view text, std::string_view separator) {
@@ -48,8 +37,10 @@ MetadataCoreState::MetadataCoreState(const MetadataCoreConfig& config) : config_
       segment_gap_threshold_frames_ = config_.timestamps.segment_gap_threshold_frames;
       if (segment_gap_threshold_frames_ && *segment_gap_threshold_frames_ < 0)
         throw std::runtime_error("Timestamp segment gap must not be negative");
-      if (config_.samples_per_frame <= 0 || config_.sample_rate <= 0)
-        throw std::runtime_error("Timestamp decoding requires positive samples_per_frame and sample_rate");
+      if (config_.sample_rate <= 0 || config_.milliseconds_per_frame < 0 ||
+          config_.millisecond_remainder < 0 || config_.millisecond_remainder >= config_.sample_rate ||
+          (config_.milliseconds_per_frame == 0 && config_.millisecond_remainder == 0))
+        throw std::runtime_error("Timestamp decoding requires a positive millisecond timebase");
       break;
     default:
       throw std::runtime_error("Invalid timestamp level in metadata configuration");
@@ -68,7 +59,7 @@ void MetadataCoreState::ValidateInput(const TokenMetadataInput& token) const {
 
 void MetadataCoreState::AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
                                   std::pair<int64_t, int64_t> interval) {
-  records.push_back({std::string(text), interval, {TimestampMilliseconds(interval.first, config_.samples_per_frame, config_.sample_rate), TimestampMilliseconds(interval.second, config_.samples_per_frame, config_.sample_rate)}});
+  records.push_back({std::string(text), interval, {TimestampMilliseconds(interval.first, config_), TimestampMilliseconds(interval.second, config_)}});
 }
 
 void MetadataCoreState::CompleteSegment(TimestampResult& result) {

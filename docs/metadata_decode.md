@@ -215,12 +215,13 @@ timestamps require a model that produces acoustic intervals, currently
 `subsampling_factor`. Being an ASR model alone is not sufficient. Missing or
 invalid intervals fail before decoding the affected token.
 
-The processor constructor reads these existing model fields once and derives
-`seconds_per_frame` and the rounded segment-gap frame threshold. Its copied
-configuration stores that optional timebase separately from word/segment output
-settings. Neither the processor nor `MetadataCoreState` stores another set of sample rate,
-hop length, and subsampling factor values. Missing or non-positive/non-finite
-timebases are rejected when timestamps are enabled.
+The processor constructor reads these existing model fields once and derives an
+exact millisecond timebase and the rounded segment-gap frame threshold. Its copied
+configuration stores whole milliseconds per frame and an integer remainder over
+the sample rate, separately from word/segment output settings. Each frame endpoint
+is rounded once to the nearest millisecond, with exact half-millisecond values
+rounded up. Invalid timebases and timestamps outside the signed 64-bit millisecond
+range are rejected when timestamps are enabled.
 
 `segment_separators` defaults to `.`, `?`, and `!`. The optional
 `segment_gap_threshold_seconds` is non-negative or `null`; it is rounded to the

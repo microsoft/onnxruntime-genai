@@ -656,8 +656,10 @@ TEST_F(MetadataCoreStateTests, TimestampMillisecondsPreserveLargeExactRatios) {
   };
   for (const auto& ratio_case : {
            RatioCase{1000, 1, 1, INT64_MAX - 1, INT64_MAX - 1, INT64_MAX},
+           RatioCase{2000, 1, 1, INT64_MAX - 1, INT64_MAX / 2, INT64_MAX / 2 + 1},
            RatioCase{INT32_MAX, 1, 1, INT64_MAX - 1, 4294967298000LL, 4294967298000LL},
-           RatioCase{INT32_MAX, INT32_MAX, INT32_MAX, 1, 2147483647000LL, 4294967294000LL}}) {
+           RatioCase{INT32_MAX, INT32_MAX, INT32_MAX, 1, 2147483647000LL, 4294967294000LL},
+           RatioCase{INT32_MAX, INT32_MAX - 1, INT32_MAX - 1, 1, 2147483645000LL, 4294967290000LL}}) {
     SCOPED_TRACE(ratio_case.sample_rate);
     model->config_->model.sample_rate = ratio_case.sample_rate;
     model->config_->model.hop_length = ratio_case.hop_length;
@@ -688,6 +690,13 @@ TEST_F(MetadataCoreStateTests, TimestampMillisecondsRejectOverflow) {
   EXPECT_THROW({
     processor.ProcessNext();
     processor.Finalize(); }, std::overflow_error);
+}
+
+TEST_F(MetadataCoreStateTests, TimestampMillisecondsRejectUnrepresentableFrameDuration) {
+  model->config_->model.sample_rate = 1;
+  model->config_->model.hop_length = INT32_MAX;
+  model->config_->model.subsampling_factor = INT32_MAX;
+  EXPECT_THROW((Generators::ASRPostProcessor{*generator}), std::overflow_error);
 }
 
 TEST_F(MetadataCoreStateTests, SegmentGapsAndFinalizationPreserveExactText) {
