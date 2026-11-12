@@ -13,13 +13,10 @@ CpuEmbedding::CpuEmbedding(Model& model, OrtEnv& env) : config_{model.config_->m
   auto options = OrtSessionOptions::Create();
   Config::SessionOptions cpu_options = config_.session_options.value_or(Config::SessionOptions{});
   if (cpu_options.providers_explicitly_selected) {
-    cpu_options.provider_options.erase(
-        std::remove_if(cpu_options.provider_options.begin(), cpu_options.provider_options.end(),
-                       [&cpu_options](const auto& provider) {
-                         return std::find(cpu_options.providers.begin(), cpu_options.providers.end(), provider.name) ==
-                                cpu_options.providers.end();
-                       }),
-        cpu_options.provider_options.end());
+    // This Engine lookup is always CPU-only, unlike ordinary multimodal embeddings.
+    // Model-wide overrides must not change its placement or import GPU provider options.
+    cpu_options.providers.clear();
+    cpu_options.provider_options.clear();
   }
 
   if (std::any_of(cpu_options.providers.begin(), cpu_options.providers.end(),

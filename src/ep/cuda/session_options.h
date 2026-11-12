@@ -18,6 +18,9 @@ size_t ParseArenaOptionValue(std::string_view key, const std::string& value);
 
 bool IsProviderBridgeAvailable();
 
+Config::ProviderOptions ResolveGraphCaptureOptions(const Config::ProviderOptions& provider_options,
+                                                   bool disable_graph_capture);
+
 // The provider options that decide which GPU the shared GenAI stream is bound to before the EP is registered.
 // `selected_plugin_device_id` is std::nullopt when no plugin EP device is registered, so the provider-bridge EP serves the
 // session; otherwise it is the CUDA id the selected plugin device reports, which may be empty. A session that names no

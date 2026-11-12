@@ -32,6 +32,40 @@ std::string SelectionError(const std::vector<std::string>& ids, const std::optio
 
 }  // namespace
 
+TEST(CudaProviderOptionsTest, ComponentCaptureDisableOverridesModelWideCapture) {
+  Config config;
+  config.model.vision.session_options.emplace();
+  config.model.embedding.session_options.emplace();
+  ClearProviders(config);
+  SetProviderOption(config, "cuda", "enable_cuda_graph", "1");
+  SetProviderOption(config, "cuda", "device_id", "2");
+  for (const auto* session : {&config.model.decoder.session_options,
+                              &*config.model.vision.session_options, &*config.model.embedding.session_options}) {
+    ASSERT_EQ(session->provider_options.size(), 1u);
+    const auto& original = session->provider_options.front();
+    const bool disable = session != &config.model.decoder.session_options;
+    const auto resolved = CUDAExecutionProvider::ResolveGraphCaptureOptions(original, disable);
+    if (disable) {
+      EXPECT_EQ(resolved.options, (std::vector<Config::NamedString>{
+                                      {"device_id", "2"}, {"enable_cuda_graph", "0"}}));
+    } else {
+      EXPECT_EQ(resolved.options, original.options);
+    }
+    EXPECT_TRUE(IsGraphCaptureEnabled(*session));
+  }
+}
+
+TEST(CudaProviderOptionsTest, ComponentCaptureDisableHandlesMissingAndRepeatedOptions) {
+  Config::ProviderOptions options;
+  options.name = "cuda";
+  auto resolved = CUDAExecutionProvider::ResolveGraphCaptureOptions(options, true);
+  EXPECT_EQ(resolved.options, (std::vector<Config::NamedString>{{"enable_cuda_graph", "0"}}));
+  options.options = {{"enable_cuda_graph", "1"}, {"device_id", "0"}, {"enable_cuda_graph", "1"}};
+  resolved = CUDAExecutionProvider::ResolveGraphCaptureOptions(options, true);
+  EXPECT_EQ(resolved.options, (std::vector<Config::NamedString>{{"device_id", "0"}, {"enable_cuda_graph", "0"}}));
+  EXPECT_EQ(CUDAExecutionProvider::ResolveGraphCaptureOptions(options, false).options, options.options);
+}
+
 #if USE_CUDA
 class CudaBridgeProbeTest : public testing::Test {
  protected:

@@ -21,6 +21,7 @@
 
 #include "config.h"
 #include "engine_test_doubles.h"
+#include "models/cpu_embedding.h"
 #include "models/decoder_only.h"
 #include "models/model_type.h"
 #include "models/qwen38_graph.h"
@@ -271,6 +272,15 @@ TEST(ConfigTest, ModelProviderCpuLoadsEngineWithExplicitEmbeddingSessionOptions)
     if (retained_provider) {
       EXPECT_EQ(model->config_->model.embedding.session_options->provider_options[0].name, "WebGPU");
     }
+
+    ClearProviders(*model->config_);
+    SetProviderOption(*model->config_, "cuda", {}, {});
+    EXPECT_EQ(model->config_->model.decoder.session_options.providers, (std::vector<std::string>{"cuda"}));
+    EXPECT_NO_THROW(CpuEmbedding(*model, GetOrtEnv()));
+    SetProviderOption(*model->config_, "cuda", "enable_cuda_graph", "1");
+    EXPECT_NO_THROW(CpuEmbedding(*model, GetOrtEnv()));
+    EXPECT_EQ(model->config_->model.embedding.session_options->intra_op_num_threads, 2);
+    EXPECT_TRUE(IsGraphCaptureEnabled(model->config_->model.decoder.session_options));
   }
 }
 
