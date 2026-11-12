@@ -717,18 +717,17 @@ void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
 
 Generator::~Generator() = default;
 
+// With slide_inputs, input ids are padded to whole windows for the model, and the sequence keeps the padding.
+size_t Generator::PaddedInputIdsSize(size_t input_ids_count) const {
+  const auto& sliding_window = model_->config_->model.decoder.sliding_window;
+  if (!sliding_window.has_value() || !sliding_window->slide_inputs)
+    return input_ids_count;
+  const auto window_size = static_cast<size_t>(sliding_window->window_size);
+  return (input_ids_count + window_size - 1) / window_size * window_size;
+}
+
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
-  size_t padded_input_ids_size = input_ids.size();
-  if (model_->config_->model.decoder.sliding_window.has_value()) {
-    // If the model has a sliding window, pad the input_ids to the next multiple of the window size
-    // so that the input_ids can be divided into window size chunks.
-    const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
-
-    if (model_->config_->model.decoder.sliding_window->slide_inputs) {
-      padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
-    }
-  }
-
+  const size_t padded_input_ids_size = PaddedInputIdsSize(input_ids.size());
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
   auto padding_begin = cpu_span.begin();
@@ -749,8 +748,9 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
-  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
-    throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
+  const size_t padded_input_ids_size = PaddedInputIdsSize(input_ids.size());
+  if ((padded_input_ids_size / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
+    throw std::runtime_error("input_ids size (" + std::to_string(padded_input_ids_size) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 

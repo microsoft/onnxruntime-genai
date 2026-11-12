@@ -188,6 +188,7 @@ struct Generator : LeakChecked<Generator> {
 #endif
   GenerationTelemetry generation_telemetry_;
   void LogGeneratorCreate(const GeneratorParams& params);
+  size_t PaddedInputIdsSize(size_t input_ids_count) const;
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   void RunGeneratedToken();
