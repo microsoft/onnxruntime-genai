@@ -183,7 +183,21 @@ class DFlash2Builder(BlockDrafterBuilder):
                 name="/dflash2/conv_offsets/Range",
             )
             self.make_value(starts, ir.DataType.INT64, ["conv_batch"])
-            last = self.reshape("/dflash2/conv_offsets/last", rows, [1], ir.DataType.INT64, [1])
+            end = self.binary(
+                "Add", "/dflash2/conv_offsets/End", rows, self.const(1), ir.DataType.INT64, []
+            )
+            boundaries = self.out("/dflash2/conv_offsets/BoundaryRange")
+            self.make_node(
+                "Range", [self.const(0), end, self.const(1)], [boundaries],
+                name="/dflash2/conv_offsets/BoundaryRange",
+            )
+            self.make_value(boundaries, ir.DataType.INT64, ["num_block_plus_one"])
+            last = self.out("/dflash2/conv_offsets/last")
+            self.make_node(
+                "Slice", [boundaries, self.const([-1]), self.const([np.iinfo(np.int64).max]), self.const([0])],
+                [last], name="/dflash2/conv_offsets/last",
+            )
+            self.make_value(last, ir.DataType.INT64, [1])
             offsets = self.make_concat(
                 "/dflash2/conv_offsets/Concat", [starts, last], ir.DataType.INT64, ["conv_batch_plus_one"]
             )

@@ -13,6 +13,7 @@ import onnxruntime as ort
 import pytest
 import torch
 import transformers
+from onnx.reference import ReferenceEvaluator
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     DefaultWeightOnlyQuantConfig,
     DefaultWeightOnlyQuantizer,
@@ -1063,6 +1064,27 @@ def test_block_drafter_supports_model_slice_and_split_signatures():
     left, right = session.run(None, {"input": data})
     np.testing.assert_array_equal(left, data[:, 1:3])
     np.testing.assert_array_equal(right, data[:, 3:5])
+
+
+@pytest.mark.parametrize("rows", [0, 1, 4, 5, 6, 10, 16])
+def test_cuda_conv_boundary_preserves_empty_and_partial_blocks(rows):
+    builder = BlockDrafterBuilder()
+    builder.ep = "cuda"
+    builder.io_dtype = ir.DataType.FLOAT
+    builder.layernorm_attrs = {"residual_dtype": builder.io_dtype}
+    builder.block_size = 5
+    builder.graph.inputs.append(builder.make_value("hidden", builder.io_dtype, ["rows", 4]))
+    mask = DFlash2Builder._block_shift_mask(builder, "hidden")
+    outputs = [mask, builder.out("/dflash2/conv_offsets/Cast"), builder.out("/dflash2/conv_seed/Max")]
+    builder.graph.outputs.extend(builder.values[name] for name in outputs)
+    model = ir.serde.serialize_model(builder.model)
+    onnx.checker.check_model(model)
+    actual_mask, offsets, seeds = ReferenceEvaluator(model).run(None, {"hidden": np.zeros((rows, 4), dtype=np.float32)})
+    starts = np.arange(0, rows, builder.block_size, dtype=np.int64)
+    np.testing.assert_array_equal(actual_mask, (np.arange(rows) % builder.block_size != 0).astype(np.float32).reshape(-1, 1))
+    np.testing.assert_array_equal(offsets, np.concatenate((starts, [rows])).astype(np.int32))
+    np.testing.assert_array_equal(seeds, np.maximum(starts - 1, 0))
+    assert next(node for node in builder.graph if node.name == "/dflash2/conv_offsets/last").op_type == "Slice"
 
 
 @pytest.mark.parametrize("axis", [0, -1])
