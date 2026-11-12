@@ -124,20 +124,20 @@ std::unique_ptr<Config> CreateNemotronBoltDrafterConfig(const Config& config) {
   });
   if (entry == entries.rend()) {
     entries.emplace_back("optimization.disable_specified_optimizers", "GatherSliceToSplitFusion");
-  } else if (("," + entry->second + ",").find(",GatherSliceToSplitFusion,") == std::string::npos) {
-    if (!entry->second.empty()) entry->second += ',';
+  } else if ((";" + entry->second + ";").find(";GatherSliceToSplitFusion;") == std::string::npos) {
+    if (!entry->second.empty() && entry->second.back() != ';') entry->second += ';';
     entry->second += "GatherSliceToSplitFusion";
   }
-#if ORT_API_VERSION >= 32
-  // The native drafter validates its own paged metadata. Preserve logical row counts so
-  // partially accepted blocks can use padded, fixed-shape CUDA graphs without changing KV state.
-  constexpr auto length_policy = "session.paged_attention.skip_input_sanitizer";
-  if (std::none_of(entries.begin(), entries.end(), [](const auto& option) {
-        return option.first == length_policy;
-      })) {
-    entries.emplace_back(length_policy, "1");
+  if (Ort::runtime_api_version >= 32) {
+    // The native drafter validates its own paged metadata. Preserve logical row counts so
+    // partially accepted blocks can use padded, fixed-shape CUDA graphs without changing KV state.
+    constexpr auto length_policy = "session.paged_attention.skip_input_sanitizer";
+    if (std::none_of(entries.begin(), entries.end(), [](const auto& option) {
+          return option.first == length_policy;
+        })) {
+      entries.emplace_back(length_policy, "1");
+    }
   }
-#endif
   return drafter;
 }
 

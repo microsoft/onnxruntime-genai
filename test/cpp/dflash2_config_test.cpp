@@ -1161,8 +1161,113 @@ TEST(Dflash2ConfigTest, ProjectsDrafterWithoutTargetState) {
   EXPECT_FALSE(decoder.state_groups.has_value());
 }
 
+class OrtRuntimeVersionTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    GetOrtEnv();
+    api_ = Ort::api;
+    api_version_ = Ort::api_version;
+    runtime_version_ = Ort::runtime_api_version;
+  }
+  void TearDown() override {
+    Ort::api = api_;
+    Ort::api_version = api_version_;
+    Ort::runtime_api_version = runtime_version_;
+  }
+
+ private:
+  const OrtApi* api_{};
+  uint32_t api_version_{};
+  uint32_t runtime_version_{};
+};
+
+TEST_F(OrtRuntimeVersionTest, ParsesReleaseAndDevelopmentVersionsAndFailsClosed) {
+  for (const auto& [version, expected] :
+       std::array<std::pair<const char*, uint32_t>, 4>{{{"1.31.0", 31}, {"1.32.0", 32}, {"1.33.0.dev20261112", 33}, {"1.33.0-dev+build", 33}}}) {
+    SCOPED_TRACE(version);
+    EXPECT_EQ(Ort::ParseRuntimeApiVersion(version), expected);
+  }
+  for (const auto& version : {"", "unknown", "2.32.0", "1.32", "1.32.x", "1.32.0junk",
+                              "1.032.0", "1.-32.0", "1.4294967296.0", "1.32.0-", "1.32.0.dev bad"}) {
+    SCOPED_TRACE(version);
+    EXPECT_EQ(Ort::ParseRuntimeApiVersion(version), 0u);
+  }
+}
+
+#if defined(__linux__) || defined(MACOS_USE_DLOPEN)
+TEST_F(OrtRuntimeVersionTest, CachesLoadedVersionIndependentlyOfNegotiatedTable) {
+  static const OrtApi* real_api;
+  static const char* reported_version;
+  static std::vector<uint32_t> requested_versions;
+  real_api = Ort::api;
+  static const OrtApiBase base{
+      [](uint32_t version) noexcept -> const OrtApi* {
+        requested_versions.push_back(version);
+        return version <= 31 ? real_api : nullptr;
+      },
+      []() noexcept -> const char* { return reported_version; }};
+  for (const auto& [version, expected] :
+       std::array<std::pair<const char*, uint32_t>, 4>{{{"1.31.0", 31}, {"1.32.0", 32}, {"unknown", 0}, {nullptr, 0}}}) {
+    SCOPED_TRACE(version ? version : "(null)");
+    reported_version = version;
+    requested_versions.clear();
+    Ort::InitApiWithDynamicFn([]() -> const OrtApiBase* { return &base; });
+    const uint32_t negotiated = std::min(uint32_t{ORT_API_VERSION}, 31u);
+    EXPECT_EQ(Ort::api_version, negotiated);
+    EXPECT_EQ(Ort::runtime_api_version, expected);
+    ASSERT_EQ(requested_versions.size(), ORT_API_VERSION - negotiated + 1);
+    EXPECT_EQ(requested_versions.back(), negotiated);
+  }
+}
+#endif
+
+TEST_F(OrtRuntimeVersionTest, FixedPaddingRequiresSupportedLoadedRuntimeAndExplicitPolicy) {
+  const auto root = WriteAnchorRowIndexDrafterModel(8);
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  int request_id{};
+  for (uint32_t version : {0u, 31u, 32u, 33u}) {
+    Ort::runtime_api_version = version;
+    for (const std::string policy : {"", "0", "1"}) {
+      SCOPED_TRACE(::testing::Message() << "runtime=" << version << ", policy=" << policy);
+      auto config = MakeDflash2Config();
+      config.config_path = fs::path{root.string()};
+      auto& draft = config.model.dflash2;
+      draft.filename = "dflash2_anchor.onnx";
+      draft.num_hidden_layers = draft.num_key_value_heads = draft.head_size = 1;
+      draft.block_size = 8;
+      draft.num_draft_tokens = 7;
+      draft.sliding_window = 8;
+      draft.inputs.anchor_row_index = "anchor_row_index";
+      draft.session_options.emplace();
+      if (!policy.empty())
+        draft.session_options->config_entries.emplace_back(
+            "session.paged_attention.skip_input_sanitizer", policy);
+      auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+      Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 1), 1, true};
+      Tensor aux{device, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};
+      aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+      aux.GetDeviceSpan<float>().CpuSpan()[0] = 100.0f;
+      const std::array feeds{
+          Dflash2Drafter::Feed{.request = reinterpret_cast<Request*>(&request_id),
+                               .aux_row_begin = 0,
+                               .aux_row_count = 1,
+                               .first_position = 0,
+                               .anchor_token = 20,
+                               .draft_eligible = true,
+                               .wants_drafts = true}};
+      std::vector<std::vector<int32_t>> drafts;
+      ASSERT_TRUE(drafter.Propose(aux, feeds, drafts));
+      ASSERT_EQ(drafts.size(), 1u);
+      ASSERT_EQ(drafts[0].size(), 7u);
+      EXPECT_EQ(drafts[0][3], (version >= 32 && policy == "1" ? 8 : 1) + 8 + 28);
+    }
+  }
+}
+
 TEST(Dflash2ConfigTest, PagedAttentionPaddingRequiresCompatiblePolicy) {
-#if ORT_API_VERSION >= 32
+  if (Ort::runtime_api_version < 32) {
+    GTEST_SKIP() << "PagedAttention sanitizer opt-out requires ONNX Runtime 1.32 or later";
+  }
   if (!std::getenv("ORTGENAI_TEST_CUDA_PAGED_ATTENTION")) {
     GTEST_SKIP() << "Set ORTGENAI_TEST_CUDA_PAGED_ATTENTION with an admitted CUDA device";
   }
@@ -1231,9 +1336,6 @@ TEST(Dflash2ConfigTest, PagedAttentionPaddingRequiresCompatiblePolicy) {
   EXPECT_NE(sanitized_padding.front(), ordinary.front());
   EXPECT_EQ(ordinary[9 * 64 + 9 * 64], 0);
   EXPECT_EQ(sanitized_padding[9 * 64 + 9 * 64], 0x4400);
-#else
-  GTEST_SKIP() << "PagedAttention sanitizer opt-out requires ONNX Runtime API 32 or later";
-#endif
 }
 
 TEST(Dflash2ConfigTest, AccountsForWindowedPagedCache) {
@@ -1614,11 +1716,7 @@ TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
     fixed_config.model.dflash2.session_options.emplace();
     fixed_config.model.dflash2.session_options->config_entries.emplace_back(
         "session.paged_attention.skip_input_sanitizer", skip_sanitizer ? "1" : "0");
-#if ORT_API_VERSION >= 32
-    const bool padding_enabled = skip_sanitizer;
-#else
-    const bool padding_enabled = false;
-#endif
+    const bool padding_enabled = Ort::runtime_api_version >= 32 && skip_sanitizer;
     auto fixed_model = std::make_shared<Dflash2Model>(CreateDflash2Config(fixed_config), GetOrtEnv());
     Dflash2Drafter fixed_drafter{fixed_model, /*paged_block_size=*/4,
                                  Dflash2Drafter::PoolBlocks(fixed_config, 4, 1),

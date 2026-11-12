@@ -645,13 +645,13 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
   if (fixed_single_request_ && context_window_ == 0) {
     throw std::runtime_error("Fixed DFlash2 requests require a windowed drafter.");
   }
-#if ORT_API_VERSION >= 32
-  for (const auto& entry : model_->config_->model.decoder.session_options.config_entries) {
-    if (entry.first == "session.paged_attention.skip_input_sanitizer") {
-      fixed_padding_enabled_ = entry.second == "1";
+  if (Ort::runtime_api_version >= 32) {
+    for (const auto& entry : model_->config_->model.decoder.session_options.config_entries) {
+      if (entry.first == "session.paged_attention.skip_input_sanitizer") {
+        fixed_padding_enabled_ = entry.second == "1";
+      }
     }
   }
-#endif
 
   const auto& inputs = config_.inputs;
   has_q_row_map_ = model_->session_info_.HasInput(inputs.q_row_map);

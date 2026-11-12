@@ -65,8 +65,10 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 */
 
 #pragma once
+#include <charconv>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <unordered_map>
 #include <array>
@@ -130,6 +132,32 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
 inline uint32_t api_version{};
+// Unlike the negotiated function table, runtime features are not capped by our build headers.
+inline uint32_t runtime_api_version{};
+
+inline uint32_t ParseRuntimeApiVersion(std::string_view version) {
+  std::array<uint32_t, 3> components{};
+  for (size_t i = 0; i < components.size(); ++i) {
+    if (version.empty()) return 0;
+    const auto [end, error] = std::from_chars(
+        version.data(), version.data() + version.size(), components[i]);
+    if (error != std::errc{}) return 0;
+    const size_t digits = static_cast<size_t>(end - version.data());
+    if (digits > 1 && version.front() == '0') return 0;
+    version.remove_prefix(digits);
+    if (i + 1 < components.size()) {
+      if (version.empty() || version.front() != '.') return 0;
+      version.remove_prefix(1);
+    }
+  }
+  if (!version.empty() &&
+      (version.size() == 1 || (version.front() != '.' && version.front() != '-' && version.front() != '+') ||
+       version.find_first_not_of("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.-+", 1) !=
+           std::string_view::npos)) {
+    return 0;
+  }
+  return components[0] == 1 ? components[1] : 0;
+}
 
 /// <summary>
 /// This returns a reference to the ORT C Model Editor API. Used if building or augmenting a model at runtime.
@@ -233,6 +261,8 @@ inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
              ORT_API_VERSION, genai_min_ort_api_version);
     throw std::runtime_error("Failed to load onnxruntime. Please make sure you installed the correct version");
   }
+  const char* runtime_version = ort_api_base->GetVersionString();
+  runtime_api_version = ParseRuntimeApiVersion(runtime_version ? runtime_version : "");
 }
 #endif
 
@@ -339,6 +369,8 @@ inline void InitApi() {
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
   api_version = ORT_API_VERSION;
+  const char* runtime_version = ort_api_base_fn()->GetVersionString();
+  runtime_api_version = ParseRuntimeApiVersion(runtime_version ? runtime_version : "");
 #endif  // defined(__linux__) || defined(MACOS_USE_DLOPEN)
 
   LOG_INFO("ORT Version: %s. %s", ort_api_base_fn()->GetVersionString(), api->GetBuildInfoString());

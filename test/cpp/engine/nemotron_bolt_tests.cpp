@@ -160,9 +160,17 @@ TEST(NemotronBolt, RejectsUnsupportedSearchInsteadOfIgnoringIt) {
 }
 
 TEST(NemotronBolt, PreservesDrafterOptimizerExclusions) {
-  for (const auto& existing : std::vector<std::optional<std::string>>{
-           std::nullopt, "", "OtherFusion", "OtherFusion,GatherSliceToSplitFusion",
-           "GatherSliceToSplitFusionSuffix"}) {
+  const std::string fusion = "GatherSliceToSplitFusion";
+  for (const auto& [existing, expected] :
+       std::vector<std::pair<std::optional<std::string>, std::string>>{
+           {std::nullopt, fusion},
+           {"", fusion},
+           {"OtherFusion", "OtherFusion;" + fusion},
+           {"OtherFusion;", "OtherFusion;" + fusion},
+           {fusion, fusion},
+           {fusion + ";OtherFusion", fusion + ";OtherFusion"},
+           {"OtherFusion;" + fusion + ";", "OtherFusion;" + fusion + ";"},
+           {"GatherSliceToSplitFusionSuffix", "GatherSliceToSplitFusionSuffix;" + fusion}}) {
     Config config;
     config.model.vocab_size = 128;
     auto& drafter = config.model.dflash2;
@@ -185,52 +193,59 @@ TEST(NemotronBolt, PreservesDrafterOptimizerExclusions) {
       return option.first == "optimization.disable_specified_optimizers";
     });
     ASSERT_NE(exclusion, merged.rend());
-    EXPECT_EQ(exclusion->second,
-              !existing || existing->empty()
-                  ? "GatherSliceToSplitFusion"
-                  : *existing + (*existing == "OtherFusion,GatherSliceToSplitFusion"
-                                     ? ""
-                                     : ",GatherSliceToSplitFusion"));
+    EXPECT_EQ(exclusion->second, expected);
   }
 }
 
-TEST(NemotronBolt, PreservesLogicalDrafterLengthsAndExplicitSanitizerPolicy) {
-  for (const std::string policy : {"", "0", "1"}) {
-    Config config;
-    config.model.vocab_size = 128;
-    auto& drafter = config.model.dflash2;
-    drafter.filename = "drafter.onnx";
-    drafter.num_hidden_layers = drafter.num_key_value_heads = drafter.head_size = 1;
-    drafter.block_size = 8;
-    drafter.num_draft_tokens = 7;
-    drafter.selector_top_k = 1;
-    drafter.sliding_window = 8;
-    drafter.session_options.emplace();
-    constexpr auto key = "session.paged_attention.skip_input_sanitizer";
-    if (!policy.empty()) {
-      drafter.session_options->config_entries.emplace_back(key, policy);
+class NemotronBoltRuntimePolicyTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    Ort::InitApi();
+    saved_version_ = Ort::runtime_api_version;
+  }
+  void TearDown() override { Ort::runtime_api_version = saved_version_; }
+
+ private:
+  uint32_t saved_version_{};
+};
+
+TEST_F(NemotronBoltRuntimePolicyTest, PreservesLogicalDrafterLengthsAndExplicitSanitizerPolicy) {
+  for (uint32_t version : {0u, 31u, 32u, 33u}) {
+    SCOPED_TRACE(version);
+    Ort::runtime_api_version = version;
+    for (const std::string policy : {"", "0", "1"}) {
+      SCOPED_TRACE(policy);
+      Config config;
+      config.model.vocab_size = 128;
+      auto& drafter = config.model.dflash2;
+      drafter.filename = "drafter.onnx";
+      drafter.num_hidden_layers = drafter.num_key_value_heads = drafter.head_size = 1;
+      drafter.block_size = 8;
+      drafter.num_draft_tokens = 7;
+      drafter.selector_top_k = 1;
+      drafter.sliding_window = 8;
+      drafter.session_options.emplace();
+      constexpr auto key = "session.paged_attention.skip_input_sanitizer";
+      if (!policy.empty()) {
+        drafter.session_options->config_entries.emplace_back(key, policy);
+      }
+      const auto projected = CreateNemotronBoltDrafterConfig(config);
+      const auto& entries = projected->model.decoder.session_options.config_entries;
+      const auto length_policy = std::find_if(entries.begin(), entries.end(), [](const auto& option) {
+        return option.first == key;
+      });
+      if (version < 32 && policy.empty()) {
+        EXPECT_EQ(length_policy, entries.end());
+      } else {
+        ASSERT_NE(length_policy, entries.end());
+        EXPECT_EQ(length_policy->second, policy.empty() ? "1" : policy);
+        EXPECT_EQ(std::count_if(entries.begin(), entries.end(), [](const auto& option) {
+                    return option.first == key;
+                  }),
+                  1);
+      }
+      EXPECT_EQ(drafter.session_options->config_entries.size(), policy.empty() ? 0u : 1u);
     }
-    const auto projected = CreateNemotronBoltDrafterConfig(config);
-    const auto& entries = projected->model.decoder.session_options.config_entries;
-    const auto length_policy = std::find_if(entries.begin(), entries.end(), [](const auto& option) {
-      return option.first == key;
-    });
-#if ORT_API_VERSION >= 32
-    ASSERT_NE(length_policy, entries.end());
-    EXPECT_EQ(length_policy->second, policy.empty() ? "1" : policy);
-    EXPECT_EQ(std::count_if(entries.begin(), entries.end(), [](const auto& option) {
-                return option.first == key;
-              }),
-              1);
-#else
-    if (policy.empty()) {
-      EXPECT_EQ(length_policy, entries.end());
-    } else {
-      ASSERT_NE(length_policy, entries.end());
-      EXPECT_EQ(length_policy->second, policy);
-    }
-#endif
-    EXPECT_EQ(drafter.session_options->config_entries.size(), policy.empty() ? 0u : 1u);
   }
 }
 
