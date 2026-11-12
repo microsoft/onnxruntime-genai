@@ -3774,7 +3774,12 @@ TEST(CAPITests, AllPadPrefillSingleAndBatched) {
     generator->AppendTokens(all_pad_prompt.data(), all_pad_prompt.size());
     generator->GenerateNextToken();
     generator->GenerateNextToken();
-    EXPECT_EQ(generator->GetSequenceCount(0), 5u);
+    ASSERT_EQ(generator->GetSequenceCount(0), 5u);
+    const auto* seq0_out = generator->GetSequenceData(0);
+    ASSERT_NE(seq0_out, nullptr);
+    EXPECT_EQ(seq0_out[0], kPadTokenId);
+    EXPECT_EQ(seq0_out[1], kPadTokenId);
+    EXPECT_EQ(seq0_out[2], kPadTokenId);
   }
 
   {
@@ -3791,7 +3796,15 @@ TEST(CAPITests, AllPadPrefillSingleAndBatched) {
     generator->AppendTokenSequences(*sequences);
     generator->GenerateNextToken();
     generator->GenerateNextToken();
-    EXPECT_EQ(generator->GetSequenceCount(0), 5u);
-    EXPECT_EQ(generator->GetSequenceCount(1), 5u);
+    ASSERT_EQ(generator->GetSequenceCount(0), 5u);
+    ASSERT_EQ(generator->GetSequenceCount(1), 5u);
+    const auto* seq0_out = generator->GetSequenceData(0);
+    const auto* seq1_out = generator->GetSequenceData(1);
+    ASSERT_NE(seq0_out, nullptr);
+    ASSERT_NE(seq1_out, nullptr);
+    EXPECT_EQ(seq0_out[0], 2);
+    EXPECT_EQ(seq0_out[1], 3);
+    EXPECT_EQ(seq0_out[2], 4);
+    EXPECT_EQ(seq1_out[0], kPadTokenId);
   }
 }

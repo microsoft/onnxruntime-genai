@@ -68,11 +68,14 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
     return;
   }
 
+  auto is_valid_token = [&](size_t token_index) {
+    return token_index >= valid_begin_ && token_index < valid_end_;
+  };
+
   auto fill_window_positions = [&](auto* position_ids_data, size_t window_offset) {
     using T = std::remove_pointer_t<decltype(position_ids_data)>;
-    auto tokens_cpu = next_tokens.CpuSpan();
     for (size_t i = 0; i < window_size_; i++) {
-      if (tokens_cpu[window_offset + i] == model_.config_->model.pad_token_id) {
+      if (!is_valid_token(window_offset + i)) {
         position_ids_data[i] = T{0};
       } else {
         position_ids_data[i] = static_cast<T>(next_position_id_++);
@@ -80,29 +83,48 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
     }
   };
 
-  auto fill_window_mask = [&](auto* attention_mask_data, size_t window_offset, bool first_window) {
+  auto fill_window_mask = [&](auto* attention_mask_data, size_t window_offset, bool zero_prefix) {
     using T = std::remove_pointer_t<decltype(attention_mask_data)>;
     const size_t mask_length = static_cast<size_t>(attention_mask_shape_[1]);
-    auto tokens_cpu = next_tokens.CpuSpan();
-    if (first_window) {
+    if (zero_prefix) {
       std::fill_n(attention_mask_data, mask_length - window_size_, T{0});
     } else {
       std::move(attention_mask_data + window_size_, attention_mask_data + mask_length, attention_mask_data);
     }
     for (size_t i = 0; i < window_size_; i++) {
       attention_mask_data[mask_length - window_size_ + i] =
-          tokens_cpu[window_offset + i] == model_.config_->model.pad_token_id ? T{0} : T{1};
+          is_valid_token(window_offset + i) ? T{1} : T{0};
     }
   };
 
-  if (window_index_ == 0) {
+  if (window_index_ == 0 && (is_first_update_ || next_tokens.size() > 1)) {
     if (next_tokens.size() < window_size_ || next_tokens.size() % window_size_ != 0) {
       throw std::runtime_error("WindowedPositionInputs::Update requires next_tokens size to be a positive multiple of window_size");
     }
     num_windows_ = next_tokens.size() / window_size_;
-    next_position_id_ = 0;
+    auto tokens_cpu = next_tokens.CpuSpan();
+    valid_begin_ = 0;
+    valid_end_ = tokens_cpu.size();
+    if (model_.config_->model.decoder.sliding_window->alignment == "left") {
+      while (valid_end_ > 0 && tokens_cpu[valid_end_ - 1] == model_.config_->model.pad_token_id) {
+        --valid_end_;
+      }
+    } else {
+      while (valid_begin_ < valid_end_ && tokens_cpu[valid_begin_] == model_.config_->model.pad_token_id) {
+        ++valid_begin_;
+      }
+    }
+
+    const bool zero_prefix = is_first_update_;
+    if (is_first_update_) {
+      next_position_id_ = 0;
+    }
     if (has_posid_input_) {
-      position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, position_ids_type_);
+      const auto window_width = static_cast<int64_t>(window_size_);
+      if (!position_ids_ || position_ids_shape_[1] != window_width) {
+        position_ids_shape_ = {1, window_width};
+        position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, position_ids_type_);
+      }
 
       // next_tokens will always be padded so that it's size is a multiple of window_size_
       // next_tokens -> [0, a, b, c, d, e]
@@ -115,16 +137,24 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
     }
 
     if (has_mask_input_) {
-      attention_mask_ = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, attention_mask_type_);
+      if (!attention_mask_) {
+        attention_mask_ = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, attention_mask_type_);
+      }
 
       // next_tokens will always be padded so that it's size is a multiple of window_size_
       // next_tokens -> [0, a, b, c, d, e]
       // window_size = 3, num_windows = 2, pad_token = 0
       // window_index = 0, attention_mask_ -> ([0] * context_length - window_size_) + [0, 1, 1]
       if (attention_mask_type_ == Ort::TypeToTensorType<int64_t>)
-        fill_window_mask(attention_mask_->GetTensorMutableData<int64_t>(), 0, true);
+        fill_window_mask(attention_mask_->GetTensorMutableData<int64_t>(), 0, zero_prefix);
       else
-        fill_window_mask(attention_mask_->GetTensorMutableData<int32_t>(), 0, true);
+        fill_window_mask(attention_mask_->GetTensorMutableData<int32_t>(), 0, zero_prefix);
+    }
+    is_first_update_ = false;
+    window_index_++;
+    if (window_index_ == num_windows_) {
+      window_index_ = 0;
+      num_windows_ = 0;
     }
   } else if (window_index_ < num_windows_) {
     const size_t window_offset = window_index_ * window_size_;
@@ -152,7 +182,15 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       else
         fill_window_mask(attention_mask_->GetTensorMutableData<int32_t>(), window_offset, false);
     }
+    window_index_++;
+    if (window_index_ == num_windows_) {
+      window_index_ = 0;
+      num_windows_ = 0;
+    }
   } else {
+    if (next_tokens.size() != 1) {
+      throw std::runtime_error("WindowedPositionInputs::Update expects a single token during decode");
+    }
     // All prompt token chunks have been processed. Now we process the tokens generated by the model.
     if (has_posid_input_) {
       // next_tokens -> [f]
@@ -197,8 +235,6 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
   if (has_mask_input_) {
     state_.inputs_[attention_mask_index_] = attention_mask_.get();
   }
-
-  window_index_++;
 }
 
 }  // namespace Generators

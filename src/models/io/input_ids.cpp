@@ -126,6 +126,10 @@ WindowedInputIDs::WindowedInputIDs(State& state) : state_{state} {
     throw std::runtime_error("Batch beam size must be 1 for sliding a window over input_ids.");
   }
 
+  if (model_.config_->model.decoder.sliding_window->window_size <= 0) {
+    throw std::runtime_error("Window size must be greater than 0");
+  }
+
   window_size_ = model_.config_->model.decoder.sliding_window->window_size;
   shape_ = {1, model_.config_->model.decoder.sliding_window->window_size};
   type_ = model_.session_info_.GetInputDataType(name_);

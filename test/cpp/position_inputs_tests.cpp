@@ -10,6 +10,7 @@
 
 #include "generator/generators.h"
 #include "models/io/default_position_inputs.h"
+#include "models/io/input_ids.h"
 #include "models/io/logits.h"
 #include "models/io/windowed_position_inputs.h"
 #include "models/model.h"
@@ -669,7 +670,11 @@ TEST_P(PositionInputsTest, AllPadBatchRowInitializesNextPositions) {
   Update({5, 6}, 4, 1);
   ExpectMask({{1, 1, 0, 1}, {0, 0, 0, 1}});
   EXPECT_EQ(Read(*state->GetInput(pos_name.c_str())),
-            (std::vector<int64_t>{2, 1}));
+            (std::vector<int64_t>{2, 0}));
+  Update({7, 8}, 5, 1);
+  ExpectMask({{1, 1, 0, 1, 1}, {0, 0, 0, 1, 1}});
+  EXPECT_EQ(Read(*state->GetInput(pos_name.c_str())),
+            (std::vector<int64_t>{3, 1}));
 }
 
 INSTANTIATE_TEST_SUITE_P(MaskModesAndTypes, PositionInputsTest,
@@ -696,7 +701,7 @@ TEST(PositionInputsCapacityTest, UsesExplicitCapacityAndRejectsOverflow) {
 }
 
 struct WindowedPositionInputsTest : testing::TestWithParam<bool> {
-  void Initialize(int context_length = 6, int window_size = 3) {
+  void Initialize(int context_length = 6, int window_size = 3, const std::string& alignment = "right") {
     inputs.reset();
     state.reset();
     params.reset();
@@ -705,6 +710,7 @@ struct WindowedPositionInputsTest : testing::TestWithParam<bool> {
     model->config_->model.context_length = context_length;
     Config::Model::Decoder::SlidingWindow sw{};
     sw.window_size = window_size;
+    sw.alignment = alignment;
     sw.slide_inputs = true;
     model->config_->model.decoder.sliding_window = sw;
     params = std::make_shared<GeneratorParams>(*model);
@@ -791,7 +797,7 @@ TEST_P(WindowedPositionInputsTest, MultipleAllPadWindowsPreserveZeroMaskAndStart
 }
 
 TEST_P(WindowedPositionInputsTest, PartiallyPaddedSecondWindowPreservesMaskAndPositions) {
-  Initialize(6, 3);
+  Initialize(6, 3, "left");
   const auto& mask_name = model->config_->model.decoder.inputs.attention_mask;
   const auto& pos_name = model->config_->model.decoder.inputs.position_ids;
 
@@ -806,6 +812,59 @@ TEST_P(WindowedPositionInputsTest, PartiallyPaddedSecondWindowPreservesMaskAndPo
   Update({7}, 7, 1);
   EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{1, 1, 1, 0, 0, 1}));
   EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{4}));
+}
+
+TEST_P(WindowedPositionInputsTest, PreservesInteriorAndBosTokensEqualToPadTokenId) {
+  const auto& mask_name_right = [this]() {
+    Initialize(6, 3, "right");
+    return model->config_->model.decoder.inputs.attention_mask;
+  }();
+  const auto& pos_name_right = model->config_->model.decoder.inputs.position_ids;
+
+  // Leading 0 is left-padding; interior 0 at index 3 is a real prompt token.
+  Update({0, 2, 3, 0, 5, 6}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name_right), (std::vector<int64_t>{0, 0, 0, 0, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name_right), (std::vector<int64_t>{0, 0, 1}));
+
+  Update({0, 2, 3, 0, 5, 6}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name_right), (std::vector<int64_t>{0, 1, 1, 1, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name_right), (std::vector<int64_t>{2, 3, 4}));
+
+  // Left-aligned (right-padded): leading BOS=0 is a real token; trailing 0s are padding.
+  Initialize(6, 3, "left");
+  const auto& mask_name_left = model->config_->model.decoder.inputs.attention_mask;
+  const auto& pos_name_left = model->config_->model.decoder.inputs.position_ids;
+
+  Update({0, 3, 4, 5, 0, 0}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name_left), (std::vector<int64_t>{0, 0, 0, 1, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name_left), (std::vector<int64_t>{0, 1, 2}));
+
+  Update({0, 3, 4, 5, 0, 0}, 6, 3);
+  EXPECT_EQ(ReadInput(mask_name_left), (std::vector<int64_t>{1, 1, 1, 1, 0, 0}));
+  EXPECT_EQ(ReadInput(pos_name_left), (std::vector<int64_t>{3, 0, 0}));
+}
+
+TEST_P(WindowedPositionInputsTest, ContinuousDecodingResizesAndPreservesHistory) {
+  Initialize(8, 3, "right");
+  const auto& mask_name = model->config_->model.decoder.inputs.attention_mask;
+  const auto& pos_name = model->config_->model.decoder.inputs.position_ids;
+
+  Update({0, 2, 3}, 3, 3);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 0, 0, 0, 0, 0, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{0, 0, 1}));
+
+  Update({4}, 4, 1);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 0, 0, 0, 0, 1, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{2}));
+
+  // Second AppendTokens during continuous decoding (padded to window_size=3).
+  Update({0, 5, 6}, 7, 3);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 0, 1, 1, 1, 0, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{0, 3, 4}));
+
+  Update({7}, 8, 1);
+  EXPECT_EQ(ReadInput(mask_name), (std::vector<int64_t>{0, 1, 1, 1, 0, 1, 1, 1}));
+  EXPECT_EQ(ReadInput(pos_name), (std::vector<int64_t>{5}));
 }
 
 TEST_P(WindowedPositionInputsTest, ContextLengthEqualToWindowSizeDoesNotUnderflow) {
@@ -832,6 +891,20 @@ TEST_P(WindowedPositionInputsTest, RejectsInvalidWindowDimensionsAndShortInput) 
   EXPECT_THROW(Update({2, 3, 4, 5}, 4, 3), std::runtime_error);
   Update({2, 3, 4, 5, 6, 7}, 6, 3);
   EXPECT_THROW(Update({2, 3, 4}, 6, 3), std::runtime_error);
+
+  Initialize(6, 3);
+  Update({2, 3, 4}, 3, 3);
+  EXPECT_THROW(Update({}, 3, 0), std::runtime_error);
+
+  // WindowedInputIDs also rejects non-positive window_size independently of position/mask inputs.
+  auto base_model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  Config::Model::Decoder::SlidingWindow sw{};
+  sw.window_size = 0;
+  sw.slide_inputs = true;
+  base_model->config_->model.decoder.sliding_window = sw;
+  auto base_params = std::make_shared<GeneratorParams>(*base_model);
+  PositionTestState base_state{*base_params, *base_model};
+  EXPECT_THROW(CreateInputIDs(base_state), std::runtime_error);
 }
 
 INSTANTIATE_TEST_SUITE_P(IntTypes, WindowedPositionInputsTest, testing::Bool());
