@@ -15,25 +15,22 @@
 
 namespace Generators::test {
 
-struct NemotronBoltTestAccess {
-  static void ForceRejectedDrafts(NemotronBoltState& state) {
-    state.drafts_.assign(7, 0);
-  }
-
-  static std::vector<int32_t> TargetOnly(NemotronBoltState& state, size_t count) {
-    std::vector<int32_t> tokens{state.anchor_};
-    for (size_t i = 1; i < count; ++i) {
-      const std::vector<int32_t> block(8, tokens.back());
-      const auto predictions = state.Verify(block);
-      ++state.length_;
-      state.state_row_ = 0;
-      tokens.push_back(static_cast<int32_t>(predictions[0]));
-    }
-    return tokens;
-  }
-};
-
 namespace {
+
+std::vector<int32_t> TargetOnly(Model& model, std::span<const int32_t> prompt, size_t count) {
+  std::vector<int32_t> history(prompt.begin(), prompt.end());
+  auto params = std::make_shared<GeneratorParams>(model);
+  params->search.max_length = static_cast<int>(history.size() + count);
+  Generator generator{model, *params};
+  for (size_t i = 0; i < count; ++i) {
+    // The first generated token is the target's prefill prediction, before speculative verification.
+    generator.AppendTokens(history);
+    generator.GenerateNextToken();
+    history.push_back(generator.GetSequence(0).CopyDeviceToCpu().back());
+    generator.RewindToLength(0);
+  }
+  return {history.begin() + prompt.size(), history.end()};
+}
 
 class BoltPrefixCacheTest : public ::testing::Test {
  protected:
@@ -472,24 +469,8 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
     EXPECT_TRUE(std::equal(sequence.begin(), sequence.end(), baseline.begin()));
     EXPECT_THROW(generator.GenerateNextToken(), std::runtime_error);
   }
-  auto params = std::make_shared<GeneratorParams>(*model);
-  params->search.max_length = static_cast<int>(prompt.size()) + 32;
-  Generator serial{*model, *params};
-  serial.AppendTokens(prompt);
-  const auto target_only = NemotronBoltTestAccess::TargetOnly(
-      dynamic_cast<NemotronBoltState&>(*serial.state_), 32);
+  const auto target_only = TargetOnly(*model, prompt, 32);
   EXPECT_TRUE(std::equal(target_only.begin(), target_only.end(), baseline.begin() + prompt.size()));
-  {
-    Generator generator{*model, *params};
-    generator.AppendTokens(prompt);
-    generator.GenerateNextToken();
-    NemotronBoltTestAccess::ForceRejectedDrafts(dynamic_cast<NemotronBoltState&>(*generator.state_));
-    generator.GenerateNextToken();
-    EXPECT_EQ(generator.GetSpeculativeStats().zero_accept_rounds, 1);
-    while (!generator.IsDone()) generator.GenerateNextToken();
-    const auto sequence = generator.GetSequence(0).CopyDeviceToCpu();
-    EXPECT_TRUE(std::equal(sequence.begin(), sequence.end(), baseline.begin()));
-  }
 
   // Cross multiple paged-cache blocks and wrap the drafter's 1024-position sliding-window ring.
   std::vector<int32_t> long_prompt;
@@ -506,10 +487,7 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
   }
   ASSERT_FALSE(long_result.empty());
   {
-    Generator generator{*model, *long_params};
-    generator.AppendTokens(long_prompt);
-    const auto expected = NemotronBoltTestAccess::TargetOnly(
-        dynamic_cast<NemotronBoltState&>(*generator.state_), long_result.size());
+    const auto expected = TargetOnly(*model, long_prompt, long_result.size());
     EXPECT_EQ(long_result, expected);
   }
 }

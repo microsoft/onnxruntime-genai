@@ -25,9 +25,9 @@ std::shared_ptr<PrefixSnapshotCache::Entry> ByteEntry(size_t bytes) {
 
 TEST(Qwen38PrefixSnapshotTest, PolicyGatesOptInAndWarnsWhenInactive) {
   Config config;
-  EXPECT_EQ(CreateQwen38PrefixSnapshotCache(ApplyQwen38DynamicBatchingConfig(config)), nullptr);
+  EXPECT_EQ(CreateQwen38PrefixSnapshotCache(config), nullptr);
   OverlayConfig(config, R"({"engine":{"dynamic_batching":{"max_batch_size":1}}})");
-  EXPECT_EQ(CreateQwen38PrefixSnapshotCache(ApplyQwen38DynamicBatchingConfig(config)), nullptr);
+  EXPECT_EQ(CreateQwen38PrefixSnapshotCache(config), nullptr);
   for (const auto* settings : {
            R"({"prefix_caching":false,"max_batch_size":1})",
            R"({"prefix_caching":true,"max_batch_size":1,"max_snapshots":0})",
@@ -39,24 +39,22 @@ TEST(Qwen38PrefixSnapshotTest, PolicyGatesOptInAndWarnsWhenInactive) {
     SetLogBool("enabled", true);
     SetLogBool("warning", true);
     testing::internal::CaptureStderr();
-    const auto resolved = ApplyQwen38DynamicBatchingConfig(inactive);
-    const auto cache = CreateQwen38PrefixSnapshotCache(resolved);
+    const auto cache = CreateQwen38PrefixSnapshotCache(inactive);
     const auto log = testing::internal::GetCapturedStderr();
     g_log = previous_logging;
     EXPECT_EQ(cache, nullptr);
     EXPECT_EQ(log.find("prefix caching is inactive") != std::string::npos,
-              resolved.batching->prefix_caching.value_or(false));
+              inactive.engine.dynamic_batching->prefix_caching.value_or(false));
   }
 }
 
-TEST(Qwen38PrefixSnapshotTest, ResolvedPolicySurvivesNormalizationAndLaterOverlays) {
+TEST(Qwen38PrefixSnapshotTest, ConfiguresStorageAndCountLimitsBeforeSingleSlotNormalization) {
   Config config;
   OverlayConfig(config, R"({"engine":{"dynamic_batching":{
     "prefix_caching":true,"max_batch_size":1,"max_snapshots":2,"snapshot_cache":{"ram_bytes":32}}}})");
-  const auto resolved = ApplyQwen38DynamicBatchingConfig(config);
+  auto cache = CreateQwen38PrefixSnapshotCache(config);
+  ApplyQwen38DynamicBatchingConfig(config);
   ASSERT_FALSE(config.engine.dynamic_batching);
-  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"prefix_caching":false,"max_batch_size":2}}})");
-  auto cache = CreateQwen38PrefixSnapshotCache(resolved);
   ASSERT_NE(cache, nullptr);
   auto first = ByteEntry(16);
   auto second = ByteEntry(16);

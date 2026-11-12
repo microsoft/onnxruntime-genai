@@ -2426,9 +2426,9 @@ Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`,
 Native backends share snapshot storage and checkpoint publication, not an execution layout.
 Qwen and Bolt use the following internal integration contract:
 
-1. Resolve configuration once into owned settings, before clearing or normalizing the public
+1. Configure snapshot storage and memory limits before clearing or normalizing the public
    `engine.dynamic_batching` section. Keep model-specific capacity and chunk mapping separate.
-   Pass those same settings to `CreateNativePrefixSnapshotCache` and
+   Pass the configured settings to `CreateNativePrefixSnapshotCache` and
    `NativeDeviceMemoryBudget::Configure`. Configure the budget before loading weights/sessions;
    the base Model captures its before-load free-memory baseline. Refresh after native warmup and
    before checkpoint admission, including when prefix caching is disabled.
@@ -2456,8 +2456,9 @@ The shared index/policy tests cover identity, lease/recency behavior, tier/count
 publication failure cleanup once. A new backend should add focused tests for its boundary rules,
 state geometry and restore/handoff, plus native inference parity and cached-token accounting.
 The tiny Qwen CUDA fixture exercises real dense ONNX prefill, RAM/disk checkpoint restoration,
-compression-boundary handoff and resumed decode; its white-box handoff invocation is not a full
-folded-package end-to-end test. Large-model Bolt/Qwen probes remain an additional validation layer.
+compression-boundary handoff and resumed decode through the public native device interface of a
+folded package. The fixture independently validates packed target/head state during decode.
+Large-model Bolt/Qwen probes remain an additional validation layer.
 
 These are internal helpers, not a new public configuration or automatic support for arbitrary
 models. Paged execution retains its separate block identity and scheduling contracts.

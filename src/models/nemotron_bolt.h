@@ -12,10 +12,6 @@
 
 namespace Generators {
 
-namespace test {
-struct NemotronBoltTestAccess;
-}
-
 inline constexpr size_t kBoltVerifyRows = 8;
 
 struct NemotronBoltPrefixCache {
@@ -85,7 +81,6 @@ struct NemotronBoltState : private std::unique_lock<std::mutex>, State {
   size_t CachedPromptTokens() const { return cached_prompt_tokens_; }
 
  private:
-  friend struct test::NemotronBoltTestAccess;
   Tensor& AddTensor(const std::string& name, bool input, DeviceInterface* device,
                     ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
   std::vector<int64_t> Verify(std::span<const int32_t> tokens, bool want_predictions = true);

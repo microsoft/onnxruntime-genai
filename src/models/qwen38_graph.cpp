@@ -3499,13 +3499,11 @@ size_t ResolveQwen38DflashReservedBlocks(const Config& config, size_t block_size
   return aux_bytes / target_block_bytes + static_cast<size_t>(aux_bytes % target_block_bytes != 0);
 }
 
-Qwen38ResolvedBatchingConfig ApplyQwen38DynamicBatchingConfig(Config& config) {
-  Qwen38ResolvedBatchingConfig resolved;
-  resolved.batching = config.engine.dynamic_batching;
+bool ApplyQwen38DynamicBatchingConfig(Config& config) {
+  bool has_dynamic_batching_kv = false;
   if (config.engine.dynamic_batching) {
     const size_t max_batch = ResolveQwen38MaxBatchSize(config);
-    resolved.max_batch_size = max_batch;
-    const auto& db = *resolved.batching;
+    const auto& db = *config.engine.dynamic_batching;
     if (db.block_size == 0) {
       throw std::runtime_error("engine.dynamic_batching.block_size must be positive.");
     }
@@ -3537,7 +3535,7 @@ Qwen38ResolvedBatchingConfig ApplyQwen38DynamicBatchingConfig(Config& config) {
           static_cast<int>(target_tokens + static_cast<size_t>(kQwen38GraphIdMaxRows));
       config.model.context_length = static_cast<int>(target_tokens);
       config.search.max_length = config.model.context_length;
-      resolved.has_dynamic_batching_kv = true;
+      has_dynamic_batching_kv = true;
     }
     if (config.search.chunk_size.has_value() && *config.search.chunk_size > 0) {
       if (*config.search.chunk_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
@@ -3565,22 +3563,22 @@ Qwen38ResolvedBatchingConfig ApplyQwen38DynamicBatchingConfig(Config& config) {
     config.model.qwen38_graph.prefill.chunk = static_cast<int>(*config.search.chunk_size);
     config.search.chunk_size.reset();
   }
-  if (resolved.has_dynamic_batching_kv && config.model.qwen38_graph.prefill.enabled &&
+  if (has_dynamic_batching_kv && config.model.qwen38_graph.prefill.enabled &&
       EffectiveQwen38PrefillChunkTokens(config.model.qwen38_graph) >
           static_cast<size_t>(config.model.qwen38_graph.kv_capacity)) {
     config.model.qwen38_graph.prefill.chunk = config.model.qwen38_graph.kv_capacity;
   }
   ValidateQwen38PrefillChunkShape(config.model.qwen38_graph);
-  return resolved;
+  return has_dynamic_batching_kv;
 }
 
-std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Qwen38ResolvedBatchingConfig& resolved) {
-  const auto& batching = resolved.batching;
+std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Config& config) {
+  const auto& batching = config.engine.dynamic_batching;
   if (!batching || !batching->prefix_caching.value_or(false)) return nullptr;
   const char* disabled = nullptr;
   if (batching->max_snapshots.value_or(1) == 0)
     disabled = "max_snapshots is zero";
-  else if (resolved.max_batch_size != 1)
+  else if (ResolveQwen38MaxBatchSize(config) != 1)
     disabled = "multiple request slots are configured";
   else if (batching->snapshot_cache.Configured() && !batching->snapshot_cache.Enabled())
     disabled = "snapshot_cache tier budgets are all zero";
@@ -3594,10 +3592,10 @@ std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Qwen3
 
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{PreflightQwen38GraphModelConfig(std::move(config))}, memory_budget_{*this} {
-  const auto batching = ApplyQwen38DynamicBatchingConfig(*config_);
-  prefix_snapshot_cache_ = CreateQwen38PrefixSnapshotCache(batching);
-  memory_budget_.Configure(batching.batching, prefix_snapshot_cache_);
-  const bool has_dynamic_batching_kv = batching.has_dynamic_batching_kv;
+  prefix_snapshot_cache_ = CreateQwen38PrefixSnapshotCache(*config_);
+  memory_budget_.Configure(config_->engine.dynamic_batching, prefix_snapshot_cache_);
+  // Single-slot normalization clears dynamic_batching, so consume its cache and memory settings first.
+  const bool has_dynamic_batching_kv = ApplyQwen38DynamicBatchingConfig(*config_);
   const auto& q = config_->model.qwen38_graph;
   const bool separate_prefill_sessions =
       q.prefill.enabled && !q.prefill.dense.filename.empty() &&
