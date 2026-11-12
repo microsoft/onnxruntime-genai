@@ -675,6 +675,21 @@ TEST_P(PositionInputsTest, AllPadBatchRowInitializesNextPositions) {
   ExpectMask({{1, 1, 0, 1, 1}, {0, 0, 0, 1, 1}});
   EXPECT_EQ(Read(*state->GetInput(pos_name.c_str())),
             (std::vector<int64_t>{3, 1}));
+
+  // One-slot batched prefill does not resize on decode; still consumes -1 sentinel.
+  inputs->RewindTo(0);
+  Update({2, 0}, 1, 1);
+  ExpectMask({{1}, {0}});
+  EXPECT_EQ(Read(*state->GetInput(pos_name.c_str())),
+            (std::vector<int64_t>{0, 0}));
+  Update({5, 6}, 2, 1);
+  ExpectMask({{1, 1}, {0, 1}});
+  EXPECT_EQ(Read(*state->GetInput(pos_name.c_str())),
+            (std::vector<int64_t>{1, 0}));
+  Update({7, 8}, 3, 1);
+  ExpectMask({{1, 1, 1}, {0, 1, 1}});
+  EXPECT_EQ(Read(*state->GetInput(pos_name.c_str())),
+            (std::vector<int64_t>{2, 1}));
 }
 
 INSTANTIATE_TEST_SUITE_P(MaskModesAndTypes, PositionInputsTest,
@@ -998,6 +1013,39 @@ TEST(LogitsAllPadTest, SlicesValidBoundsOnAllPadSequences) {
     auto sliced_cpu = sliced.CopyDeviceToCpu();
     ASSERT_EQ(sliced_cpu.size(), vocab_size);
     EXPECT_FLOAT_EQ(sliced_cpu[0], slide_inputs ? 0.0f : 200.0f);
+  }
+
+  // Right-aligned sliding_window (left-padded) preserves trailing PAD/EOS slot.
+  {
+    auto model_copy = CreateModel(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+    Config::Model::Decoder::SlidingWindow sw{};
+    sw.window_size = 3;
+    sw.alignment = "right";
+    sw.slide_inputs = true;
+    model_copy->config_->model.decoder.sliding_window = sw;
+
+    auto params = std::make_shared<GeneratorParams>(*model_copy);
+    PositionTestState state{*params, *model_copy};
+    Logits logits{state};
+    logits.Add();
+
+    const int32_t pad = model_copy->config_->model.pad_token_id;
+    std::array<int32_t, 3> window_tokens{4, 5, pad};
+    auto tokens = params->p_device->Allocate<int32_t>(window_tokens.size());
+    std::copy(window_tokens.begin(), window_tokens.end(), tokens.CpuSpan().begin());
+    logits.Update(tokens, 3);
+
+    auto* raw_logits = state.outputs_[0]->GetTensorMutableData<float>();
+    for (size_t pos = 0; pos < 3; ++pos) {
+      for (size_t v = 0; v < vocab_size; ++v) {
+        raw_logits[pos * vocab_size + v] = static_cast<float>(pos * 100 + v);
+      }
+    }
+
+    auto sliced = logits.Get();
+    auto sliced_cpu = sliced.CopyDeviceToCpu();
+    ASSERT_EQ(sliced_cpu.size(), vocab_size);
+    EXPECT_FLOAT_EQ(sliced_cpu[0], 200.0f);
   }
 }
 

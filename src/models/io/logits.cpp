@@ -99,11 +99,16 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   }
 
   // Store length of input sequence for each batch for the get step
+  const auto& sliding_window = model_.config_->model.decoder.sliding_window;
+  const bool slide_inputs = sliding_window.has_value() && sliding_window->slide_inputs;
+  const bool left_padded_sliding = slide_inputs && sliding_window->alignment != "left";
   const bool right_padded = state_.params_->search.batch_size > 1 ||
-                            (model_.config_->model.decoder.sliding_window.has_value() &&
-                             model_.config_->model.decoder.sliding_window->slide_inputs &&
-                             model_.config_->model.decoder.sliding_window->alignment == "left");
+                            (slide_inputs && sliding_window->alignment == "left");
   for (int b = 0; b < state_.params_->search.batch_size; b++) {
+    if (left_padded_sliding) {
+      input_sequence_lengths[b] = static_cast<int>(new_kv_length);
+      continue;
+    }
     // Find the first non pad token from the end
     size_t token_index = new_kv_length;
     bool found_non_pad = false;
