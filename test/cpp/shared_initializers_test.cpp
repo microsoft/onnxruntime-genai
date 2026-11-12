@@ -30,8 +30,11 @@ struct SharedInitializerTestModel : Generators::Model {
   using Model::AddSharedInitializers;
 };
 
-std::unique_ptr<Generators::Config> ConfigFor(const char* provider) {
+// `dir` is the model directory, which graph and data file names are relative to (as in genai_config.json).
+std::unique_ptr<Generators::Config> ConfigFor(const char* provider, const std::filesystem::path& dir) {
   auto config = std::make_unique<Generators::Config>();
+  const auto utf8 = dir.u8string();  // fs::path takes UTF-8
+  config->config_path = fs::path{std::string{utf8.begin(), utf8.end()}};
   if (provider) {
     config->model.decoder.session_options.provider_options.push_back({provider, {}, {}});
     config->model.decoder.session_options.providers.push_back(provider);
@@ -56,8 +59,7 @@ bool HasWebGpu() {
 // float [6], both stored as zeros in the graph).
 std::vector<float> RunGraph(Generators::Model& model, const char* file, OrtSessionOptions& options,
                             const std::vector<int64_t>& expected_shape) {
-  auto session = model.CreateSession(Generators::GetOrtEnv(), std::string{MODEL_PATH "shared-initializers/"} + file,
-                                     &options);
+  auto session = model.CreateSession(Generators::GetOrtEnv(), file, &options);
   float one = 1.0f;
   const int64_t one_shape = 1;
   auto memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
@@ -72,36 +74,41 @@ std::vector<float> RunGraph(Generators::Model& model, const char* file, OrtSessi
   return {data, data + info->GetElementCount()};
 }
 
-struct ScopedWeights {
-  ScopedWeights()
+// A model directory with rows.onnx, flat.onnx and weights.bin, which the config's paths are relative to. Its name
+// isn't ASCII, like that of a model under some users' profiles.
+struct ScopedModelDir {
+  ScopedModelDir()
       : dir{std::filesystem::temp_directory_path() /
-            ("ortgenai_shared_initializers_" +
+            (std::filesystem::path{u"ortgenai_shared_initializers_\u00e9\u03bb_"} +=
              std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))} {
     std::filesystem::create_directories(dir);
+    for (const char* graph : {"rows.onnx", "flat.onnx"}) {
+      std::filesystem::copy_file(std::filesystem::path{MODEL_PATH "shared-initializers"} / graph, dir / graph);
+    }
     std::vector<float> values(8);
     std::iota(values.begin(), values.end(), 0.0f);
     std::ofstream out(dir / "weights.bin", std::ios::binary);
     out.write(reinterpret_cast<const char*>(values.data()), values.size() * sizeof(float));
   }
-  ~ScopedWeights() {
+  ~ScopedModelDir() {
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
   }
   // values[2..7] of weights.bin (0, 1, ..., 7), viewed as [2, 3] by "table" and [6] by "head".
   Generators::Config::Model::SharedInitializer Range(const char* name, std::vector<int64_t> shape,
                                                      const char* offset = "8") const {
-    return {name, (dir / "weights.bin").string(), offset, "24", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, std::move(shape)};
+    return {name, "weights.bin", offset, "24", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, std::move(shape)};
   }
   std::filesystem::path dir;
 };
 
 // Two sessions read one range as [2, 3] and [6]: one copy on the model's device, a view per session, and both graphs
 // see the file's bytes. A different range gets its own copy.
-void ExpectOneCopyViewedWithEachShape(SharedInitializerTestModel& model, const ScopedWeights& weights) {
+void ExpectOneCopyViewedWithEachShape(SharedInitializerTestModel& model, const ScopedModelDir& model_dir) {
   auto table_options = OptionsFor(model);
   auto head_options = OptionsFor(model);
-  model.AddSharedInitializers({weights.Range("table", {2, 3})}, *table_options, *model.p_device_);
-  model.AddSharedInitializers({weights.Range("head", {6})}, *head_options, *model.p_device_);
+  model.AddSharedInitializers({model_dir.Range("table", {2, 3})}, *table_options, *model.p_device_);
+  model.AddSharedInitializers({model_dir.Range("head", {6})}, *head_options, *model.p_device_);
 
   // One buffer (the entry of each call) and a view per session.
   ASSERT_EQ(model.shared_initializer_entries_.size(), 4u);
@@ -113,27 +120,27 @@ void ExpectOneCopyViewedWithEachShape(SharedInitializerTestModel& model, const S
   EXPECT_EQ(RunGraph(model, "flat.onnx", *head_options, {6}), expected);
 
   auto other_options = OptionsFor(model);
-  model.AddSharedInitializers({weights.Range("head", {6}, "4")}, *other_options, *model.p_device_);
+  model.AddSharedInitializers({model_dir.Range("head", {6}, "4")}, *other_options, *model.p_device_);
   ASSERT_EQ(model.shared_initializer_entries_.size(), 6u);
   EXPECT_NE(model.shared_initializer_entries_[4], model.shared_initializer_entries_[0]);
   EXPECT_EQ(RunGraph(model, "flat.onnx", *other_options, {6}), (std::vector<float>{1, 2, 3, 4, 5, 6}));
 }
 
 TEST(SharedInitializerTests, CpuSessionsViewOneCopyOfAFileRangeWithTheirOwnShapes) {
-  ScopedWeights weights;
-  SharedInitializerTestModel model{ConfigFor(nullptr)};
+  ScopedModelDir model_dir;
+  SharedInitializerTestModel model{ConfigFor(nullptr, model_dir.dir)};
   ASSERT_EQ(model.p_device_->GetType(), Generators::DeviceType::CPU);
-  ExpectOneCopyViewedWithEachShape(model, weights);
+  ExpectOneCopyViewedWithEachShape(model, model_dir);
 }
 
 TEST(SharedInitializerTests, WebGpuSessionsViewOneCopyOfAFileRangeWithTheirOwnShapes) {
   if (!HasWebGpu()) {
     GTEST_SKIP() << "WebGPU is not available.";
   }
-  ScopedWeights weights;
-  SharedInitializerTestModel model{ConfigFor("WebGPU")};
+  ScopedModelDir model_dir;
+  SharedInitializerTestModel model{ConfigFor("WebGPU", model_dir.dir)};
   ASSERT_EQ(model.p_device_->GetType(), Generators::DeviceType::WEBGPU);
-  ExpectOneCopyViewedWithEachShape(model, weights);
+  ExpectOneCopyViewedWithEachShape(model, model_dir);
 }
 
 TEST(SharedInitializerTests, EmbeddingAcceptsSharedInitializers) {
