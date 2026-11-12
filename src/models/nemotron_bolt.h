@@ -27,6 +27,11 @@ struct NemotronBoltModel : Model {
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t>, const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> session_;
+  // Optional fixed-width bulk-prefill companion (model.decoder.prefill_filename). It shares the
+  // target's caches and state banks and consumes full prefill_rows_ chunks; R8 handles the rest.
+  std::unique_ptr<OrtSession> prefill_session_;
+  SessionInfo prefill_session_info_;
+  size_t prefill_rows_{};
   std::shared_ptr<Dflash2Model> drafter_model_;
   size_t capacity_{};
   size_t aux_width_{};
@@ -49,11 +54,18 @@ struct NemotronBoltState : State {
   Tensor& AddTensor(const std::string& name, bool input, DeviceInterface* device,
                     ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
   std::vector<int64_t> Verify(std::span<const int32_t> tokens, bool want_predictions = true);
+  std::vector<int64_t> PrefillChunk(std::span<const int32_t> tokens, bool want_prediction);
   void Propose(size_t context_rows, size_t first_position, int32_t anchor, Tensor* aux_override = nullptr);
   void Reset();
 
   const NemotronBoltModel& bolt_;
   std::map<std::string, std::unique_ptr<Tensor>> tensors_;
+  std::map<std::string, std::unique_ptr<Tensor>> prefill_tensors_;
+  std::vector<std::string> prefill_input_storage_, prefill_output_storage_;
+  std::vector<const char*> prefill_input_names_, prefill_output_names_;
+  std::vector<OrtValue*> prefill_inputs_, prefill_outputs_;
+  std::unique_ptr<OrtRunOptions> prefill_run_options_;
+  DeviceSpan<int64_t> prefill_ids_span_;
   std::vector<std::string> input_storage_, output_storage_;
   std::vector<Tensor*> caches_;
   DeviceSpan<int32_t> verify_inputs_span_;

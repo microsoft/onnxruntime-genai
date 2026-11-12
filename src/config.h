@@ -542,6 +542,7 @@ struct Config {
 
     struct Decoder {
       std::string filename;
+      std::string prefill_filename;  // Optional native Bolt bulk-prefill graph, see docs/NemotronBolt.md.
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;

@@ -4,6 +4,7 @@
 #include "engine/request.h"
 #include "search.h"
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <set>
@@ -181,6 +182,43 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
               capacity_ <= static_cast<size_t>(std::numeric_limits<int32_t>::max()) &&
               static_cast<size_t>(config_->model.context_length) <= capacity_ - kBoltVerifyRows,
           "context_length must leave eight scratch slots in the fixed KV capacity");
+  if (!config_->model.decoder.prefill_filename.empty()) {
+    auto prefill_options = session_options_->Clone();
+    // Run Flash attention as eight-row virtual batches so every prompt row keeps the
+    // reduction geometry of eight-row verification. Requires a supporting ORT build.
+    constexpr auto query_partition = "session.gqa.fixed_query_chunk_size";
+    if (!prefill_options->HasConfigEntry(query_partition))
+      prefill_options->AddConfigEntry(query_partition, "8");
+    prefill_session_ = CreateSession(env, config_->model.decoder.prefill_filename, prefill_options.get());
+    prefill_session_info_.Add(*prefill_session_);
+    const auto& prefill = prefill_session_info_;
+    Require(prefill.HasInput("input_ids"), "prefill graph is missing input_ids");
+    const auto prefill_ids = prefill.GetInputShape("input_ids");
+    Require(prefill_ids.size() == 2 && prefill_ids[0] == 1 && prefill_ids[1] > static_cast<int64_t>(kBoltVerifyRows) &&
+                prefill_ids[1] % static_cast<int64_t>(kBoltVerifyRows) == 0 && prefill_ids[1] <= 2048 &&
+                prefill_ids[1] <= config_->model.context_length,
+            "prefill input_ids must be [1,R] with 8 < R <= 2048, R divisible by 8 and within context_length");
+    prefill_rows_ = static_cast<size_t>(prefill_ids[1]);
+    Require(config_->model.decoder.prefill_sequence_length == 0 ||
+                config_->model.decoder.prefill_sequence_length == prefill_ids[1],
+            "prefill_sequence_length must match the prefill graph's fixed chunk size");
+    // Every other prefill input is bound to the target's tensor of the same name.
+    Require(prefill.GetInputNames().size() == info.GetInputNames().size(),
+            "prefill and target graphs must have the same inputs");
+    for (const auto& name : info.GetInputNames()) {
+      Require(prefill.HasInput(name), "prefill graph is missing " + name);
+      if (name == "input_ids") continue;
+      RequireTensor(prefill, name, true, info.GetInputDataType(name), info.GetInputShape(name));
+      if (name.rfind("past_", 0) == 0)
+        RequireTensor(prefill, "present_" + name.substr(5), false, info.GetInputDataType(name),
+                      info.GetInputShape(name));
+    }
+    RequireTensor(prefill, "logits", false, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16, {1, 1, config_->model.vocab_size});
+    RequireTensor(prefill, "pred_ids", false, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {1, 1});
+    RequireTensor(prefill, "aux_hidden_states", false, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16,
+                  {1, prefill_ids[1], static_cast<int64_t>(aux_width_)});
+    Require(prefill_session_->GetOutputNames().size() == outputs.size(), "unexpected prefill outputs");
+  }
   const auto& d = config_->model.dflash2;
   Require(d.block_size == 8 && d.num_draft_tokens == 7 && !d.is_dspark &&
               !d.independent_sampling && !d.inputs.anchor_row_index.empty() &&
@@ -266,6 +304,42 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   pred_ids_span_.CpuSpan();
   for (auto& name : input_storage_) input_names_.push_back(name.c_str());
   for (auto& name : output_storage_) output_names_.push_back(name.c_str());
+  if (model.prefill_session_) {
+    const auto& prefill = model.prefill_session_info_;
+    for (const auto* name : {"input_ids", "logits", "pred_ids", "aux_hidden_states"}) {
+      const bool input = std::string_view{name} == "input_ids";
+      auto tensor = std::make_unique<Tensor>(
+          model.p_device_, input ? prefill.GetInputDataType(name) : prefill.GetOutputDataType(name));
+      tensor->CreateTensor(input ? prefill.GetInputShape(name) : prefill.GetOutputShape(name), true);
+      prefill_tensors_.emplace(name, std::move(tensor));
+    }
+    prefill_ids_span_ = prefill_tensors_.at("input_ids")->GetDeviceSpan<int64_t>();
+    prefill_ids_span_.CpuSpan();
+    // The remaining prefill inputs/outputs alias the target's bindings: the shared metadata span and
+    // the KV/recurrent caches, which the prefill graph updates in place.
+    const auto bind = [&](const std::string& name, const std::vector<std::string>& storage,
+                          const std::vector<OrtValue*>& values) -> OrtValue* {
+      const auto own = prefill_tensors_.find(name);
+      if (own != prefill_tensors_.end()) return own->second->GetOrtTensor();
+      const auto it = std::find(storage.begin(), storage.end(), name);
+      Require(it != storage.end(), "prefill tensor has no target binding: " + name);
+      return values[static_cast<size_t>(it - storage.begin())];
+    };
+    for (const auto& name : model.prefill_session_->GetInputNames()) {
+      prefill_input_storage_.push_back(name);
+      prefill_inputs_.push_back(bind(name, input_storage_, inputs_));
+    }
+    for (const auto& name : model.prefill_session_->GetOutputNames()) {
+      prefill_output_storage_.push_back(name);
+      prefill_outputs_.push_back(bind(name, output_storage_, outputs_));
+    }
+    for (const auto& name : prefill_input_storage_) prefill_input_names_.push_back(name.c_str());
+    for (const auto& name : prefill_output_storage_) prefill_output_names_.push_back(name.c_str());
+    // Prefill is never captured; it must not touch the verification graph IDs owned by State.
+    prefill_run_options_ = OrtRunOptions::Create();
+    prefill_run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
+    prefill_run_options_->AddConfigEntry("gpu_graph_id", "-1");
+  }
   const int32_t capacity = static_cast<int32_t>(model.capacity_);
   Upload(*tensors_.at("total_sequence_length"), std::span<const int32_t>{&capacity, 1});
   if (model.config_->model.decoder.run_options.has_value()) {
@@ -351,6 +425,31 @@ std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, 
   return {cpu.begin(), cpu.end()};
 }
 
+// Runs one full bulk-prefill chunk. The graph advances the shared KV cache and writes the
+// terminal recurrent state to slot zero; its logits/pred_ids describe only the chunk's last row.
+std::vector<int64_t> NemotronBoltState::PrefillChunk(std::span<const int32_t> tokens, bool want_prediction) {
+  Require(bolt_.prefill_session_ && tokens.size() == bolt_.prefill_rows_ &&
+              length_ + tokens.size() <= bolt_.capacity_,
+          "prefill chunk exceeds fixed capacity");
+  auto ids = prefill_ids_span_.CpuSpan();
+  std::copy(tokens.begin(), tokens.end(), ids.begin());
+  prefill_ids_span_.CopyCpuToDevice();
+  auto cpu_in = verify_inputs_span_.CpuSpan();
+  cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_ + tokens.size() - 1);
+  cpu_in[2 * kBoltVerifyRows + 4] = state_row_;
+  verify_inputs_span_.CopyCpuToDevice();
+  bolt_.prefill_session_->Run(prefill_run_options_.get(), prefill_input_names_.data(), prefill_inputs_.data(),
+                              prefill_inputs_.size(), prefill_output_names_.data(), prefill_outputs_.data(),
+                              prefill_outputs_.size());
+  ++stats_.target_forward_passes;
+  if (!want_prediction) return {};
+  // Like R8 prefill, leave the last prompt row's logits at the selected row (state_row_ = 0).
+  auto source = prefill_tensors_.at("logits")->GetByteSpan();
+  tensors_.at("logits")->GetByteSpan().subspan(0, source.size()).CopyFrom(source);
+  const auto cpu = prefill_tensors_.at("pred_ids")->GetDeviceSpan<int64_t>().CopyDeviceToCpu();
+  return {cpu.begin(), cpu.end()};
+}
+
 void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int32_t anchor, Tensor* aux_override) {
   Dflash2Drafter::Feed feed{
       .request = request_.get(),
@@ -382,25 +481,34 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
             ? ((tokens.size() - window) / kBoltVerifyRows) * kBoltVerifyRows
             : 0;
     const size_t draft_rows = tokens.size() - draft_start;
-    const bool single_chunk = draft_rows <= kBoltVerifyRows;
+    // With a prefill graph the last call may be a bulk chunk, so always stage the window.
+    const bool single_chunk = draft_rows <= kBoltVerifyRows && !bolt_.prefill_session_;
     const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
-    auto aux_src = aux_view_->GetByteSpan();
     auto prefill_dst = prefill_aux_->GetByteSpan();
-    for (size_t pos = 0; pos < tokens.size(); pos += kBoltVerifyRows) {
-      const size_t valid = std::min(kBoltVerifyRows, tokens.size() - pos);
-      const bool last_chunk = pos + kBoltVerifyRows >= tokens.size();
-      std::vector<int32_t> block(kBoltVerifyRows, tokens[pos + valid - 1]);
+    for (size_t pos = 0; pos < tokens.size();) {
+      // Full bulk chunks first; the shorter remainder uses the padded R8 target.
+      const bool bulk = bolt_.prefill_session_ && tokens.size() - pos >= bolt_.prefill_rows_;
+      const size_t rows = bulk ? bolt_.prefill_rows_ : kBoltVerifyRows;
+      const size_t valid = std::min(rows, tokens.size() - pos);
+      const bool last_chunk = pos + valid == tokens.size();
+      std::vector<int32_t> block(rows, tokens[pos + valid - 1]);
       std::copy_n(tokens.begin() + pos, valid, block.begin());
-      const auto predictions = Verify(block, last_chunk);
-      if (!single_chunk && pos >= draft_start) {
-        prefill_dst.subspan((pos - draft_start) * aux_row_bytes, valid * aux_row_bytes)
-            .CopyFrom(aux_src.subspan(0, valid * aux_row_bytes));
+      const auto predictions = bulk ? PrefillChunk(block, last_chunk) : Verify(block, last_chunk);
+      if (!single_chunk && pos + valid > draft_start) {
+        // The drafter window may start inside a bulk chunk; copy only its rows.
+        const size_t begin = std::max(pos, draft_start);
+        const size_t bytes = (pos + valid - begin) * aux_row_bytes;
+        auto aux_src = bulk ? prefill_tensors_.at("aux_hidden_states")->GetByteSpan() : aux_view_->GetByteSpan();
+        prefill_dst.subspan((begin - draft_start) * aux_row_bytes, bytes)
+            .CopyFrom(aux_src.subspan((begin - pos) * aux_row_bytes, bytes));
       }
       if (last_chunk) {
-        anchor_ = static_cast<int32_t>(predictions[valid - 1]);
+        anchor_ = static_cast<int32_t>(predictions[bulk ? 0 : valid - 1]);
       }
       length_ += valid;
-      state_row_ = static_cast<int32_t>(valid - 1);
+      // Mamba2Prefill writes its terminal recurrent state to slot zero.
+      state_row_ = bulk ? 0 : static_cast<int32_t>(valid - 1);
+      pos += valid;
     }
     Propose(draft_rows, draft_start, anchor_, single_chunk ? aux_view_.get() : prefill_aux_.get());
     if (tokens.size() < static_cast<size_t>(params_->search.max_length)) {
