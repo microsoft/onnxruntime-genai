@@ -46,7 +46,8 @@ struct TimestampPostProcessorConfig {
 // Model-derived metadata options copied into each processor.
 struct MetadataCoreConfig {
   TimestampPostProcessorConfig timestamps;
-  std::optional<double> seconds_per_frame;
+  int64_t samples_per_frame{};
+  int sample_rate{};
 };
 
 class MetadataCoreState {
@@ -69,7 +70,6 @@ class MetadataCoreState {
   const MetadataCoreConfig& config_;
   TokenWordGroupingState word_grouping_;
   std::optional<int> segment_gap_threshold_frames_;
-  double seconds_per_frame_{};
   // Keep intervals until the word grouper's pending-token watermark releases them.
   std::deque<std::pair<int64_t, int64_t>> pending_token_intervals_;
   size_t first_pending_token_index_{};

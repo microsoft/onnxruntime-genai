@@ -614,24 +614,72 @@ TEST_F(MetadataCoreStateTests, OpaqueFieldGettersReturnBorrowedRecords) {
 
 TEST_F(MetadataCoreStateTests, TimestampMillisecondsRoundOnceFromFrames) {
   model->config_->model.sample_rate = 16000;
-  model->config_->model.hop_length = 20;
-  source->SetStep(tokens, 1);
-  Generators::ASRPostProcessor processor{*generator};
-  size_t word_count = 0;
-  const auto check_words = [&] {
-    for (const auto& result : processor.GetNextResults()) {
-      for (const auto& word : result.timestamps->words) {
-        EXPECT_EQ(word.time_interval.first, 1);
-        EXPECT_EQ(word.time_interval.second, 3);
-        ++word_count;
-      }
-    }
+  model->config_->model.subsampling_factor = 1;
+  struct RoundingCase {
+    int hop_length;
+    int64_t frame;
+    int64_t start_ms;
+    int64_t stop_ms;
   };
-  processor.ProcessNext();
-  check_words();
-  processor.Finalize();
-  check_words();
-  EXPECT_EQ(word_count, 2U);
+  for (const auto& rounding_case : {RoundingCase{20, 1, 1, 3}, RoundingCase{36, 1, 2, 5}, RoundingCase{36, 2, 5, 7},
+                                    RoundingCase{4, 1, 0, 1}, RoundingCase{4, 2, 1, 1}}) {
+    SCOPED_TRACE(rounding_case.hop_length);
+    model->config_->model.hop_length = rounding_case.hop_length;
+    source->SetStep(tokens, rounding_case.frame);
+    Generators::ASRPostProcessor processor{*generator};
+    size_t word_count = 0;
+    const auto check_words = [&] {
+      for (const auto& result : processor.GetNextResults()) {
+        for (const auto& word : result.timestamps->words) {
+          EXPECT_EQ(word.time_interval.first, rounding_case.start_ms);
+          EXPECT_EQ(word.time_interval.second, rounding_case.stop_ms);
+          ++word_count;
+        }
+      }
+    };
+    processor.ProcessNext();
+    check_words();
+    processor.Finalize();
+    check_words();
+    EXPECT_EQ(word_count, 2U);
+  }
+}
+
+TEST_F(MetadataCoreStateTests, TimestampMillisecondsPreserveLargeExactRatios) {
+  struct RatioCase {
+    int sample_rate;
+    int hop_length;
+    int subsampling_factor;
+    int64_t frame;
+    int64_t start_ms;
+    int64_t stop_ms;
+  };
+  for (const auto& ratio_case : {
+           RatioCase{1000, 1, 1, INT64_MAX - 1, INT64_MAX - 1, INT64_MAX},
+           RatioCase{INT32_MAX, 1, 1, INT64_MAX - 1, 4294967298000LL, 4294967298000LL},
+           RatioCase{INT32_MAX, INT32_MAX, INT32_MAX, 1, 2147483647000LL, 4294967294000LL}}) {
+    SCOPED_TRACE(ratio_case.sample_rate);
+    model->config_->model.sample_rate = ratio_case.sample_rate;
+    model->config_->model.hop_length = ratio_case.hop_length;
+    model->config_->model.subsampling_factor = ratio_case.subsampling_factor;
+    source->SetStep(tokens, ratio_case.frame);
+    Generators::ASRPostProcessor processor{*generator};
+    size_t word_count = 0;
+    const auto check_words = [&] {
+      for (const auto& result : processor.GetNextResults()) {
+        for (const auto& word : result.timestamps->words) {
+          EXPECT_EQ(word.time_interval.first, ratio_case.start_ms);
+          EXPECT_EQ(word.time_interval.second, ratio_case.stop_ms);
+          ++word_count;
+        }
+      }
+    };
+    processor.ProcessNext();
+    check_words();
+    processor.Finalize();
+    check_words();
+    EXPECT_EQ(word_count, 2U);
+  }
 }
 
 TEST_F(MetadataCoreStateTests, TimestampMillisecondsRejectOverflow) {

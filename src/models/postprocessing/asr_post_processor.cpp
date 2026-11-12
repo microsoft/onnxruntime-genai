@@ -17,7 +17,8 @@ MetadataCoreConfig GetPostProcessorConfig(const Generator& generator) {
   config.timestamps.level = source.timestamp_level;
   config.timestamps.segment_separators = source.segment_separators;
   if (source.timestamp_level != Config::TimestampLevel::Off) {
-    config.seconds_per_frame = static_cast<double>(source.hop_length) * source.subsampling_factor / source.sample_rate;
+    config.samples_per_frame = static_cast<int64_t>(source.hop_length) * source.subsampling_factor;
+    config.sample_rate = source.sample_rate;
     config.timestamps.segment_gap_threshold_frames = GetSegmentGapThresholdFrames(source);
   }
   return config;
