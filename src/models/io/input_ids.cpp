@@ -150,10 +150,14 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 }
 
 WindowedInputIDs::WindowedInputIDs(State& state) : state_{state} {
-  if (model_.p_device_inputs_->GetType() != DeviceType::QnnHtp &&
-      model_.p_device_inputs_->GetType() != DeviceType::QnnGpu &&
-      model_.p_device_inputs_->GetType() != DeviceType::CPU) {
-    throw std::runtime_error("Sliding a window over input_ids only works with either the QNN or the CPU provider.");
+  // AMDGPU decode inputs are host-accessible pinned memory, same as QNN shared
+  // memory and CPU, so the host window copy in Update is valid there too.
+  const auto device_type = model_.p_device_inputs_->GetType();
+  if (device_type != DeviceType::QnnHtp &&
+      device_type != DeviceType::QnnGpu &&
+      device_type != DeviceType::CPU &&
+      device_type != DeviceType::AMDGPU) {
+    throw std::runtime_error("Sliding a window over input_ids only works with the QNN, CPU, or AMDGPU provider.");
   }
 
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
