@@ -1118,7 +1118,9 @@ void Model::AddSharedInitializers(const std::vector<Config::Model::SharedInitial
       }
 
       if (!entry) {
-        std::ifstream input{data_path_string, std::ios::binary};
+        // Opened by the path's wide form on Windows: the UTF-8 string would be read in the ANSI code page, which
+        // fails for a model under a non-ASCII directory (e.g. a user profile).
+        std::ifstream input = data_path.open(std::ios::binary);
         if (!input) {
           throw std::runtime_error("Failed to open shared initializer data file: " + data_path_string);
         }
