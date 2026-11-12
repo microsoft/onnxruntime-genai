@@ -38,6 +38,7 @@ struct Qwen38StepResult {
   size_t count{};  // 0 for a step that only advanced the prompt
   size_t prompt_tokens_processed{};
   bool prompt_complete{};
+  size_t cached_prefix_tokens{};
   SpeculativeRowMetrics speculation;
 };
 
@@ -93,6 +94,9 @@ class Qwen38GraphSession : public FixedSlotSession {
 
   void AddStats(SpeculativeStats& stats) const;
   const BackendWorkMetrics& WorkMetrics() const { return work_metrics_; }
+  const PrefixCacheMetrics* PrefixMetrics() const override {
+    return device_->PrefixCachingEnabled() ? &prefix_metrics_ : nullptr;
+  }
 
  private:
   struct PendingStep {
@@ -136,6 +140,12 @@ class Qwen38GraphSession : public FixedSlotSession {
   void CheckStatusIfPending();
   // The step before anything that clears the device state (Reset(), ResetSlot()), which also clears the error bits.
   void DrainAndCheckStatus();
+  struct PrefixEntry {
+    std::vector<int32_t> tokens;
+    std::shared_ptr<const Qwen38PrefixState> state;
+  };
+  const PrefixEntry* FindPrefix(std::span<const int32_t> tokens) const;
+  void SavePrefix(std::span<const int32_t> tokens);
 
   std::shared_ptr<Qwen38DecodeDevice> device_;
   Options options_;
@@ -159,6 +169,10 @@ class Qwen38GraphSession : public FixedSlotSession {
   SpeculativeStats stats_;
   TokenProducingSession completions_;
   BackendWorkMetrics work_metrics_;
+  std::vector<PrefixEntry> prefixes_;
+  PrefixCacheMetrics prefix_metrics_;
+  size_t adopted_prefix_{};
+  size_t pending_cached_prefix_{};
 };
 
 // Compatibility name for existing embedders and tests.

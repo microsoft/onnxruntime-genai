@@ -264,14 +264,18 @@ struct StagedPleWorkspace {
   cudaEvent_t prefill_done_event = nullptr;
   cudaStream_t last_prefill_stream = nullptr;
   bool prefill_in_flight = false;
-  // Host PLE n-gram row cache budget per staged workspace: up to kCacheSlots (65,536) rows of kMaxRowBytes (3,072 bytes =
-  // 192 MiB of ngram_cache_data plus 1.56 MiB of key/validity arrays), sized down to kMinCacheSlots (16,384 rows = 48 MiB)
+  // Host PLE n-gram row cache budget per staged workspace: up to kCacheSlots (65,536) rows of kMaxRowBytes (3,264 bytes =
+  // 204 MiB of ngram_cache_data plus 1.56 MiB of key/validity arrays), sized down to kMinCacheSlots (16,384 rows = 51 MiB)
   // when cudaMemGetInfo reports < 12 GiB free memory, or overridden to a power-of-two in
-  // [kMinOverrideCacheSlots (1,024 rows = 3 MiB), kCacheSlots] via ORT_QWEN38_PLE_CACHE_SLOTS.
+  // [kMinOverrideCacheSlots (1,024 rows = 3.2 MiB), kCacheSlots] via ORT_QWEN38_PLE_CACHE_SLOTS.
+  // A slot holds the widest encoded row that a table can have: the 3,072 values that one 1024-thread block gathers (see
+  // Qwen38PleParams) as the 96 blocks of 34 bytes of GGUF Q8_0, which is 192 bytes more than the same values take as FP8 or
+  // INT8 codes. A row that is wider than a slot is not cached.
   static constexpr size_t kCacheSlots = 65536;
   static constexpr size_t kMinCacheSlots = 16384;
   static constexpr size_t kMinOverrideCacheSlots = 1024;
-  static constexpr size_t kMaxRowBytes = 3072;
+  static constexpr size_t kMaxRowValues = 3072;
+  static constexpr size_t kMaxRowBytes = kMaxRowValues / 32 * 34;
   static constexpr size_t kPrepRingRows = 64;        // rows of the prep ring (a power of two)
   static constexpr size_t kPrepRingRowBytes = 8192;  // bytes of one row of the prep ring
   size_t cache_slots = kCacheSlots;
@@ -524,6 +528,52 @@ static cudaError_t ensure_staged_buffers(StagedPleWorkspace& ws, size_t rows, si
   return cudaSuccess;
 }
 
+// The pad_ word of a table (qwen38_plane_abi.h) holds whether its rows are gathered on the host and the format of its shards;
+// every reader of the word goes through these two.
+static inline bool ple_is_staged(int pad) { return (pad & QWEN38_PLANE_PLE_STAGED) != 0; }
+
+__host__ __device__ static inline int ple_format(int pad) { return QWEN38_PLANE_PLE_FORMAT_OF(pad); }
+
+__host__ __device__ static inline bool ple_format_is_gguf(int format) {
+  return format == QWEN38_PLANE_PLE_FORMAT_IQ4_NL || format == QWEN38_PLANE_PLE_FORMAT_Q8_0;
+}
+
+// The bytes of one head of a PLE row: head_dim / 32 GGUF blocks, or head_dim FP8 / INT8 codes.
+__host__ __device__ static inline int ple_head_row_bytes(int head_dim, int format) {
+  if (format == QWEN38_PLANE_PLE_FORMAT_IQ4_NL) return (head_dim / 32) * 18;
+  if (format == QWEN38_PLANE_PLE_FORMAT_Q8_0) return (head_dim / 32) * 34;
+  return head_dim;
+}
+
+__device__ __constant__ int8_t kPleIq4NlValues[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+
+__device__ static __forceinline__ __nv_bfloat16 decode_ple_iq4nl_elem(const unsigned char* head_src, int c) {
+  const int blk = c >> 5;
+  const int in_blk = c & 31;
+  const unsigned char* bp = head_src + blk * 18;
+  const uint16_t d_bits = static_cast<uint16_t>(bp[0]) | (static_cast<uint16_t>(bp[1]) << 8);
+  const float d = __half2float(__ushort_as_half(d_bits));
+  const unsigned char qbyte = bp[2 + (in_blk & 15)];
+  const int nib = (in_blk < 16) ? (qbyte & 0xF) : (qbyte >> 4);
+  return __float2bfloat16_rn(d * static_cast<float>(kPleIq4NlValues[nib]));
+}
+
+__device__ static __forceinline__ __nv_bfloat16 decode_ple_q8_0_elem(const unsigned char* head_src, int c) {
+  const int blk = c >> 5;
+  const int in_blk = c & 31;
+  const unsigned char* bp = head_src + blk * 34;
+  const uint16_t d_bits = static_cast<uint16_t>(bp[0]) | (static_cast<uint16_t>(bp[1]) << 8);
+  const float d = __half2float(__ushort_as_half(d_bits));
+  const int8_t q = static_cast<int8_t>(bp[2 + in_blk]);
+  return __float2bfloat16_rn(d * static_cast<float>(q));
+}
+
+// Value `c` of a head of a GGUF table (ple_format_is_gguf), whose blocks start at `head_src`.
+__device__ static __forceinline__ __nv_bfloat16 decode_ple_gguf_elem(const unsigned char* head_src, int c, int format) {
+  return (format == QWEN38_PLANE_PLE_FORMAT_Q8_0) ? decode_ple_q8_0_elem(head_src, c) : decode_ple_iq4nl_elem(head_src, c);
+}
+
 // Where head `h` of the PLE row for the n-gram (c0, c1, tok) sits in the host table.
 static inline const unsigned char* resolve_ple_head_ptr(const PleParams& HP, int h, i64 tok, i64 c0, i64 c1) {
   unsigned long long mixed = (unsigned long long)tok * (unsigned long long)HP.mult[0];
@@ -543,7 +593,8 @@ static inline const unsigned char* resolve_ple_head_ptr(const PleParams& HP, int
   }
   const i64 first = lo == 0 ? 0 : HP.shard_end[lo - 1];
   const i64 row_idx = id - first;
-  return HP.shard_ptr[lo] + (size_t)row_idx * (size_t)HP.head_dim;
+  const size_t rb = (size_t)ple_head_row_bytes(HP.head_dim, ple_format(HP.pad_));
+  return HP.shard_ptr[lo] + (size_t)row_idx * rb;
 }
 
 static inline size_t ple_ngram_cache_slot(const StagedPleWorkspace& ws, i64 tok, i64 c0, i64 c1) {
@@ -562,8 +613,8 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
   const PleParams& HP = ws.params;
   const i64 c1 = s_c1;
   const i64 c0 = (c1 == HP.eos) ? HP.eos : s_c0;
-  const int hd = HP.head_dim;
-  const size_t total_bytes = (size_t)HP.n_heads * (size_t)hd;
+  const int rb = ple_head_row_bytes(HP.head_dim, ple_format(HP.pad_));
+  const size_t total_bytes = (size_t)HP.n_heads * (size_t)rb;
   size_t cache_slot = 0;
   const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
   if (use_cache) {
@@ -577,7 +628,7 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
     }
   }
   for (int h = 0; h < HP.n_heads; ++h) {
-    memcpy(dst_fp8 + (size_t)h * (size_t)hd, resolve_ple_head_ptr(HP, h, tok, c0, c1), (size_t)hd);
+    memcpy(dst_fp8 + (size_t)h * (size_t)rb, resolve_ple_head_ptr(HP, h, tok, c0, c1), (size_t)rb);
   }
   if (use_cache) {
     memcpy(ws.ngram_cache_data + cache_slot * StagedPleWorkspace::kMaxRowBytes, dst_fp8, total_bytes);
@@ -591,9 +642,9 @@ static inline void host_gather_ple_row(StagedPleWorkspace& ws, i64 tok, i64 s_c0
 static inline void host_gather_ple_rows_batch(StagedPleWorkspace& ws, int rows, const i64* d_toks, const i64* d_c0s,
                                               const i64* d_c1s, unsigned char* fp8_base, size_t row_stride) {
   const PleParams& HP = ws.params;
-  const int hd = HP.head_dim;
+  const int rb = ple_head_row_bytes(HP.head_dim, ple_format(HP.pad_));
   const int nh = HP.n_heads;
-  const size_t total_bytes = (size_t)nh * (size_t)hd;
+  const size_t total_bytes = (size_t)nh * (size_t)rb;
   const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
   const unsigned char* miss_srcs[256];
   unsigned char* miss_dsts[256];
@@ -626,9 +677,9 @@ static inline void host_gather_ple_rows_batch(StagedPleWorkspace& ws, int rows, 
     for (int h = 0; h < nh; ++h) {
       const unsigned char* src = resolve_ple_head_ptr(HP, h, tok, c0, c1);
       miss_srcs[num_misses] = src;
-      miss_dsts[num_misses] = dst_fp8 + (size_t)h * (size_t)hd;
+      miss_dsts[num_misses] = dst_fp8 + (size_t)h * (size_t)rb;
 #ifdef _WIN32
-      ranges[num_misses] = {const_cast<unsigned char*>(src), (SIZE_T)hd};
+      ranges[num_misses] = {const_cast<unsigned char*>(src), (SIZE_T)rb};
 #endif
       ++num_misses;
     }
@@ -647,7 +698,7 @@ static inline void host_gather_ple_rows_batch(StagedPleWorkspace& ws, int rows, 
     }
 #endif
     for (int k = 0; k < num_misses; ++k) {
-      memcpy(miss_dsts[k], miss_srcs[k], (size_t)hd);
+      memcpy(miss_dsts[k], miss_srcs[k], (size_t)rb);
     }
     for (int m = 0; m < num_miss_rows; ++m) {
       const int r = miss_rows[m];
@@ -660,7 +711,7 @@ static inline void host_gather_ple_rows_batch(StagedPleWorkspace& ws, int rows, 
       ws.ngram_cache_valid[cache_slot] = 1;
     }
 #ifdef _WIN32
-    if (HP.pad_ != 0) {
+    if (ple_is_staged(HP.pad_)) {
       for (int k = 0; k < num_misses; ++k) {
         (void)VirtualUnlock(ranges[k].VirtualAddress, ranges[k].NumberOfBytes);
       }
@@ -715,9 +766,9 @@ struct PleGatherPool {
   static void GatherSpans(PleGatherTask* t) {
     StagedPleWorkspace& ws = *t->ws;
     const PleParams& HP = ws.params;
-    const int hd = HP.head_dim;
+    const int rb = ple_head_row_bytes(HP.head_dim, ple_format(HP.pad_));
     const int nh = HP.n_heads;
-    const size_t total_bytes = (size_t)nh * (size_t)hd;
+    const size_t total_bytes = (size_t)nh * (size_t)rb;
     const bool use_cache = (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes);
     // Locals, not thread_local: the caller of the pool is a host thread, and a thread_local with a destructor would leave that
     // destructor, which is code of this module, to run when the host thread exits, perhaps after the module was unloaded.
@@ -763,9 +814,9 @@ struct PleGatherPool {
         for (int h = 0; h < nh; ++h) {
           const unsigned char* src = resolve_ple_head_ptr(HP, h, tok, c0, c1);
           miss_srcs.push_back(src);
-          miss_dsts.push_back(dst_fp8 + (size_t)h * (size_t)hd);
+          miss_dsts.push_back(dst_fp8 + (size_t)h * (size_t)rb);
 #ifdef _WIN32
-          ranges.push_back({const_cast<unsigned char*>(src), (SIZE_T)hd});
+          ranges.push_back({const_cast<unsigned char*>(src), (SIZE_T)rb});
 #endif
         }
       }
@@ -776,10 +827,10 @@ struct PleGatherPool {
       }
 #endif
       for (size_t k = 0; k < miss_srcs.size(); ++k) {
-        memcpy(miss_dsts[k], miss_srcs[k], (size_t)hd);
+        memcpy(miss_dsts[k], miss_srcs[k], (size_t)rb);
       }
 #ifdef _WIN32
-      if (HP.pad_ != 0) {
+      if (ple_is_staged(HP.pad_)) {
         for (const auto& r : ranges) {
           (void)VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
         }
@@ -811,7 +862,7 @@ struct PleGatherPool {
     if (t.failed.load(std::memory_order_relaxed)) return cudaErrorMemoryAllocation;
 
     const PleParams& HP = ws.params;
-    const size_t total_bytes = (size_t)HP.n_heads * (size_t)HP.head_dim;
+    const size_t total_bytes = (size_t)HP.n_heads * (size_t)ple_head_row_bytes(HP.head_dim, ple_format(HP.pad_));
     if (ws.ngram_cache_data != nullptr && total_bytes <= StagedPleWorkspace::kMaxRowBytes) {
       const int max_cache_rows = static_cast<int>(ws.cache_slots / 4);
       const int start_i = (n > max_cache_rows) ? (n - max_cache_rows) : 0;
@@ -906,7 +957,7 @@ static StagedPleWorkspace* resolve_staged_ple_workspace(const void* P, cudaStrea
     *out_error = err;
     return nullptr;
   }
-  if (dev_params.pad_ == 1) {
+  if (ple_is_staged(dev_params.pad_)) {
     for (auto& kv : g_host_ple_workspaces) {
       if (memcmp(&kv.second->params, &dev_params, sizeof(PleParams)) == 0) {
         g_dev_to_host_ple[P] = kv.first;
@@ -935,7 +986,7 @@ static StagedPleWorkspace* resolve_staged_ple_workspace(const void* P, cudaStrea
   return nullptr;
 }
 
-__global__ void k_prep_staged(i64 capacity, int n_heads, int head_dim, float scale, i64 tok, i64 pos, i64 s_c1,
+__global__ void k_prep_staged(i64 capacity, int n_heads, int head_dim, float scale, int format, i64 tok, i64 pos, i64 s_c1,
                               const unsigned char* fp8_row, i64* ctx_out, i64* input_ids, i64* position_ids,
                               int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state) {
   const int tid = threadIdx.x;
@@ -949,6 +1000,22 @@ __global__ void k_prep_staged(i64 capacity, int n_heads, int head_dim, float sca
       state[5] |= 1;
   }
   const int total = n_heads * head_dim;
+  if (ple_format_is_gguf(format)) {
+    const int rb = ple_head_row_bytes(head_dim, format);
+#pragma unroll
+    for (int u = 0; u < 3; ++u) {
+      const int j = tid + u * blockDim.x;
+      if (j < total) {
+        const int h = j / head_dim, c = j - h * head_dim;
+        ple_out[j] = decode_ple_gguf_elem(fp8_row + h * rb, c, format);
+      }
+    }
+    if (tid == 0) {
+      ctx_out[0] = s_c1;
+      ctx_out[1] = tok;
+    }
+    return;
+  }
   unsigned char b[3];
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
@@ -986,9 +1053,9 @@ struct StagedFoldRows {
 
 // One block per row of a folded step of a staged table: the graph inputs, the context and the PLE row of row `blockIdx.x`.
 // Only row 0 writes the committed length, and not at all for a null `committed`.
-__global__ void k_prep_fold_staged(i64 capacity, int n_heads, int head_dim, float scale, StagedFoldRows step, i64 base_pos,
-                                   const unsigned char* fp8_rows, i64* ctx_out, i64* input_ids, i64* position_ids,
-                                   int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state) {
+__global__ void k_prep_fold_staged(i64 capacity, int n_heads, int head_dim, float scale, int format, StagedFoldRows step,
+                                   i64 base_pos, const unsigned char* fp8_rows, i64* ctx_out, i64* input_ids,
+                                   i64* position_ids, int* committed, i64* past_pos, __nv_bfloat16* ple_out, i64* state) {
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
   const i64 tok = step.tok[row];
@@ -1007,6 +1074,18 @@ __global__ void k_prep_fold_staged(i64 capacity, int n_heads, int head_dim, floa
   const int total = n_heads * head_dim;
   const unsigned char* fp8_row = fp8_rows + (size_t)row * StagedPleWorkspace::kPrepRingRowBytes;
   __nv_bfloat16* out_row = ple_out + (size_t)row * total;
+  if (ple_format_is_gguf(format)) {
+    const int rb = ple_head_row_bytes(head_dim, format);
+#pragma unroll
+    for (int u = 0; u < 3; ++u) {
+      const int j = tid + u * blockDim.x;
+      if (j < total) {
+        const int h = j / head_dim, c = j - h * head_dim;
+        out_row[j] = decode_ple_gguf_elem(fp8_row + h * rb, c, format);
+      }
+    }
+    return;
+  }
   unsigned char b[3];
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
@@ -1031,13 +1110,29 @@ __global__ void k_prep_fold_staged(i64 capacity, int n_heads, int head_dim, floa
   }
 }
 
-__global__ void k_ple_rows_staged(int n_heads, int head_dim, float scale, const unsigned char* fp8_rows, int n,
+__global__ void k_ple_rows_staged(int n_heads, int head_dim, float scale, int format, const unsigned char* fp8_rows, int n,
                                   i64 last_c1, i64 last_tok, i64* ctx_out, __nv_bfloat16* ple_out) {
   const int tid = threadIdx.x;
   const int i = blockIdx.x;
   const int total = n_heads * head_dim;
-  const unsigned char* src = fp8_rows + (size_t)i * total;
+  const int rb = ple_head_row_bytes(head_dim, format);
+  const unsigned char* src = fp8_rows + (size_t)i * (size_t)n_heads * (size_t)rb;
   __nv_bfloat16* out = ple_out + (size_t)i * total;
+  if (ple_format_is_gguf(format)) {
+#pragma unroll
+    for (int u = 0; u < 3; ++u) {
+      const int j = tid + u * blockDim.x;
+      if (j < total) {
+        const int h = j / head_dim, c = j - h * head_dim;
+        out[j] = decode_ple_gguf_elem(src + h * rb, c, format);
+      }
+    }
+    if (i == n - 1 && tid == 0) {
+      ctx_out[0] = last_c1;
+      ctx_out[1] = last_tok;
+    }
+    return;
+  }
   unsigned char b[3];
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
@@ -1115,6 +1210,24 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
   __syncthreads();
   const int hd = P->head_dim;
   const int total = P->n_heads * hd;
+  const float scale = P->scale;
+  const int format = ple_format(P->pad_);
+  if (ple_format_is_gguf(format)) {
+    const int rb = ple_head_row_bytes(hd, format);
+#pragma unroll
+    for (int u = 0; u < 3; ++u) {
+      const int j = tid + u * blockDim.x;
+      if (j < total) {
+        const int h = j / hd, c = j - h * hd;
+        ple_out[j] = decode_ple_gguf_elem(s_src[h] + s_row[h] * rb, c, format);
+      }
+    }
+    if (tid == 0) {
+      ctx_out[0] = c1;
+      ctx_out[1] = tok;
+    }
+    return;
+  }
   // all (<= 3) host-memory byte loads of this thread are issued before any use: one PCIe round trip
   unsigned char b[3];
 #pragma unroll
@@ -1126,7 +1239,6 @@ __global__ void k_prep(const PleParams* P, const i64* tok_ptr, const i64* pos_pt
       b[u] = s_src[h][s_row[h] * hd + c];
     }
   }
-  const float scale = P->scale;
   const bool is_int8 = (scale < 0.0f);
   const float abs_scale = is_int8 ? -scale : scale;
 #pragma unroll
@@ -1237,6 +1349,24 @@ __global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i6
       atomicOr((unsigned long long*)&state_b[5], 1ULL);
   }
   __syncthreads();
+  const float scale = P->scale;
+  const int format = ple_format(P->pad_);
+  if (ple_format_is_gguf(format)) {
+    const int rb = ple_head_row_bytes(hd, format);
+#pragma unroll
+    for (int u = 0; u < 3; ++u) {
+      const int j = tid + u * blockDim.x;
+      if (j < total) {
+        const int h = j / hd, c = j - h * hd;
+        row_ple[j] = decode_ple_gguf_elem(s_src[h] + s_row[h] * rb, c, format);
+      }
+    }
+    if (tid == 0) {
+      ctx_a_b[2 * row + 0] = c1;
+      ctx_a_b[2 * row + 1] = tok;
+    }
+    return;
+  }
   unsigned char b_vals[3];
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
@@ -1247,7 +1377,6 @@ __global__ void __launch_bounds__(1024) k_prep_fold(const PleParams* P, const i6
       b_vals[u] = s_src[h][s_row[h] * hd + c];
     }
   }
-  const float scale = P->scale;
   const bool is_int8 = (scale < 0.0f);
   const float abs_scale = is_int8 ? -scale : scale;
 #pragma unroll
@@ -1447,6 +1576,24 @@ __global__ void k_ple_rows(const PleParams* P, const i64* tokens, int n, const i
   const int hd = P->head_dim;
   const int total = P->n_heads * hd;
   __nv_bfloat16* out = ple_out + (size_t)i * total;
+  const float scale = P->scale;
+  const int format = ple_format(P->pad_);
+  if (ple_format_is_gguf(format)) {
+    const int rb = ple_head_row_bytes(hd, format);
+#pragma unroll
+    for (int u = 0; u < 3; ++u) {
+      const int j = tid + u * blockDim.x;
+      if (j < total) {
+        const int h = j / hd, c = j - h * hd;
+        out[j] = decode_ple_gguf_elem(s_src[h] + s_row[h] * rb, c, format);
+      }
+    }
+    if (i == n - 1 && tid == 0) {
+      ctx_out[0] = c1;
+      ctx_out[1] = tok;
+    }
+    return;
+  }
   unsigned char b[3];
 #pragma unroll
   for (int u = 0; u < 3; ++u) {
@@ -1457,7 +1604,6 @@ __global__ void k_ple_rows(const PleParams* P, const i64* tokens, int n, const i
       b[u] = s_src[h][s_row[h] * hd + c];
     }
   }
-  const float scale = P->scale;
   const bool is_int8 = (scale < 0.0f);
   const float abs_scale = is_int8 ? -scale : scale;
 #pragma unroll
@@ -1797,9 +1943,9 @@ static int prep_staged_fold_rows(cudaStream_t stream, const void* P, int rows, c
   hook_launch();
   BeginLaunch();
   k_prep_fold_staged<<<rows, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
-                                                ws->params.scale, step, ws->scalars[1], device_rows, (i64*)ctx_out,
-                                                (i64*)input_ids, (i64*)position_ids, (int*)committed, (i64*)past_pos,
-                                                (__nv_bfloat16*)ple_out, (i64*)state);
+                                                ws->params.scale, ple_format(ws->params.pad_), step, ws->scalars[1],
+                                                device_rows, (i64*)ctx_out, (i64*)input_ids, (i64*)position_ids,
+                                                (int*)committed, (i64*)past_pos, (__nv_bfloat16*)ple_out, (i64*)state);
   return LaunchStatus();
 }
 
@@ -1857,7 +2003,7 @@ QWEN38_PLANE_EXPORT void qwen38_plane_set_ple_host_params(const void* params) {
   const PleParams* hp = static_cast<const PleParams*>(params);
   std::lock_guard<std::mutex> lock(g_staged_ple_mu);
   g_dev_to_host_ple.clear();
-  if (hp->pad_ == 1) {
+  if (ple_is_staged(hp->pad_)) {
     auto& ws = g_host_ple_workspaces[params];
     if (!ws) {
       ws = std::make_unique<StagedPleWorkspace>();
@@ -2012,9 +2158,9 @@ QWEN38_PLANE_EXPORT int qwen38_plane_prep(void* s, const void* P, const void* to
       hook_launch();
       BeginLaunch();
       k_prep_staged<<<1, 1024, 0, stream>>>(ws->params.capacity, ws->params.n_heads, ws->params.head_dim,
-                                            ws->params.scale, tok, pos, s_c1, slot_dev, (i64*)ctx_out,
-                                            (i64*)input_ids, (i64*)position_ids, (int*)committed, (i64*)past_pos,
-                                            (__nv_bfloat16*)ple_out, (i64*)state);
+                                            ws->params.scale, ple_format(ws->params.pad_), tok, pos, s_c1, slot_dev,
+                                            (i64*)ctx_out, (i64*)input_ids, (i64*)position_ids, (int*)committed,
+                                            (i64*)past_pos, (__nv_bfloat16*)ple_out, (i64*)state);
       const int launch_err = LaunchStatus();
       if (launch_err != 0) {
         return launch_err;
@@ -2091,7 +2237,8 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
       if (staged_stream_is_capturing(stream)) {
         return (int)cudaErrorStreamCaptureUnsupported;
       }
-      const size_t total = (size_t)ws->params.n_heads * (size_t)ws->params.head_dim;
+      const size_t total =
+          (size_t)ws->params.n_heads * (size_t)ple_head_row_bytes(ws->params.head_dim, ple_format(ws->params.pad_));
       err = staged_bind_device(*ws);
       if (err == cudaSuccess) {
         err = ensure_staged_buffers(*ws, (size_t)n, total);
@@ -2147,8 +2294,8 @@ QWEN38_PLANE_EXPORT int qwen38_plane_ple_rows(void* s, const void* P, const void
       hook_launch();
       BeginLaunch();
       k_ple_rows_staged<<<n, 1024, 0, stream>>>(ws->params.n_heads, ws->params.head_dim, ws->params.scale,
-                                                ws->prefill_fp8_dev, n, last_c1, last_tok, (i64*)ctx_out,
-                                                (__nv_bfloat16*)ple_out);
+                                                ple_format(ws->params.pad_), ws->prefill_fp8_dev, n, last_c1, last_tok,
+                                                (i64*)ctx_out, (__nv_bfloat16*)ple_out);
       const int launch_err = LaunchStatus();
       if (launch_err != 0) {
         return launch_err;

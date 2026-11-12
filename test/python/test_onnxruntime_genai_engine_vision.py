@@ -4,6 +4,7 @@
 """Real-checkpoint gates; set ORTGENAI_REQUIRE_ENGINE_VISION=1 in qualification jobs."""
 
 import gc
+import io
 import json
 import os
 import struct
@@ -138,6 +139,46 @@ def vision_model(request, vision_package):
         config.set_provider_option("cuda", "arena_extend_strategy", "kSameAsRequested")
     model = og.Model(config)
     yield model, drafts
+    del model
+    gc.collect()
+
+
+@pytest.fixture(scope="module")
+def ling_vision_model():
+    directory = os.environ.get("ORTGENAI_ENGINE_LING_VISION_MODEL")
+    if not directory or not Path(directory, "genai_config.json").is_file():
+        if os.environ.get("ORTGENAI_REQUIRE_ENGINE_LING_VISION") == "1":
+            pytest.fail("ORTGENAI_ENGINE_LING_VISION_MODEL must name a real packed Ling vision package")
+        pytest.skip("Set ORTGENAI_ENGINE_LING_VISION_MODEL to run Ling admission regressions")
+    if not og.is_cuda_available():
+        pytest.fail("Ling Engine vision execution requires CUDA")
+    manifest = json.loads(Path(directory, "genai_config.json").read_text())
+    assert manifest["model"]["type"] == "bailing_moe_v3_vl"
+    assert manifest["model"]["vision"]["filename"]
+    assert manifest["model"]["embedding"]["filename"]
+    assert not manifest["model"].get("dflash2", {}).get("filename")
+    config = og.Config(directory)
+    config.overlay(
+        json.dumps(
+            {
+                "model": {"decoder": {"session_options": {"session.use_device_allocator_for_initializers": "1"}}},
+                "engine": {
+                    "dynamic_batching": {
+                        "num_blocks": 16,
+                        "max_batch_size": 1,
+                        "max_scheduled_tokens": 17,
+                        "prefix_caching": False,
+                        "media_host_bytes": 64 * 1024 * 1024,
+                        "media_device_bytes": 4 * 1024 * 1024,
+                    }
+                },
+                "search": {"chunk_size": 17},
+            }
+        )
+    )
+    config.set_provider_option("cuda", "enable_cuda_graph", "0")
+    model = og.Model(config)
+    yield model
     del model
     gc.collect()
 
@@ -277,6 +318,49 @@ def test_formatted_admission_reclaims_abandoned_media_before_host_preflight(visi
     survivor.close()
 
 
+def test_oversized_turn_preserves_reusable_media(vision_package):
+    directory, _ = vision_package
+    config = og.Config(directory)
+    config.overlay(
+        json.dumps(
+            {
+                "model": {"dflash2": {"filename": ""}},
+                "engine": {
+                    "dynamic_batching": {
+                        "num_blocks": 64,
+                        "max_batch_size": 1,
+                        "prefix_caching": True,
+                        "media_host_bytes": 21 * 1024 * 1024,
+                    }
+                },
+            }
+        )
+    )
+    config.set_provider_option("cuda", "enable_cuda_graph", "0")
+    model = og.Model(config)
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    value = prompt(tokenizer, 1, "Describe the images briefly. " + "code " * 200)
+    images = og.Images.open(str(IMAGE_DIR / "sheet.png"))
+    cached_tokens = []
+    for iteration in range(3):
+        if iteration == 2:
+            options = og.RequestOptions()
+            options.set_max_session_tokens(len(tokenizer.encode(value)) + 1)
+            rejected = engine.create_request(options=options)
+            larger_image = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
+            with pytest.raises(RuntimeError, match="Expanded image rows exceed"):
+                begin(rejected, value, larger_image, maximum=1)
+            rejected.close()
+        request = new_request(engine)
+        begin(request, value, images, maximum=1)
+        _, finishes, _ = drain(engine)
+        assert len(finishes) == 1
+        cached_tokens.append(finishes[0][3])
+        request.close()
+    assert cached_tokens[1] > 0
+    assert cached_tokens[2] == cached_tokens[1]
+
+
 def test_text_only_export_rejects_images_without_consuming_the_turn(vision_package):
     directory, manifest = vision_package
     config = og.Config(directory)
@@ -308,12 +392,18 @@ def test_text_only_export_rejects_images_without_consuming_the_turn(vision_packa
 
 def test_vision_export_requires_multimodal_position_bindings(vision_package):
     directory, manifest = vision_package
-    bindings = [("position_ids", "three-axis int64 decoder position IDs")]
-    if manifest["model"]["type"] == "qwen4_exp":
-        bindings.append(("rotary_position_ids", "three-axis int64 sparse-indexer rotary history"))
-    for binding, diagnostic in bindings:
+    bindings = [
+        ("position_ids", "missing_position_input", "three-axis int64 decoder position IDs"),
+        ("rotary_position_ids", "missing_rotary_input", "rotary history must use three-axis int64 positions"),
+        (
+            "rotary_position_ids",
+            manifest["model"]["decoder"]["inputs"]["position_ids"],
+            "rotary history must use three-axis int64 positions",
+        ),
+    ]
+    for binding, input_name, diagnostic in bindings:
         config = og.Config(directory)
-        config.overlay(json.dumps({"model": {"decoder": {"inputs": {binding: "missing_position_input"}}}}))
+        config.overlay(json.dumps({"model": {"decoder": {"inputs": {binding: input_name}}}}))
         config.set_provider_option("cuda", "enable_cuda_graph", "0")
         with pytest.raises(RuntimeError, match=diagnostic):
             og.Model(config)
@@ -420,6 +510,93 @@ def test_admission_failures_preserve_turn_id_and_preflight_allocations(vision_mo
     assert turn == 1
     drain(engine)
     request.close()
+
+
+def test_exact_expanded_prompt_capacity_rejects_before_pixels(vision_model):
+    model, _ = vision_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    images = og.Images.open(str(IMAGE_DIR / "cars.jpg"))
+    value = prompt(tokenizer, 1)
+    processed = model.create_multimodal_processor()(value, images=images)
+    options = og.RequestOptions()
+    options.set_max_session_tokens(processed["input_ids"].as_numpy().size)
+    request = engine.create_request(options=options)
+    try:
+        with pytest.raises(RuntimeError, match="Expanded image rows exceed the remaining session capacity"):
+            begin(request, value, images, maximum=1)
+        turn = begin(request, "x", maximum=1)
+        assert turn == 1
+        drain(engine)
+    finally:
+        request.close()
+
+
+@pytest.mark.parametrize(
+    ("sizes", "suffix"),
+    [
+        ([(64, 64)], " "),
+        ([(128, 96)], "\n\ncode"),
+        ([(64, 64), (96, 64)], "\n"),
+    ],
+)
+def test_ling_expanded_admission_capacity_and_history_recovery(ling_vision_model, sizes, suffix):
+    """Source-shaped image/newline admission checks, not full-model numerical qualification."""
+    from PIL import Image  # noqa: PLC0415
+
+    model = ling_vision_model
+    engine, tokenizer = og.Engine(model), og.Tokenizer(model)
+    marker = "<|vision_start|><|image_pad|><|vision_end|>"
+    encoded = []
+    expanded = ""
+    for index, (width, height) in enumerate(sizes):
+        image = Image.new("RGB", (width, height), (32 + index * 64, 96, 192))
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        encoded.append(buffer.getvalue())
+        rows = (width // 32) * (height // 32)
+        expanded += "<|vision_start|>" + "<|image_pad|>" * rows + "<|vision_end|>\n"
+    value = marker * len(sizes) + suffix
+    images = og.Images.open_bytes(*encoded)
+    expected_ids = list(tokenizer.encode(expanded + suffix))
+    processed = model.create_multimodal_processor()(value, images=images)
+    assert processed["input_ids"].as_numpy().reshape(-1).tolist() == expected_ids
+
+    for remaining in (-1, 0, 1):
+        options = og.RequestOptions()
+        options.set_max_session_tokens(len(expected_ids) + remaining)
+        request = engine.create_request(options=options)
+        try:
+            if remaining <= 0:
+                with pytest.raises(RuntimeError, match="Expanded image rows exceed the remaining session capacity"):
+                    begin(request, value, images, maximum=1)
+                turn = begin(request, "x", maximum=1)
+            else:
+                turn = begin(request, value, images, maximum=1)
+            assert turn == 1
+            _, finishes, _ = drain(engine)
+            assert len(finishes) == 1
+            if remaining > 0:
+                assert finishes[0][1] == len(expected_ids)
+        finally:
+            request.close()
+
+    options = og.RequestOptions()
+    options.set_max_session_tokens(512)
+    request = engine.create_request(options=options)
+    try:
+        with pytest.raises(RuntimeError, match="marker count"):
+            begin(request, value, maximum=1)
+        first = begin(request, value, images, maximum=1)
+        assert first == 1
+        _, finishes, _ = drain(engine)
+        assert finishes[0][1] == len(expected_ids)
+        later = begin(request, "x", maximum=1)
+        assert later > first
+        _, finishes, _ = drain(engine)
+        assert len(finishes) == 1
+        assert engine.get_speculative_stats()["draft_forward_passes"] == 0
+    finally:
+        request.close()
 
 
 def test_text_api_continuation_after_media_and_cancellation(vision_model):

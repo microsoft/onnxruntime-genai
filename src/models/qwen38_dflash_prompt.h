@@ -64,6 +64,8 @@ class Qwen38DflashPromptFeatures {
     return saved;
   }
 
+  std::optional<Chunk> SavedChunk() const noexcept { return saved_; }
+
  private:
   bool Admit(Chunk chunk, size_t total_tokens) noexcept {
     const size_t end = chunk.position + chunk.rows;

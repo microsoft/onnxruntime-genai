@@ -533,7 +533,7 @@ std::span<const int32_t> Request::PrefixTokensCpu() const {
 }
 
 std::array<int64_t, 3> Request::Position(size_t row) const {
-  return MediaPosition(media_, row, static_cast<size_t>(params_->model_->config_->model.vision.spatial_merge_size));
+  return MediaPosition(media_, row);
 }
 
 void Request::RewindToStartOfTurn(uint64_t turn_id) {

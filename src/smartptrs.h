@@ -248,7 +248,8 @@ struct StateUpdateReplayDesc {
 // Version 19: Config::Model::Qwen38Graph gained max_batch_size, which changed the layouts of Config::Model and Config.
 // Version 20: Config gained memory budget/headroom settings; DeviceInterface gained sampler startup-byte sizing.
 // Version 21: Config::Engine::DynamicBatching gained host/device media budgets, changing Config's layout.
-inline constexpr uint32_t kDeviceInterfaceVersion = 21;
+// Version 22: Config's decoder/drafter layouts gained GGUF initializer mappings.
+inline constexpr uint32_t kDeviceInterfaceVersion = 22;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
