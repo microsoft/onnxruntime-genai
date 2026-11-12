@@ -270,11 +270,24 @@ struct Config {
       } outputs;
     } encoder;
 
+    // An initializer whose bytes the sessions take from one device buffer (OrtApi::AddInitializer) instead of
+    // each loading its own copy. Entries naming the same file range and data type share that buffer even when
+    // their shapes differ, so a graph can view the bytes with the shape it declares.
+    struct SharedInitializer {
+      std::string name;
+      std::string data_file;
+      std::string offset;
+      std::string length;
+      int data_type{};
+      std::vector<int64_t> shape;
+    };
+
     struct Embedding {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
       bool prefault{true};
+      std::vector<SharedInitializer> shared_initializers;  // Read by the multimodal pipeline, e.g. a table tied to the LM head
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
@@ -511,15 +524,6 @@ struct Config {
         } outputs;
       } decoder_kv;
     } moonshine;
-
-    struct SharedInitializer {
-      std::string name;
-      std::string data_file;
-      std::string offset;
-      std::string length;
-      int data_type{};
-      std::vector<int64_t> shape;
-    };
 
     struct GgufTensorMapping {
       std::string onnx_name;

@@ -187,7 +187,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
-  std::vector<std::shared_ptr<void>> shared_initializer_entries_;
+  std::vector<std::shared_ptr<void>> shared_initializer_entries_;  // Device buffers and the views sessions use
   std::vector<std::unique_ptr<OrtValue>> gguf_external_values_;
   // Device allocations of GGUF tensors registered with "share": true. Models on the same device that map the same
   // tensor with the same layout hold the same allocation.
@@ -229,7 +229,11 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
  protected:
   std::shared_ptr<ThreadPool> GetOrCreatePreprocessingThreadPool() const;
   void CreateSessionOptions();
-  void AddSharedInitializers();
+  void AddSharedInitializers();  // The decoder's, on the model's device
+  // Points the named initializers of the session built from `session_options` at one copy of their bytes on
+  // `device`, shared by every session (of any model in the process) that names the same file range.
+  void AddSharedInitializers(const std::vector<Config::Model::SharedInitializer>& initializers,
+                             OrtSessionOptions& session_options, DeviceInterface& device);
   void AddGgufInitializers(OrtSessionOptions& session_options);
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;

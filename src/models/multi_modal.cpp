@@ -91,6 +91,9 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
 
   embedding_session_options_ = OrtSessionOptions::Create();
   embedding_device_ = CreateSessionOptionsFromConfig(config_->model.embedding.session_options.has_value() ? config_->model.embedding.session_options.value() : config_->model.decoder.session_options, *embedding_session_options_, true, /*disable_graph_capture=*/true);
+  // E.g. an embedding table tied to the decoder's LM head: one device copy for both sessions.
+  AddSharedInitializers(config_->model.embedding.shared_initializers, *embedding_session_options_,
+                        embedding_device_ ? *embedding_device_ : *p_device_);
 
   embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
   if (!config_->model.engram.filename.empty()) {
