@@ -322,6 +322,7 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
   }
   decoder.run_options = dflash2.run_options;
   decoder.shared_initializers = dflash2.shared_initializers;
+  decoder.gguf_initializers = dflash2.gguf_initializers;
   decoder.num_hidden_layers = dflash2.num_hidden_layers;
   decoder.num_key_value_heads = dflash2.num_key_value_heads;
   decoder.head_size = dflash2.head_size;
@@ -506,12 +507,13 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
 
 Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
                            std::shared_ptr<CpuEmbedding> cpu_embedding,
-                           const std::function<void(OrtSessionOptions&)>& configure_session_options)
+                           const std::function<void(OrtSessionOptions&)>& configure_session_options,
+                           bool is_session_recreation)
     : Model{std::move(config)}, cpu_embedding_{std::move(cpu_embedding)} {
   if (configure_session_options && session_options_) {
     configure_session_options(*session_options_);
   }
-  session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get(), is_session_recreation);
   session_info_.Add(*session_);
   if (cpu_embedding_) {
     cpu_embedding_->ValidateConsumer(session_info_, config_->model.dflash2.inputs.embeddings);

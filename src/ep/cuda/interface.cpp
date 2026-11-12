@@ -1223,8 +1223,7 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
     const size_t config_slack = static_cast<size_t>(
         std::max(0, raw_config_slack > 0 ? raw_config_slack : 0));
     const size_t desired = static_cast<size_t>(window_size) + std::max(chunk_slack, config_slack);
-    // GQA requires a full window even when generation stops before the window fills.
-    return desired >= static_cast<size_t>(max_length) ? std::max(window_size, max_length) : static_cast<int>(desired);
+    return desired >= static_cast<size_t>(max_length) ? max_length : static_cast<int>(desired);
   }
 
   bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& decoder) const override {

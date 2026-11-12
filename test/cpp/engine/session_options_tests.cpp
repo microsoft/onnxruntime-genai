@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "ep/cuda/session_options.h"
+#include "models/env_utils.h"
 #include "models/session_options.h"
 
 namespace Generators::test {
@@ -30,6 +31,144 @@ std::string SelectionError(const std::vector<std::string>& ids, const std::optio
 }
 
 }  // namespace
+
+#if USE_CUDA
+class CudaBridgeProbeTest : public testing::Test {
+ protected:
+  const OrtApi* saved_api{};
+  OrtApi test_api{};
+  inline static bool available{};
+
+  static OrtStatus* ORT_API_CALL Create(OrtCUDAProviderOptionsV2** out) noexcept {
+    static int sentinel;
+    *out = reinterpret_cast<OrtCUDAProviderOptionsV2*>(&sentinel);
+    return nullptr;
+  }
+  static void ORT_API_CALL Release(OrtCUDAProviderOptionsV2*) noexcept {}
+
+  static OrtStatus* ORT_API_CALL Update(OrtCUDAProviderOptionsV2*, const char* const* keys,
+                                        const char* const* values, size_t count) noexcept {
+    EXPECT_EQ(count, 1u);
+    if (count != 1) return nullptr;  // Empty updates cannot establish provider availability.
+    EXPECT_STREQ(keys[0], "device_id");
+    EXPECT_STREQ(values[0], "0");
+    return available ? nullptr : Ort::api->CreateStatus(ORT_FAIL, "Provider bridge unavailable");
+  }
+
+  void SetUp() override {
+    saved_api = Ort::api;
+    test_api = *saved_api;
+    test_api.CreateCUDAProviderOptions = Create;
+    test_api.ReleaseCUDAProviderOptions = Release;
+    test_api.UpdateCUDAProviderOptions = Update;
+    Ort::api = &test_api;
+  }
+  void TearDown() override { Ort::api = saved_api; }
+};
+
+TEST_F(CudaBridgeProbeTest, LoadableBridgeIsAvailable) {
+  available = true;
+  EXPECT_TRUE(CUDAExecutionProvider::IsProviderBridgeAvailable());
+}
+
+TEST_F(CudaBridgeProbeTest, MissingBridgeAllowsPluginFallback) {
+  available = false;
+  EXPECT_FALSE(CUDAExecutionProvider::IsProviderBridgeAvailable());
+}
+
+TEST(CudaProviderRegistrationTest, AvailableBridgeDoesNotAutoRegisterAPlugin) {
+  if (!GetEnv("ORT_CUDA_PLUGIN_EP_PATH").empty()) {
+    GTEST_SKIP() << "The caller explicitly requested plugin registration";
+  }
+  if (!FindRegisteredEpDevices("CUDAExecutionProvider").empty()) {
+    GTEST_SKIP() << "CUDA is already registered as a plugin";
+  }
+  if (!CUDAExecutionProvider::IsProviderBridgeAvailable())
+    GTEST_SKIP() << "A CUDA provider bridge is unavailable";
+
+  auto session_options = OrtSessionOptions::Create();
+  session_options->AddConfigEntry("ep.cuda.gated_delta_net_bf16_precision", "bf16");
+  Config config;
+  ProviderOptions provider_options;
+  provider_options.name = "cuda";
+  ASSERT_NE(CUDAExecutionProvider::AppendExecutionProvider(*session_options, provider_options, config), nullptr);
+  EXPECT_TRUE(FindRegisteredEpDevices("CUDAExecutionProvider").empty());
+}
+#endif
+
+class CudaDeviceMetadataTest : public testing::Test {
+ protected:
+  struct KeyValue {
+    const char* key;
+    const char* value;
+  };
+  struct Device {
+    const KeyValue* metadata;
+    const KeyValue* options;
+  };
+
+  const OrtApi* saved_api{};
+  OrtApi test_api{};
+
+  static const OrtKeyValuePairs* ORT_API_CALL Metadata(const OrtEpDevice* device) noexcept {
+    return reinterpret_cast<const OrtKeyValuePairs*>(reinterpret_cast<const Device*>(device)->metadata);
+  }
+  static const OrtKeyValuePairs* ORT_API_CALL Options(const OrtEpDevice* device) noexcept {
+    return reinterpret_cast<const OrtKeyValuePairs*>(reinterpret_cast<const Device*>(device)->options);
+  }
+  static void ORT_API_CALL Pairs(const OrtKeyValuePairs* pairs, const char* const** keys,
+                                 const char* const** values, size_t* count) noexcept {
+    const auto* pair = reinterpret_cast<const KeyValue*>(pairs);
+    *keys = &pair->key;
+    *values = &pair->value;
+    *count = 1;
+  }
+
+  void SetUp() override {
+    saved_api = Ort::api;
+    test_api = *saved_api;
+    test_api.EpDevice_EpMetadata = Metadata;
+    test_api.EpDevice_EpOptions = Options;
+    test_api.GetKeyValuePairs = Pairs;
+    Ort::api = &test_api;
+  }
+  void TearDown() override { Ort::api = saved_api; }
+
+  static std::string ReadId(const char* metadata_id, const char* option_id) {
+    const KeyValue metadata{"cuda_device_id", metadata_id};
+    const KeyValue options{"device_id", option_id};
+    const Device device{metadata_id ? &metadata : nullptr, option_id ? &options : nullptr};
+    return GetCudaDeviceIdMetadata(reinterpret_cast<const OrtEpDevice*>(&device));
+  }
+};
+
+TEST_F(CudaDeviceMetadataTest, PluginOptionsSupplyTheIdWhenMetadataIsAbsent) {
+  EXPECT_EQ(ReadId(nullptr, "1"), "1");
+}
+
+TEST_F(CudaDeviceMetadataTest, LegacyMetadataStillSuppliesTheId) {
+  EXPECT_EQ(ReadId("1", nullptr), "1");
+}
+
+TEST_F(CudaDeviceMetadataTest, MetadataTakesPrecedenceOverPluginOptions) {
+  EXPECT_EQ(ReadId("1", "0"), "1");
+}
+
+TEST_F(CudaDeviceMetadataTest, EmptyMetadataFallsBackToPluginOptions) {
+  EXPECT_EQ(ReadId("", "1"), "1");
+}
+
+TEST_F(CudaDeviceMetadataTest, MissingMetadataAndOptionsReportNoId) {
+  EXPECT_TRUE(ReadId(nullptr, nullptr).empty());
+}
+
+TEST_F(CudaDeviceMetadataTest, EmptyPluginOptionsReportNoId) {
+  EXPECT_TRUE(ReadId(nullptr, "").empty());
+}
+
+TEST_F(CudaDeviceMetadataTest, MultiDigitOrdinalsArePreserved) {
+  EXPECT_EQ(ReadId(nullptr, "11"), "11");
+}
 
 TEST(CudaArenaOptionTest, StrategyAcceptsTheSymbolicNamesAndNumbers) {
   using CUDAExecutionProvider::ParseArenaOptionValue;

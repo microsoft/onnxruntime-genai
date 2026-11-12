@@ -2,6 +2,8 @@
 
 #include <optional>
 
+#include "attention_mask.h"
+#include "position_ids.h"
 #include "position_inputs.h"
 
 namespace Generators {

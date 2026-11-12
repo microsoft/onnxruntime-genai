@@ -93,10 +93,6 @@ struct CpuEngram {
     auto host = bytes.CpuSpan();
     const size_t row_bytes = static_cast<size_t>(width) * Ort::SizeOf(type);
     const auto& cpu_memory = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
-    auto output_memory = output.p_device_->GetType() == DeviceType::CUDA
-                             ? OrtMemoryInfo::Create("CudaPinned", OrtDeviceAllocator,
-                                                     output.p_device_->GetMemoryInfo()->GetDeviceId(), OrtMemTypeCPUOutput)
-                             : OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
     size_t offset = 0;
     size_t history_offset = 0;
     DeviceSpan<int64_t> present_span;
@@ -122,7 +118,8 @@ struct CpuEngram {
                                                ids_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
       auto past_tensor = OrtValue::CreateTensor(cpu_memory, past.data(), past.size() * sizeof(int64_t),
                                                 past_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-      auto embeddings = OrtValue::CreateTensor(*output_memory, host.data() + offset * row_bytes,
+      // The workspace owns any physical pinning; this is a host tensor, as in CpuEmbedding::Run.
+      auto embeddings = OrtValue::CreateTensor(cpu_memory, host.data() + offset * row_bytes,
                                                ids.size() * row_bytes, embeddings_shape, type);
       auto present = present_tokens
                          ? OrtValue::CreateTensor(cpu_memory, present_span.CpuSpan().data() + history_offset,
@@ -899,7 +896,7 @@ void VarlenDecoderIO::PrepareRotaryPositionIds(
       // Keep fixed capture geometry, but never forecast unprocessed image coordinates into its tail.
       std::iota(cpu.begin() + start + history, cpu.begin() + start + capacity, static_cast<int64_t>(history));
     }
-    MediaPositions(request->Media(), 0, static_cast<size_t>(model->config_->model.vision.spatial_merge_size), planes);
+    MediaPositions(request->Media(), 0, planes);
   }
   positions.CopyCpuToDevice();
   input_names_.push_back(name.c_str());

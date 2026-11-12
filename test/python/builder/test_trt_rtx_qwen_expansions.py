@@ -20,6 +20,7 @@ def _model(ep, dtype, model_class=Model):
     model.io_dtype = dtype
     model.values = {}
     model.node_names = set()
+    model.quant_attrs = {"nodes_to_exclude": []}
     model.use_paged_attention = False
     model.hidden_size = 24
     model.head_size = 12

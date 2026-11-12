@@ -86,6 +86,7 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
       // ORT rejects a buffer shorter than the window, even when max_length is shorter.
       window_capacity = std::max(window_capacity, model_.config_->model.decoder.sliding_window->window_size);
     }
+    kv_window_capacity_ = window_capacity;
     if (window_capacity > 0 && state_.params_->use_graph_capture) {
       // ORT reruns the step it captures, and every run evicts from the window again.
       throw std::runtime_error(
@@ -268,10 +269,10 @@ template <typename ScoreType>
 void ConvKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
   std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
   OrtValue& present_value = *kv_presents_[index];
-  // Windowed layers have their own length, so take the shape from the tensor.
-  std::array<int64_t, 4> tensor_shape;
-  const auto present_shape = present_value.GetTensorTypeAndShapeInfo()->GetShape();
-  std::copy_n(present_shape.begin(), tensor_shape.size(), tensor_shape.begin());
+  std::array<int64_t, 4> tensor_shape = kv_shape_;
+  if (kv_windowed_[index / 2]) {
+    tensor_shape[2] = kv_window_capacity_;
+  }
 
   auto block_size_per_beam = tensor_shape[1] * tensor_shape[2] * tensor_shape[3];
 

@@ -1093,6 +1093,35 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
   generator->SetModelInput("test_input", *tensor);
 }
 
+TEST(CAPITests, SetInputsRejectsImagesAfterFirstPrompt) {
+  auto model = OgaModel::Create(MODEL_PATH "lfm2-vl");
+  auto processor = OgaMultiModalProcessor::Create(*model);
+  const std::string image_path = std::string(MODEL_PATH) + "../images/cars.jpg";
+  const std::array<const char*, 1> image_paths{image_path.c_str()};
+  auto images = OgaImages::Load(image_paths);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 2048);
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetInputs(*processor->ProcessImages("<image>Describe this image.", images.get()));
+  generator->GenerateNextToken();
+  const size_t length = generator->GetSequenceCount(0);
+
+  auto later_image = processor->ProcessImages("<image>And this one?", images.get());
+  try {
+    generator->SetInputs(*later_image);
+    FAIL() << "SetInputs accepted an image after the first prompt";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find("Only a generator's first inputs can carry images or audio"),
+              std::string::npos)
+        << e.what();
+  }
+  EXPECT_EQ(generator->GetSequenceCount(0), length);
+
+  auto later_text = processor->ProcessImages("And now?");
+  generator->SetInputs(*later_text);
+  EXPECT_EQ(generator->GetSequenceCount(0), length + static_cast<size_t>(later_text->Get("input_ids")->Shape()[1]));
+}
+
 TEST(CAPITests, Logging) {
   // Trivial test to ensure the API builds properly
   Oga::SetLogBool("enabled", true);

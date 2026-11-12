@@ -621,7 +621,7 @@ class LFM2MoEModel(LFM2Model):
     def make_moe_preprocessing(self, layer_id, moe, root_input):
         # Keep the router in floating point so int4 rounding cannot flip an expert choice.
         moe.gate.exclude_from_quantization = True
-        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
+        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe, self.moe_intermediate_size)
 
     def make_moe_router(self, layer_id, moe, root_input):
         """Emit the in-graph expert selection.

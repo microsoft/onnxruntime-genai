@@ -2712,6 +2712,72 @@ TEST(Qwen38MoeOffloadTest, NonOffloadedTargetsKeepTheirConfiguredWarmupGraphIds)
   }
 }
 
+TEST(Qwen38MoeOffloadTest, OffloadedTargetDirectionsCaptureOnFirstWarmupUseEagerOnSubsequentWarmupsAndRestoreGraphIdOnLiveRuns) {
+  static_cast<void>(GetOrtEnv());
+  const auto settings = ParseQwen38MoeOffloadSettings({{"session.moe.offload.mode", "required"}});
+  auto offload_warmup = CreateQwen38OffloadWarmupRunOptions(settings);
+  ASSERT_NE(offload_warmup, nullptr);
+
+  const std::string bank0_id = std::to_string(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 8, 0));
+  const std::string bank1_id = std::to_string(Qwen38GraphAnnotationId(Qwen38GraphRun::kTarget, 8, 1));
+  auto dir0_options = OrtRunOptions::Create();
+  dir0_options->AddConfigEntry("gpu_graph_id", bank0_id.c_str());
+  auto dir1_options = OrtRunOptions::Create();
+  dir1_options->AddConfigEntry("gpu_graph_id", bank1_id.c_str());
+  bool dir0_captured = false;
+  bool dir1_captured = false;
+
+  Qwen38OrtRunHints hints;
+  hints.SetWarmup(true);
+
+  // Direction 0's first warmup uses its own graph id (with ep.cuda.qmoe_in_warmup=1) so ORT captures the graph during warmup,
+  // while leaving Direction 1 uncaptured.
+  OrtRunOptions* first_dir0 =
+      SelectQwen38TargetRunOptions(hints, dir0_options.get(), offload_warmup.get(), dir0_captured);
+  EXPECT_EQ(first_dir0, dir0_options.get());
+  EXPECT_TRUE(dir0_captured);
+  EXPECT_FALSE(dir1_captured);
+  EXPECT_STREQ(Ort::api->GetRunConfigEntry(first_dir0, "gpu_graph_id"), bank0_id.c_str());
+  EXPECT_STREQ(Ort::api->GetRunConfigEntry(first_dir0, Qwen38OrtRunEntry::kInWarmup), "1");
+
+  // Subsequent warmups on Direction 0 switch to the eager offload warmup options (gpu_graph_id=-1).
+  for (int rep = 0; rep < 3; ++rep) {
+    OrtRunOptions* next_dir0 =
+        SelectQwen38TargetRunOptions(hints, dir0_options.get(), offload_warmup.get(), dir0_captured);
+    EXPECT_EQ(next_dir0, offload_warmup.get()) << rep;
+    EXPECT_STREQ(Ort::api->GetRunConfigEntry(next_dir0, "gpu_graph_id"), "-1") << rep;
+    EXPECT_STREQ(Ort::api->GetRunConfigEntry(next_dir0, Qwen38OrtRunEntry::kInWarmup), "1") << rep;
+  }
+
+  // Direction 1 independently uses its own graph id on its first warmup, then switches to gpu_graph_id=-1 on later warmups.
+  OrtRunOptions* first_dir1 =
+      SelectQwen38TargetRunOptions(hints, dir1_options.get(), offload_warmup.get(), dir1_captured);
+  EXPECT_EQ(first_dir1, dir1_options.get());
+  EXPECT_TRUE(dir1_captured);
+  EXPECT_STREQ(Ort::api->GetRunConfigEntry(first_dir1, "gpu_graph_id"), bank1_id.c_str());
+  EXPECT_STREQ(Ort::api->GetRunConfigEntry(first_dir1, Qwen38OrtRunEntry::kInWarmup), "1");
+
+  OrtRunOptions* next_dir1 =
+      SelectQwen38TargetRunOptions(hints, dir1_options.get(), offload_warmup.get(), dir1_captured);
+  EXPECT_EQ(next_dir1, offload_warmup.get());
+  EXPECT_STREQ(Ort::api->GetRunConfigEntry(next_dir1, "gpu_graph_id"), "-1");
+  EXPECT_STREQ(Ort::api->GetRunConfigEntry(next_dir1, Qwen38OrtRunEntry::kInWarmup), "1");
+
+  // Live runs restore each direction's normal graph id and stamp ep.cuda.qmoe_in_warmup=0.
+  hints.SetWarmup(false);
+  OrtRunOptions* live_dir0 =
+      SelectQwen38TargetRunOptions(hints, dir0_options.get(), offload_warmup.get(), dir0_captured);
+  EXPECT_EQ(live_dir0, dir0_options.get());
+  EXPECT_STREQ(Ort::api->GetRunConfigEntry(live_dir0, "gpu_graph_id"), bank0_id.c_str());
+  EXPECT_STREQ(Ort::api->GetRunConfigEntry(live_dir0, Qwen38OrtRunEntry::kInWarmup), "0");
+
+  OrtRunOptions* live_dir1 =
+      SelectQwen38TargetRunOptions(hints, dir1_options.get(), offload_warmup.get(), dir1_captured);
+  EXPECT_EQ(live_dir1, dir1_options.get());
+  EXPECT_STREQ(Ort::api->GetRunConfigEntry(live_dir1, "gpu_graph_id"), bank1_id.c_str());
+  EXPECT_STREQ(Ort::api->GetRunConfigEntry(live_dir1, Qwen38OrtRunEntry::kInWarmup), "0");
+}
+
 TEST(Qwen38MoeOffloadTest, SessionEntriesDefaultTheSourceRootAndReserve) {
   const auto settings = ParseQwen38MoeOffloadSettings({{"session.moe.offload.mode", "required"}});
   EXPECT_EQ(Qwen38MoeOffloadSessionEntries(settings, "/models/pkg", 33032, false),
