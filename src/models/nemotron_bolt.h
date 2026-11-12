@@ -55,6 +55,8 @@ struct NemotronBoltState : State {
                     ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
   std::vector<int64_t> Verify(std::span<const int32_t> tokens, bool want_predictions = true);
   std::vector<int64_t> VerifyBlock(std::span<const int32_t> tokens, bool want_predictions);
+  static std::unique_ptr<Tensor> SaveVerifyPrefix(Tensor& tensor, size_t prefix_rows);
+  static void RestoreVerifyPrefix(Tensor& tensor, Tensor& prefix);
   void Propose(size_t context_rows, size_t first_position, int32_t anchor, Tensor* aux_override = nullptr);
   void Reset();
 
@@ -64,7 +66,6 @@ struct NemotronBoltState : State {
   std::vector<size_t> single_token_input_indices_, single_token_output_indices_;
   std::vector<std::string> input_storage_, output_storage_;
   std::vector<Tensor*> caches_;
-  std::map<std::string, std::unique_ptr<Tensor>> verify_prefix_backup_;
   DeviceSpan<int32_t> verify_inputs_span_;
   DeviceSpan<int64_t> pred_ids_span_;
   std::unique_ptr<Dflash2Drafter> drafter_;

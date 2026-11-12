@@ -173,8 +173,9 @@ Prefill and ordinary decoding are unchanged. A segmented verification round
 uses two actual target passes, which are included in `target_forward_passes`
 and `target_verify_forward_passes`; acceptance and round counters still describe
 the single seven-draft proposal. No reference routes, logits or caches are used.
-The additional snapshot workspace is generator-owned and retains fixed graph
-buffer addresses.
+Temporary snapshot workspace contains only the prefix rows and is released
+after the merge completes on the device stream. Tail rows move in place using
+non-overlapping row copies; all graph-bound buffer addresses remain unchanged.
 
 Target and drafter capture/warm on dummy state, then reset before processing the
 real prompt. Each generator owns independent buffers and graph annotations.
@@ -219,6 +220,13 @@ reset and at every output-budget boundary, terminal EOS, every recurrent
 acceptance row, and prompt lengths immediately below/at/above an eight-row chunk,
 the drafter context window, and the supported capacity (with rejection above
 capacity). Those independent real-graph checks remain outstanding.
+
+The compact prefix/tail merge also has a standalone CUDA regression using the
+tiny GPT-2 fixture rather than a Bolt package. Set
+`ORTGENAI_TEST_CUDA_PREFIX_MERGE=1` and select
+`NemotronBoltGPU.VerificationPrefixMergePreservesAllRowsWithCompactScratch`.
+It checks every split from one through seven rows, including the full supported
+FP32 recurrent-state shape, and verifies unchanged graph-bound addresses.
 
 `IdenticalCandidatePrefixReplay` compares sequential and block logits plus every
 recurrent and valid-prefix KV boundary from byte-validated identical prior state.

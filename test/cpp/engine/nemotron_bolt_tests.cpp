@@ -18,6 +18,14 @@
 namespace Generators::test {
 
 struct NemotronBoltTestAccess {
+  static std::unique_ptr<Tensor> SaveVerifyPrefix(Tensor& tensor, size_t rows) {
+    return NemotronBoltState::SaveVerifyPrefix(tensor, rows);
+  }
+
+  static void RestoreVerifyPrefix(Tensor& tensor, Tensor& prefix) {
+    NemotronBoltState::RestoreVerifyPrefix(tensor, prefix);
+  }
+
   static std::vector<uint8_t> Bytes(DeviceSpan<uint8_t> span) {
     auto selected = GetDeviceInterface(DeviceType::CUDA)->WrapMemory(span.Span());
     const auto cpu = selected.CopyDeviceToCpu();
@@ -239,6 +247,60 @@ struct NemotronBoltTestAccess {
 namespace {
 
 std::unique_ptr<Config> BoltTestConfig(const char* path);
+
+void CheckVerificationPrefixMerge(DeviceInterface* device) {
+  const std::vector<std::pair<ONNXTensorElementDataType, std::vector<int64_t>>> cases{
+      {ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, {8, 128, 128, 64}},
+      {ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16, {8, 5, 3}},
+      {ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16, {1, 8, 7}},
+      {ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {1, 8}}};
+  for (const auto& [type, shape] : cases) {
+    Tensor tensor{device, type};
+    tensor.CreateTensor(shape, true);
+    const auto address = tensor.GetMutableRawData();
+    const size_t bytes = tensor.GetByteSpan().size();
+    const size_t row_bytes = bytes / 8;
+    std::vector<uint8_t> first(bytes), second(bytes), expected(bytes);
+    for (size_t row = 0; row < 8; ++row) {
+      std::fill_n(first.begin() + row * row_bytes, row_bytes, static_cast<uint8_t>(row + 1));
+      std::fill_n(second.begin() + row * row_bytes, row_bytes, static_cast<uint8_t>(row + 17));
+    }
+    Tensor tail{device, type};
+    tail.CreateTensor(shape, true);
+    tail.GetByteSpan().CopyFromCpu(second);
+    for (size_t rows = 1; rows < 8; ++rows) {
+      SCOPED_TRACE(::testing::Message() << "type=" << type << " prefix_rows=" << rows);
+      tensor.GetByteSpan().CopyFromCpu(first);
+      auto prefix = NemotronBoltTestAccess::SaveVerifyPrefix(tensor, rows);
+      EXPECT_EQ(prefix->GetByteSpan().size(), rows * row_bytes);
+      EXPECT_LT(prefix->GetByteSpan().size(), bytes);
+      tensor.GetByteSpan().CopyFrom(tail.GetByteSpan());
+      NemotronBoltTestAccess::RestoreVerifyPrefix(tensor, *prefix);
+      std::copy_n(first.begin(), rows * row_bytes, expected.begin());
+      std::copy_n(second.begin(), bytes - rows * row_bytes, expected.begin() + rows * row_bytes);
+      auto span = tensor.GetByteSpan();
+      const auto actual = span.CopyDeviceToCpu();
+      EXPECT_TRUE(std::equal(actual.begin(), actual.end(), expected.begin()));
+      EXPECT_EQ(tensor.GetMutableRawData(), address);
+      EXPECT_EQ(tensor.GetShape(), shape);
+    }
+  }
+}
+
+TEST(NemotronBolt, VerificationPrefixMergePreservesAllRowsWithCompactScratch) {
+  CheckVerificationPrefixMerge(GetDeviceInterface(DeviceType::CPU));
+}
+
+TEST(NemotronBoltGPU, VerificationPrefixMergePreservesAllRowsWithCompactScratch) {
+  if (!std::getenv("ORTGENAI_TEST_CUDA_PREFIX_MERGE"))
+    GTEST_SKIP() << "Set ORTGENAI_TEST_CUDA_PREFIX_MERGE with an admitted CUDA device";
+  auto config = std::make_unique<Config>(
+      fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, "{}");
+  SetProviderOption(*config, "cuda", "enable_cuda_graph", "0");
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  ASSERT_EQ(model->p_device_->GetType(), DeviceType::CUDA);
+  CheckVerificationPrefixMerge(model->p_device_);
+}
 
 TEST(NemotronBolt, VerificationKeepsQueryEndpointsInOneKeyTile) {
   for (size_t position : {size_t{0}, size_t{500}, size_t{504}, size_t{505},

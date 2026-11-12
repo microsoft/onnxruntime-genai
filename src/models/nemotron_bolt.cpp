@@ -447,6 +447,29 @@ void NemotronBoltState::SetActiveAdapter(Adapters*, const std::string&) {
   throw std::runtime_error("nemotron_bolt: adapters are unsupported");
 }
 
+std::unique_ptr<Tensor> NemotronBoltState::SaveVerifyPrefix(Tensor& tensor, size_t prefix_rows) {
+  const std::array<int64_t, 2> shape{
+      static_cast<int64_t>(prefix_rows),
+      static_cast<int64_t>(tensor.GetElementCount() / kBoltVerifyRows)};
+  auto prefix = std::make_unique<Tensor>(tensor.p_device_, tensor.GetType());
+  prefix->CreateTensor(shape, true);
+  auto saved = prefix->GetByteSpan();
+  saved.CopyFrom(tensor.GetByteSpan().subspan(0, saved.size()));
+  return prefix;
+}
+
+void NemotronBoltState::RestoreVerifyPrefix(Tensor& tensor, Tensor& prefix) {
+  const size_t prefix_rows = static_cast<size_t>(prefix.GetShape()[0]);
+  auto target = tensor.GetByteSpan();
+  const size_t row_bytes = target.size() / kBoltVerifyRows;
+  // Move backward one disjoint row at a time: CUDA copies do not support overlapping ranges.
+  for (size_t row = kBoltVerifyRows - prefix_rows; row > 0; --row) {
+    target.subspan((prefix_rows + row - 1) * row_bytes, row_bytes)
+        .CopyFrom(target.subspan((row - 1) * row_bytes, row_bytes));
+  }
+  target.subspan(0, prefix_rows * row_bytes).CopyFrom(prefix.GetByteSpan());
+}
+
 std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, bool want_predictions) {
   const size_t prefix = NemotronBoltVerifyPrefixRows(length_);
   if (!prefilled_ || !drafter_ || prefix == kBoltVerifyRows)
@@ -458,22 +481,15 @@ std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, 
   }
   const size_t position = length_;
   const int32_t selected = state_row_;
+  // Keep compact prefixes alive through stream completion, including failure/reset cleanup.
+  std::vector<std::pair<Tensor*, std::unique_ptr<Tensor>>> prefixes;
   try {
-    auto predictions = VerifyBlock(tokens, want_predictions);
-    const auto preserve = [&](const std::string& name, size_t source_row, size_t destination_row, size_t rows) {
-      auto& tensor = *tensors_.at(name);
-      auto& backup = verify_prefix_backup_[name];
-      if (!backup) {
-        backup = std::make_unique<Tensor>(model_.p_device_, tensor.GetType());
-        backup->CreateTensor(tensor.GetShape(), true);
-      }
-      const size_t row_bytes = tensor.GetByteSpan().size() / kBoltVerifyRows;
-      backup->GetByteSpan().subspan(destination_row * row_bytes, rows * row_bytes).CopyFrom(tensor.GetByteSpan().subspan(source_row * row_bytes, rows * row_bytes));
-    };
+    prefixes.reserve(tensors_.size());
+    VerifyBlock(tokens, false);
     for (const auto& [name, tensor] : tensors_) {
       if (name.rfind("past_conv.", 0) == 0 || name.rfind("past_ssm.", 0) == 0 ||
           name == "logits" || name == "aux_hidden_states" || name == "pred_ids")
-        preserve(name, 0, 0, prefix);
+        prefixes.emplace_back(tensor.get(), SaveVerifyPrefix(*tensor, prefix));
     }
     // Reuse only this verified candidate input prefix, not any ordinary/reference state.
     // The second native R8 run is anchored at the arithmetic tile boundary.
@@ -481,12 +497,16 @@ std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, 
     state_row_ = static_cast<int32_t>(prefix - 1);
     std::vector<int32_t> remainder(kBoltVerifyRows, tokens.back());
     std::copy(tokens.begin() + prefix, tokens.end(), remainder.begin());
-    const auto tail_predictions = VerifyBlock(remainder, want_predictions);
-    if (want_predictions)
-      std::copy_n(tail_predictions.begin(), kBoltVerifyRows - prefix, predictions.begin() + prefix);
-    for (const auto& [name, backup] : verify_prefix_backup_) {
-      preserve(name, 0, prefix, kBoltVerifyRows - prefix);
-      tensors_.at(name)->GetByteSpan().CopyFrom(backup->GetByteSpan());
+    VerifyBlock(remainder, false);
+    for (const auto& [tensor, saved] : prefixes)
+      RestoreVerifyPrefix(*tensor, *saved);
+    std::vector<int64_t> predictions;
+    if (want_predictions) {
+      auto cpu = pred_ids_span_.CopyDeviceToCpu();
+      predictions.assign(cpu.begin(), cpu.end());
+    } else {
+      // Even discarded predictions must finish using the temporary prefix buffers before release.
+      model_.p_device_->Synchronize();
     }
     length_ = position;
     state_row_ = selected;
