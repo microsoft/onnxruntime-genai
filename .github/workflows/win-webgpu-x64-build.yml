@@ -93,6 +93,7 @@ jobs:
             --update --build `
             --skip_examples `
             --cmake_extra_defines `
+              USE_WEBGPU=ON `
               TEST_PHI2=True `
               TEST_QWEN_2_5=True `
               'CMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
@@ -145,6 +146,11 @@ jobs:
         run: |-
           copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
           & .\$env:binaryDir\Release\unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep
+
+      - name: Run WebGPU KV growth and capture fallback tests
+        run: |
+          & .\$env:binaryDir\Release\shared_cache_growth_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep
+          if ($LASTEXITCODE -ne 0) { throw "WebGPU KV tests failed: $LASTEXITCODE" }
 
       - name: Run required WebGPU Engine tests
         run: |

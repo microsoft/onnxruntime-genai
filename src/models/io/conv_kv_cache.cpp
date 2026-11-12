@@ -6,9 +6,7 @@
 #include "static_kv_cache.h"
 #include "../../logging.h"
 #include "../model.h"
-#if USE_WEBGPU
 #include "../../ep/webgpu/kv_cache.h"
-#endif
 
 #include <algorithm>
 
@@ -101,11 +99,9 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
     if (kv_share_buffer_) {
       int64_t seq_cap = fixed_kv_seq_len > 0 ? fixed_kv_seq_len
                                              : static_cast<int64_t>(state_.params_->search.max_length);
-#if USE_WEBGPU
       if (fixed_kv_seq_len == 0 && WebGPU::SharedCacheGrowth::IsSupported(state_, kv_input_name_strings_, kv_output_name_strings_)) {
         seq_cap = 1;
       }
-#endif
       if (seq_cap <= 0) {
         throw std::runtime_error(
             "ConvKeyValueCache: past_present_share_buffer requires a fixed kv seq_len in the "

@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#if USE_WEBGPU
-
 #include "kv_cache.h"
 #include "../../models/graph_builder.h"
 
@@ -155,5 +153,3 @@ void ConvKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_lengt
 }
 
 }  // namespace Generators::WebGPU
-
-#endif  // USE_WEBGPU

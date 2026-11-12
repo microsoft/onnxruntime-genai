@@ -5,6 +5,8 @@
 #include <fstream>
 #include <future>
 #include <numeric>
+#include <type_traits>
+#include "ep_registration.h"
 #include "ort_genai_c.h"
 #include "models/graph_builder.h"
 #include "models/io/shared_kv_cache.h"
@@ -177,7 +179,10 @@ void CheckFallbackGeneration(const char* filename, bool memory_model = false, in
   auto config = FallbackConfig(filename, true, max_length);
   if (omit_capture) {
     for (auto& provider : config->model.decoder.session_options.provider_options) {
-      std::erase_if(provider.options, [](const auto& option) { return option.first == "enableGraphCapture"; });
+      auto& options = provider.options;
+      options.erase(std::remove_if(options.begin(), options.end(),
+                                   [](const auto& option) { return option.first == "enableGraphCapture"; }),
+                    options.end());
     }
   }
   std::vector<std::byte> bytes;
@@ -203,7 +208,7 @@ void CheckFallbackGeneration(const char* filename, bool memory_model = false, in
   const auto& decoder = model->config_->model.decoder;
   const auto key = ComposeKeyValueName(decoder.inputs.past_key_names, 3);
   const auto declared_capacity = model->session_info_.GetInputShape(key)[2];
-  ASSERT_EQ(declared_capacity, std::string_view{filename}.starts_with("fixed-") ? 16 : -1);
+  ASSERT_EQ(declared_capacity, std::string_view{filename}.compare(0, 6, "fixed-") == 0 ? 16 : -1);
   auto params = CreateGeneratorParams(*model);
   EXPECT_EQ(params->use_graph_capture, expected_capture);
   auto generator = CreateGenerator(*model, *params);
@@ -232,7 +237,7 @@ void CheckFallbackGeneration(const char* filename, bool memory_model = false, in
   size_t cache_count = 0;
   for (size_t i = 0; i < state.output_names_.size(); ++i) {
     const std::string_view name{state.output_names_[i]};
-    if (!name.starts_with("out.")) continue;
+    if (name.compare(0, 4, "out.") != 0) continue;
     ++cache_count;
     const auto cache = Read(*model->p_device_kvcache_, *state.outputs_[i]);
     const auto expected_cache = Read(*reference->p_device_kvcache_, *eager->state_->outputs_[i]);
@@ -245,7 +250,7 @@ void CheckFallbackGeneration(const char* filename, bool memory_model = false, in
                                                                        : max_length;
     EXPECT_EQ(state.outputs_[i]->GetTensorTypeAndShapeInfo()->GetShape()[2], expected_capacity);
     EXPECT_NE(std::find(state.inputs_.begin(), state.inputs_.end(), state.outputs_[i]), state.inputs_.end());
-    if (name.ends_with(".v")) {
+    if (name.size() >= 2 && name.compare(name.size() - 2, 2, ".v") == 0) {
       for (size_t token = 0; token < prompt.size() + 5; ++token) {
         const float expected = token < prompt.size() ? static_cast<float>(prompt[token]) : static_cast<float>(3 + token - prompt.size());
         for (size_t dim = 0; dim < 64; ++dim) EXPECT_FLOAT_EQ(cache[token * 64 + dim], expected);
@@ -516,7 +521,8 @@ void CheckGqaDecodeThroughGrowth(bool capture) {
   auto& device = *model->p_device_kvcache_;
   std::vector<float> history(510);
   std::iota(history.begin(), history.end(), 1.0f);
-  auto write = [&]<typename T>(OrtValue& tensor, const std::vector<T>& values) {
+  auto write = [&](OrtValue& tensor, const auto& values) {
+    using T = typename std::decay_t<decltype(values)>::value_type;
     auto span = WrapTensor<T>(device, tensor);
     std::copy(values.begin(), values.end(), span.CpuSpan().begin());
     span.CopyCpuToDevice();
@@ -729,6 +735,13 @@ TEST_F(WebGpuGrowthTest, GrowthRecapturesAllVariantsAndPreservesAnotherGenerator
 
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
+  std::filesystem::path ep_dir;
+  for (int i = 1; i < argc; ++i) {
+    if (std::string_view{argv[i]} == "--ep_dir" && i + 1 < argc) ep_dir = argv[++i];
+  }
+  test_ep::EpRegistrar ep_registrar;
+  ep_registrar.DiscoverFromDirectory(ep_dir);
+  ep_registrar.RegisterAll();
   const int result = RUN_ALL_TESTS();
   OgaShutdown();
   return result;
