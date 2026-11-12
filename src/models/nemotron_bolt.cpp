@@ -5,6 +5,7 @@
 #include "search.h"
 
 #include <array>
+#include <cstdlib>
 #include <limits>
 #include <set>
 
@@ -219,16 +220,23 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
   session_info_.Add(*session_);
   const auto& info = session_info_;
   const auto ids_shape = info.GetInputShape("input_ids");
-  Require(ids_shape == std::vector<int64_t>({1, 8}) ||
-              ((ids_shape == std::vector<int64_t>({1, 1}) ||
-                ids_shape == std::vector<int64_t>({1, -1})) &&
+  const bool has_query_rows = info.HasInput("query_rows");
+  has_logit_rows_ = info.HasInput("logit_rows");
+  has_aux_rows_ = info.HasInput("aux_rows");
+  single_token_decode_ = ids_shape == std::vector<int64_t>({1, -1}) && has_query_rows;
+  dynamic_prefill_ = ids_shape == std::vector<int64_t>({1, -1}) && !has_query_rows;
+  Require(ids_shape == std::vector<int64_t>({1, 8}) || dynamic_prefill_ ||
+              ((ids_shape == std::vector<int64_t>({1, 1}) || single_token_decode_) &&
                config_->speculative.max_draft_tokens == 0),
-          "input_ids must be [1,8], or an opt-in target-only row contract");
-  single_token_decode_ = ids_shape[1] == -1;
-  target_rows_ = single_token_decode_ ? kBoltVerifyRows : static_cast<size_t>(ids_shape[1]);
+          "input_ids must be [1,8], dynamic [1,R], or an opt-in target-only row contract");
+  target_rows_ = (single_token_decode_ || dynamic_prefill_) ? kBoltVerifyRows : static_cast<size_t>(ids_shape[1]);
   const auto rows = ids_shape[1];
   if (single_token_decode_)
     RequireTensor(info, "query_rows", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {-1});
+  if (dynamic_prefill_ && has_logit_rows_)
+    RequireTensor(info, "logit_rows", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {-1});
+  if (dynamic_prefill_ && has_aux_rows_)
+    RequireTensor(info, "aux_rows", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {-1});
   RequireTensor(info, "input_ids", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {1, rows});
   RequireTensor(info, "seqlens_k", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
   RequireTensor(info, "state_row", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
@@ -245,7 +253,8 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
   size_t conv_count = 0, ssm_count = 0, key_count = 0, value_count = 0;
   for (const auto& name : info.GetInputNames()) {
     if (name == "input_ids" || name == "seqlens_k" || name == "state_row" ||
-        name == "total_sequence_length" || (single_token_decode_ && name == "query_rows"))
+        name == "total_sequence_length" || (single_token_decode_ && name == "query_rows") ||
+        (dynamic_prefill_ && (name == "logit_rows" || name == "aux_rows")))
       continue;
     const auto shape = info.GetInputShape(name);
     const auto type = info.GetInputDataType(name);
@@ -280,6 +289,17 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
               capacity_ <= static_cast<size_t>(std::numeric_limits<int32_t>::max()) &&
               static_cast<size_t>(config_->model.context_length) <= capacity_ - kBoltVerifyRows,
           "context_length must leave eight scratch slots in the fixed KV capacity");
+  if (dynamic_prefill_) {
+    prefill_chunk_rows_ = std::min(kBoltDefaultPrefillChunkRows, capacity_ - kBoltVerifyRows);
+    if (const char* env_chunk = std::getenv("BOLT_PREFILL_CHUNK_ROWS")) {
+      const long parsed = std::strtol(env_chunk, nullptr, 10);
+      if (parsed > static_cast<long>(kBoltVerifyRows)) {
+        prefill_chunk_rows_ = std::min(static_cast<size_t>(parsed), capacity_ - kBoltVerifyRows);
+      } else if (parsed > 0) {
+        prefill_chunk_rows_ = kBoltVerifyRows;
+      }
+    }
+  }
   if (config_->speculative.max_draft_tokens == 0)
     return;
   const auto& d = config_->model.dflash2;
@@ -348,7 +368,7 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
                                         : static_cast<void*>(verify_in_base + 2 * kBoltVerifyRows + 4);
       const size_t bytes = name == "input_ids" ? kBoltVerifyRows * sizeof(int64_t) : sizeof(int32_t);
       auto shape = info.GetInputShape(name);
-      if (model.single_token_decode_ && name == "input_ids")
+      if ((model.single_token_decode_ || model.dynamic_prefill_) && name == "input_ids")
         shape[1] = kBoltVerifyRows;
       auto tensor = std::make_unique<Tensor>(
           OrtValue::CreateTensor(dev_mem_info, ptr, bytes, shape, info.GetInputDataType(name)));
@@ -360,24 +380,39 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     }
     auto* device = name == "total_sequence_length" ? GetDeviceInterface(DeviceType::CPU) : model.p_device_;
     auto shape = info.GetInputShape(name);
-    if (model.single_token_decode_ && name == "query_rows")
+    if ((model.single_token_decode_ && name == "query_rows") ||
+        (model.dynamic_prefill_ && (name == "logit_rows" || name == "aux_rows")))
       shape[0] = kBoltVerifyRows;
     auto& tensor = AddTensor(name, true, device, info.GetInputDataType(name), shape);
-    if (name == "query_rows") {
+    if (name == "query_rows" || name == "logit_rows" || name == "aux_rows") {
       const std::array<int64_t, 8> indices{0, 1, 2, 3, 4, 5, 6, 7};
       Upload(tensor, std::span<const int64_t>{indices});
     }
     if (name.rfind("past_", 0) == 0) {
       caches_.push_back(&tensor);
+      if (name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0)
+        kv_caches_.push_back(&tensor);
+      else
+        recurrent_caches_.push_back(&tensor);
       output_storage_.push_back("present_" + name.substr(5));
       outputs_.push_back(tensor.GetOrtTensor());
     }
   }
   for (const auto* name : {"logits", "pred_ids", "aux_hidden_states"}) {
     auto shape = info.GetOutputShape(name);
-    if (model.single_token_decode_)
+    if (model.single_token_decode_ || model.dynamic_prefill_)
       shape[1] = kBoltVerifyRows;
     AddTensor(name, false, model.p_device_, info.GetOutputDataType(name), shape);
+  }
+  for (size_t i = 0; i < input_storage_.size(); ++i) {
+    if (input_storage_[i] == "input_ids") input_idx_input_ids_ = i;
+    if (input_storage_[i] == "logit_rows") input_idx_logit_rows_ = i;
+    if (input_storage_[i] == "aux_rows") input_idx_aux_rows_ = i;
+  }
+  for (size_t i = 0; i < output_storage_.size(); ++i) {
+    if (output_storage_[i] == "logits") output_idx_logits_ = i;
+    if (output_storage_[i] == "pred_ids") output_idx_pred_ids_ = i;
+    if (output_storage_[i] == "aux_hidden_states") output_idx_aux_ = i;
   }
   if (model.single_token_decode_) {
     for (const auto* name : {"input_ids", "query_rows", "logits", "pred_ids", "aux_hidden_states"}) {
@@ -428,6 +463,28 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     prefill_aux_ = std::make_unique<Tensor>(model.p_device_, aux.GetType());
     prefill_aux_->CreateTensor(prefill_shape, true);
   }
+  if (model.dynamic_prefill_ && model.prefill_chunk_rows_ > kBoltVerifyRows) {
+    prefill_ids_span_ = model.p_device_->Allocate<int64_t>(model.prefill_chunk_rows_);
+    prefill_ids_span_.CpuSpan();
+    if (model.has_logit_rows_) {
+      prefill_logit_rows_span_ = model.p_device_->Allocate<int64_t>(1);
+      prefill_logit_rows_span_.CpuSpan();
+      const std::array<int64_t, 3> one_logit_shape{1, 1, model.config_->model.vocab_size};
+      const std::array<int64_t, 2> one_pred_shape{1, 1};
+      prefill_logits_ = std::make_unique<Tensor>(model.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+      prefill_logits_->CreateTensor(one_logit_shape, true);
+      prefill_pred_ids_ = std::make_unique<Tensor>(model.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+      prefill_pred_ids_->CreateTensor(one_pred_shape, true);
+      prefill_pred_span_ = prefill_pred_ids_->GetDeviceSpan<int64_t>();
+      prefill_pred_span_.CpuSpan();
+    }
+    if (model.has_aux_rows_) {
+      const size_t max_aux_rows =
+          prefill_aux_ ? static_cast<size_t>(prefill_aux_->GetShape()[0]) : size_t{1};
+      prefill_aux_rows_span_ = model.p_device_->Allocate<int64_t>(std::max<size_t>(max_aux_rows, 1));
+      prefill_aux_rows_span_.CpuSpan();
+    }
+  }
   Reset();
   std::vector<int32_t> dummy(model.target_rows_, 1);
   // The legacy two-run capture delay needs four calls through the first replay.
@@ -458,7 +515,25 @@ DeviceSpan<float> NemotronBoltState::Run(int, DeviceSpan<int32_t>&, DeviceSpan<i
 }
 
 void NemotronBoltState::Reset() {
-  for (auto* cache : caches_) cache->GetByteSpan().Zero();
+  if (!caches_zeroed_) {
+    for (auto* cache : caches_) cache->GetByteSpan().Zero();
+    caches_zeroed_ = true;
+  } else {
+    for (auto* cache : recurrent_caches_) cache->GetByteSpan().Zero();
+    if (touched_kv_rows_ > 0) {
+      const size_t rows_to_zero = std::min(touched_kv_rows_, bolt_.capacity_);
+      for (auto* kv : kv_caches_) {
+        const auto shape = kv->GetShape();
+        auto span = kv->GetByteSpan();
+        const size_t head_bytes = span.size() / static_cast<size_t>(shape[1]);
+        const size_t clear_bytes = rows_to_zero * static_cast<size_t>(shape[3]) * sizeof(uint16_t);
+        for (size_t head = 0; head < static_cast<size_t>(shape[1]); ++head) {
+          span.subspan(head * head_bytes, clear_bytes).Zero();
+        }
+      }
+    }
+  }
+  touched_kv_rows_ = 0;
   model_.p_device_->Synchronize();
   if (drafter_) drafter_->ReleaseAll();
   length_ = 0;
@@ -578,10 +653,131 @@ std::vector<int64_t> NemotronBoltState::VerifyBlock(std::span<const int32_t> tok
   verify_inputs_span_.CopyCpuToDevice();
   State::Run(*bolt_.session_, params_->use_graph_capture,
              static_cast<int>(rows), 0, nullptr);
+  touched_kv_rows_ = std::max(touched_kv_rows_, length_ + kBoltVerifyRows);
   ++stats_.target_forward_passes;
   if (!want_predictions) return {};
   auto cpu = pred_ids_span_.CopyDeviceToCpu();
   return {cpu.begin(), cpu.begin() + rows};
+}
+
+int64_t NemotronBoltState::PrefillChunk(
+    std::span<const int32_t> tokens, size_t pos, size_t draft_start, bool want_prediction) {
+  const size_t rows = tokens.size();
+  Require(bolt_.dynamic_prefill_ && rows > kBoltVerifyRows && length_ + rows <= bolt_.capacity_,
+          "prefill chunk exceeds capacity or requires dynamic prefill contract");
+  const auto& dev_mem_info = bolt_.p_device_->GetAllocator().GetInfo();
+  const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
+
+  OrtValue* orig_ids = inputs_[input_idx_input_ids_];
+  OrtValue* orig_logit_rows = bolt_.has_logit_rows_ ? inputs_[input_idx_logit_rows_] : nullptr;
+  OrtValue* orig_aux_rows = bolt_.has_aux_rows_ ? inputs_[input_idx_aux_rows_] : nullptr;
+  OrtValue* orig_logits = outputs_[output_idx_logits_];
+  OrtValue* orig_preds = outputs_[output_idx_pred_ids_];
+  OrtValue* orig_aux = outputs_[output_idx_aux_];
+  struct RestoreBindings {
+    NemotronBoltState& s;
+    OrtValue *ids, *lrows, *arows, *logits, *preds, *aux;
+    ~RestoreBindings() {
+      s.inputs_[s.input_idx_input_ids_] = ids;
+      if (s.bolt_.has_logit_rows_) s.inputs_[s.input_idx_logit_rows_] = lrows;
+      if (s.bolt_.has_aux_rows_) s.inputs_[s.input_idx_aux_rows_] = arows;
+      s.outputs_[s.output_idx_logits_] = logits;
+      s.outputs_[s.output_idx_pred_ids_] = preds;
+      s.outputs_[s.output_idx_aux_] = aux;
+    }
+  } restore{*this, orig_ids, orig_logit_rows, orig_aux_rows, orig_logits, orig_preds, orig_aux};
+
+  auto ids_sub = prefill_ids_span_.subspan(0, rows);
+  auto ids_cpu = ids_sub.CpuSpan();
+  for (size_t i = 0; i < rows; ++i) ids_cpu[i] = tokens[i];
+  ids_sub.CopyCpuRangeToDevice();
+  const std::array<int64_t, 2> ids_shape{1, static_cast<int64_t>(rows)};
+  auto ids_ort = OrtValue::CreateTensor(
+      dev_mem_info, ids_sub.Span().data(), rows * sizeof(int64_t), ids_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  inputs_[input_idx_input_ids_] = ids_ort.get();
+
+  auto cpu_in = verify_inputs_span_.CpuSpan();
+  cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_ + rows - 1);
+  cpu_in[2 * kBoltVerifyRows + 4] = state_row_;
+  verify_inputs_span_.subspan(2 * kBoltVerifyRows, 8).CopyCpuRangeToDevice();
+
+  std::unique_ptr<OrtValue> logit_rows_ort, aux_rows_ort, aux_out_ort;
+  std::unique_ptr<Tensor> temp_logits, temp_preds, temp_aux;
+  if (bolt_.has_logit_rows_) {
+    auto lr_cpu = prefill_logit_rows_span_.CpuSpan();
+    lr_cpu[0] = static_cast<int64_t>(rows - 1);
+    prefill_logit_rows_span_.CopyCpuRangeToDevice();
+    const std::array<int64_t, 1> lr_shape{1};
+    logit_rows_ort = OrtValue::CreateTensor(
+        dev_mem_info, prefill_logit_rows_span_.Span().data(), sizeof(int64_t), lr_shape,
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    inputs_[input_idx_logit_rows_] = logit_rows_ort.get();
+    outputs_[output_idx_logits_] = prefill_logits_->GetOrtTensor();
+    outputs_[output_idx_pred_ids_] = prefill_pred_ids_->GetOrtTensor();
+  } else {
+    const std::array<int64_t, 3> logits_shape{
+        1, static_cast<int64_t>(rows), bolt_.config_->model.vocab_size};
+    const std::array<int64_t, 2> preds_shape{1, static_cast<int64_t>(rows)};
+    temp_logits = std::make_unique<Tensor>(bolt_.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+    temp_logits->CreateTensor(logits_shape, true);
+    temp_preds = std::make_unique<Tensor>(bolt_.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    temp_preds->CreateTensor(preds_shape, true);
+    outputs_[output_idx_logits_] = temp_logits->GetOrtTensor();
+    outputs_[output_idx_pred_ids_] = temp_preds->GetOrtTensor();
+  }
+
+  const bool need_aux = drafter_ != nullptr && (pos + rows > draft_start);
+  const size_t overlap_start = need_aux ? std::max(pos, draft_start) : pos;
+  const size_t aux_begin_in_chunk = overlap_start - pos;
+  const size_t aux_count = need_aux ? (rows - aux_begin_in_chunk) : 1;
+  if (bolt_.has_aux_rows_) {
+    auto ar_sub = prefill_aux_rows_span_.subspan(0, aux_count);
+    auto ar_cpu = ar_sub.CpuSpan();
+    for (size_t i = 0; i < aux_count; ++i) {
+      ar_cpu[i] = need_aux ? static_cast<int64_t>(aux_begin_in_chunk + i) : int64_t{0};
+    }
+    ar_sub.CopyCpuRangeToDevice();
+    const std::array<int64_t, 1> ar_shape{static_cast<int64_t>(aux_count)};
+    aux_rows_ort = OrtValue::CreateTensor(
+        dev_mem_info, ar_sub.Span().data(), aux_count * sizeof(int64_t), ar_shape,
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    inputs_[input_idx_aux_rows_] = aux_rows_ort.get();
+    const std::array<int64_t, 3> aux_out_shape{
+        1, static_cast<int64_t>(aux_count), static_cast<int64_t>(bolt_.aux_width_)};
+    uint8_t* aux_dst_ptr =
+        need_aux ? (reinterpret_cast<uint8_t*>(prefill_aux_->GetMutableRawData()) +
+                    (overlap_start - draft_start) * aux_row_bytes)
+                 : reinterpret_cast<uint8_t*>(tensors_.at("aux_hidden_states")->GetMutableRawData());
+    aux_out_ort = OrtValue::CreateTensor(
+        dev_mem_info, aux_dst_ptr, aux_count * aux_row_bytes, aux_out_shape,
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+    outputs_[output_idx_aux_] = aux_out_ort.get();
+  } else {
+    const std::array<int64_t, 3> full_aux_shape{
+        1, static_cast<int64_t>(rows), static_cast<int64_t>(bolt_.aux_width_)};
+    temp_aux = std::make_unique<Tensor>(bolt_.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+    temp_aux->CreateTensor(full_aux_shape, true);
+    outputs_[output_idx_aux_] = temp_aux->GetOrtTensor();
+  }
+
+  State::Run(*bolt_.session_, false, 0, 0, nullptr);
+  touched_kv_rows_ = std::max(touched_kv_rows_, length_ + rows);
+  ++stats_.target_forward_passes;
+
+  if (need_aux && !bolt_.has_aux_rows_) {
+    auto aux_src = temp_aux->GetByteSpan();
+    auto prefill_dst = prefill_aux_->GetByteSpan();
+    prefill_dst.subspan((overlap_start - draft_start) * aux_row_bytes, aux_count * aux_row_bytes)
+        .CopyFrom(aux_src.subspan(aux_begin_in_chunk * aux_row_bytes, aux_count * aux_row_bytes));
+  }
+  if (!want_prediction) return 0;
+  if (bolt_.has_logit_rows_) {
+    auto cpu = prefill_pred_span_.CopyDeviceToCpu();
+    return cpu[0];
+  }
+  auto cpu = temp_preds->GetDeviceSpan<int64_t>().CopyDeviceToCpu();
+  return cpu[rows - 1];
 }
 
 void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int32_t anchor, Tensor* aux_override) {
@@ -615,25 +811,45 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
             ? ((tokens.size() - window) / kBoltVerifyRows) * kBoltVerifyRows
             : 0;
     const size_t draft_rows = tokens.size() - draft_start;
-    const bool single_chunk = draft_rows <= kBoltVerifyRows;
+    const bool can_dynamic_prefill =
+        bolt_.dynamic_prefill_ && bolt_.prefill_chunk_rows_ > kBoltVerifyRows;
+    const bool single_chunk =
+        draft_rows <= kBoltVerifyRows && (!can_dynamic_prefill || tokens.size() <= kBoltVerifyRows);
     const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
-    for (size_t pos = 0; pos < tokens.size(); pos += bolt_.target_rows_) {
-      const size_t valid = std::min(bolt_.target_rows_, tokens.size() - pos);
+    for (size_t pos = 0; pos < tokens.size();) {
+      const size_t remaining = tokens.size() - pos;
+      if (can_dynamic_prefill && remaining > kBoltVerifyRows) {
+        const size_t valid = std::min(bolt_.prefill_chunk_rows_, remaining);
+        const bool last_chunk = pos + valid >= tokens.size();
+        const int64_t pred = PrefillChunk(tokens.subspan(pos, valid), pos, draft_start, last_chunk);
+        if (last_chunk) {
+          anchor_ = static_cast<int32_t>(pred);
+        }
+        length_ += valid;
+        state_row_ = static_cast<int32_t>(kBoltVerifyRows - 1);
+        pos += valid;
+        continue;
+      }
+      const size_t valid = std::min(bolt_.target_rows_, remaining);
       const bool last_chunk = pos + bolt_.target_rows_ >= tokens.size();
       std::vector<int32_t> block(bolt_.target_rows_, tokens[pos + valid - 1]);
       std::copy_n(tokens.begin() + pos, valid, block.begin());
       const auto predictions = Verify(block, last_chunk);
-      if (drafter_ && !single_chunk && pos >= draft_start) {
+      if (drafter_ && !single_chunk && pos + valid > draft_start) {
+        const size_t overlap_start = std::max(pos, draft_start);
+        const size_t src_row = overlap_start - pos;
+        const size_t count = valid - src_row;
         auto aux_src = aux_view_->GetByteSpan();
         auto prefill_dst = prefill_aux_->GetByteSpan();
-        prefill_dst.subspan((pos - draft_start) * aux_row_bytes, valid * aux_row_bytes)
-            .CopyFrom(aux_src.subspan(0, valid * aux_row_bytes));
+        prefill_dst.subspan((overlap_start - draft_start) * aux_row_bytes, count * aux_row_bytes)
+            .CopyFrom(aux_src.subspan(src_row * aux_row_bytes, count * aux_row_bytes));
       }
       if (last_chunk) {
         anchor_ = static_cast<int32_t>(predictions[valid - 1]);
       }
       length_ += valid;
       state_row_ = static_cast<int32_t>(valid - 1);
+      pos += bolt_.target_rows_;
     }
     if (drafter_)
       Propose(draft_rows, draft_start, anchor_, single_chunk ? aux_view_.get() : prefill_aux_.get());

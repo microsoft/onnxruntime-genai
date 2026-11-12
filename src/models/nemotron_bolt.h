@@ -13,6 +13,7 @@ struct NemotronBoltTestAccess;
 }
 
 inline constexpr size_t kBoltVerifyRows = 8;
+inline constexpr size_t kBoltDefaultPrefillChunkRows = 4096;
 
 size_t NemotronBoltVerifyPrefixRows(size_t position);
 size_t NemotronBoltVerifyUsableRows(size_t position, size_t capacity, int max_length);
@@ -46,7 +47,11 @@ struct NemotronBoltModel : Model {
   size_t capacity_{};
   size_t aux_width_{};
   size_t target_rows_{kBoltVerifyRows};
+  size_t prefill_chunk_rows_{kBoltDefaultPrefillChunkRows};
   bool single_token_decode_{};
+  bool dynamic_prefill_{};
+  bool has_logit_rows_{};
+  bool has_aux_rows_{};
 };
 
 // The target owns dense attention K/V and eight recurrent-state rows. Only the drafter is paged.
@@ -67,6 +72,7 @@ struct NemotronBoltState : State {
                     ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
   std::vector<int64_t> Verify(std::span<const int32_t> tokens, bool want_predictions = true);
   std::vector<int64_t> VerifyBlock(std::span<const int32_t> tokens, bool want_predictions);
+  int64_t PrefillChunk(std::span<const int32_t> tokens, size_t pos, size_t draft_start, bool want_prediction);
   static std::unique_ptr<Tensor> SaveVerifyPrefix(Tensor& tensor, size_t prefix_rows);
   static void RestoreVerifyPrefix(Tensor& tensor, Tensor& prefix);
   void Propose(size_t context_rows, size_t first_position, int32_t anchor, Tensor* aux_override = nullptr);
@@ -78,8 +84,20 @@ struct NemotronBoltState : State {
   std::vector<size_t> single_token_input_indices_, single_token_output_indices_;
   std::vector<std::string> input_storage_, output_storage_;
   std::vector<Tensor*> caches_;
+  std::vector<Tensor*> kv_caches_;
+  std::vector<Tensor*> recurrent_caches_;
+  bool caches_zeroed_{};
+  size_t touched_kv_rows_{};
+  size_t input_idx_input_ids_{}, input_idx_logit_rows_{}, input_idx_aux_rows_{};
+  size_t output_idx_logits_{}, output_idx_pred_ids_{}, output_idx_aux_{};
   DeviceSpan<int32_t> verify_inputs_span_;
   DeviceSpan<int64_t> pred_ids_span_;
+  DeviceSpan<int64_t> prefill_ids_span_;
+  DeviceSpan<int64_t> prefill_logit_rows_span_;
+  DeviceSpan<int64_t> prefill_aux_rows_span_;
+  std::unique_ptr<Tensor> prefill_logits_;
+  std::unique_ptr<Tensor> prefill_pred_ids_;
+  DeviceSpan<int64_t> prefill_pred_span_;
   std::unique_ptr<Dflash2Drafter> drafter_;
   std::unique_ptr<Tensor> aux_view_;
   std::unique_ptr<Tensor> prefill_aux_;
