@@ -1,0 +1,2 @@
+# Optional export-time dependency, pinned to the validated 1M numerical reference.
+transformers @ https://github.com/huggingface/transformers/archive/598d8ba8baaec7fec5a22da0e2844c7bf4ea20e1.tar.gz

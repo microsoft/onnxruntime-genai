@@ -876,8 +876,8 @@ void Qwen38GraphEngine::Initialize(bool is_session_recreation) {
         }
         if (fold_ && max_batch_ > 1) {
           // The batched graphs are captured after the arenas ORT shrinks once the prompt state has moved to the decode graphs.
-          // Each (slot interval, bank) graph is run as often as a single-slot graph. Offloaded targets stay eager so synthetic
-          // replays cannot bypass ORT's warmup control; their graphs are captured by live runs instead.
+          // Each (slot interval, bank) graph captures on its first muted warmup run; later offloaded warmups stay eager so
+          // synthetic replays cannot bypass ORT's per-run warmup control.
           const int runs_per_graph = Qwen38WarmupRuns(IsGraphCaptureEnabled(model_.config_->model.decoder.session_options));
           FastHandoff();
           for (int B = 1; B <= max_batch_; ++B) {
@@ -1164,7 +1164,9 @@ void Qwen38GraphEngine::BuildTarget() {
       for (int s = 0; s < max_batch_; ++s) {
         std::vector<Qwen38StateReplayDesc> fast_descs;
         std::vector<Qwen38StateReplayDesc> generic_descs;
-        for (const auto& [su_name, su_tensor] : state_update_tensors_) {
+        for (const auto& state_update : state_update_tensors_) {
+          const auto& su_name = state_update.first;
+          const auto& su_tensor = state_update.second;
           const size_t dot1 = su_name.find('.');
           const size_t dot2 = su_name.find('.', dot1 + 1);
           const std::string lid_str = su_name.substr(dot1 + 1, dot2 - dot1 - 1);
@@ -1929,9 +1931,8 @@ void Qwen38GraphEngine::RunTarget(int rows, int phase, const Qwen38PromptRunHint
 
 void Qwen38GraphEngine::RunTarget(Direction& direction, const Qwen38PromptRunHints* prompt,
                                   Qwen38SlotMask participants) {
-  OrtRunOptions* options = run_hints_.InWarmup() && offload_warmup_run_options_
-                               ? offload_warmup_run_options_.get()
-                               : direction.run_options.get();
+  OrtRunOptions* options = SelectQwen38TargetRunOptions(
+      run_hints_, direction.run_options.get(), offload_warmup_run_options_.get(), direction.warmup_captured);
   RunSession(*model_.session_target_, options, *direction.binding, prompt, participants);
 }
 
@@ -2818,7 +2819,7 @@ void Qwen38GraphEngine::Advance(const Qwen38CycleRecord& record, bool want_more)
 }
 
 void Qwen38GraphEngine::Warmup() {
-  // Touch every (rows, phase) and head direction enough times for first-use costs and, except on offloaded targets, capture.
+  // Touch every (rows, phase) and head direction for first-use costs and capture. Later offloaded warmups stay eager.
   // The Runs of the warmup carry ep.cuda.qmoe_in_warmup (and ORT_QMOE_IN_WARMUP) and, from here on, every Run of the
   // engine asks for deterministic MoE tactics: the engine keeps that state and publishes it around each Run only
   // (qwen38_ort_env.h), also when this throws.
@@ -3106,6 +3107,20 @@ std::unique_ptr<OrtRunOptions> CreateQwen38OffloadWarmupRunOptions(const Qwen38M
   options->AddConfigEntry("gpu_graph_id", "-1");
   options->AddConfigEntry("disable_synchronize_execution_providers", "1");
   options->AddConfigEntry(Qwen38OrtRunEntry::kInWarmup, "1");
+  return options;
+}
+
+OrtRunOptions* SelectQwen38TargetRunOptions(const Qwen38OrtRunHints& hints, OrtRunOptions* direction_options,
+                                            OrtRunOptions* offload_warmup_options, bool& warmup_captured) {
+  OrtRunOptions* options = direction_options;
+  if (hints.InWarmup() && offload_warmup_options != nullptr) {
+    if (warmup_captured) {
+      options = offload_warmup_options;
+    } else {
+      warmup_captured = true;
+    }
+  }
+  if (options != nullptr) hints.ApplyRunConfigEntries(*options);
   return options;
 }
 
@@ -3517,14 +3532,14 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
   config_->model.qwen38_graph.fold.head_r2.filename =
       SelectQwen38TierHeadR2Filename(q.fold.head_r2.filename, context_tier, package_has_file);
   head_r2_filename = SelectQwen38TierHeadR2Filename(head_r2_filename, context_tier, package_has_file);
-  const std::string adaptive_ctx_budget = GetEnv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET");
-  const bool adaptive_budget = adaptive_ctx_budget == "1";
-  if (g_log.enabled && moe_offload.enabled && !adaptive_ctx_budget.empty()) {
+  // On unless ORT_QWEN38_ADAPTIVE_CTX_BUDGET is 0/false; unset and empty keep the default, and invalid values throw.
+  bool adaptive_budget = true;
+  GetEnv("ORT_QWEN38_ADAPTIVE_CTX_BUDGET", adaptive_budget);
+  if (g_log.enabled && moe_offload.enabled) {
     if (!adaptive_budget) {
-      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=" << adaptive_ctx_budget << " is ignored: only 1 turns it on"
-                          << std::endl;
+      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET disables the adaptive context budget" << std::endl;
     } else if (!context_tier) {
-      Log("qwen38_graph") << "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=1: " << target_filename
+      Log("qwen38_graph") << "adaptive context budget: " << target_filename
                           << " is not named after a context tier, so the offload budgets follow the configured kv_capacity "
                           << q.kv_capacity << std::endl;
     }
@@ -3545,8 +3560,8 @@ Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_e
     if (g_log.enabled && moe_offload.enabled && adaptive_budget && graph_positions != budget_kv_capacity) {
       Log("qwen38_graph") << "warning: offload budget estimate used kv_capacity " << budget_kv_capacity
                           << ", but target graph " << target_filename << " reports " << graph_positions
-                          << "; the session budgets are already set. Check the package layout or disable "
-                             "ORT_QWEN38_ADAPTIVE_CTX_BUDGET and configure explicit budgets."
+                          << "; the session budgets are already set. Check the package layout or set "
+                             "ORT_QWEN38_ADAPTIVE_CTX_BUDGET=0 and configure explicit budgets."
                           << std::endl;
     }
     // The capacity follows the graph. The default generation budget follows it only when a context tier was requested: a

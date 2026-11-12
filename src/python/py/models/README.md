@@ -94,6 +94,23 @@ It is intended for supporting the latest, popular state-of-the-art models.
 
 Bailing exports require an ONNX Runtime build containing [ORT #33817](https://github.com/microsoft/onnxruntime/pull/33817), merged November 8, 2026 as `d93f5446f362d9c70bea81de953f32a26aa26d25`, for `MoEGroupRouter` and per-key KDA decay. The first `onnxruntime` and `onnxruntime-gpu` nightly wheels with it are `1.32.0.dev20261109001`; a CPU `onnxruntime` nightly also works with an `onnxruntime-ep-cuda12` nightly built after the merge. Older installed wheels, including the reviewed ORT 1.30.0 wheel, do not gain these operators automatically. The Linux CUDA CI workflow installs the nightly packages pinned in `test/python/cuda/ort-nightly/` and requires the CPU/CUDA routing and KDA tests to execute, not skip.
 
+Ling Flash-VL also requires [ORT #33954](https://github.com/microsoft/onnxruntime/pull/33954),
+merged as `d65da43ffd021b9392ee799f96c0666c1afc29b4`, for the
+`swiglu_limit_after_activation` attribute on `MoE` and `QMoE`. The pinned GPU
+nightly `1.32.0.dev20261110001` includes both capabilities. Earlier routing/KDA
+nightlies alone are insufficient for clipped expert layers.
+
+BF16 shared-expert clamps execute in FP32 and cast back before the final
+multiplication; activation and decoder precision remain unchanged. Newly
+exported graphs therefore do not require a separate CUDA BF16 `Less` repair.
+
+Ling image exports construct signed rotary caches for centered image positions.
+Re-export older packages that used nonnegative caches; the package must contain
+the correct decoder graph and session options.
+
+Context extension beyond `original_max_position_embeddings` is unsupported for
+Ling image exports and is rejected before graph export.
+
 Dense text LongRoPE exports using an `If` node declare an int64 scalar
 `rope_context_length` input. ONNX metadata entries
 `com.microsoft.genai.rope_context_length_input` and
@@ -414,7 +431,60 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 This scenario is for when you want to build a model that uses the `PagedAttention` operator so it can be served by ONNX Runtime GenAI's continuous-batching engine. When enabled, the builder replaces `GroupQueryAttention` with `PagedAttention`, packs all sequences of the batch into a single flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged `[num_blocks, block_size, num_key_value_heads, head_size]` buffers, and removes the `attention_mask` input in favor of the `block_table`, `cumulative_sequence_lengths`, and `past_sequence_lengths` metadata inputs. It also removes `position_ids` when RoPE is fused into attention; architectures that require an external MRoPE op retain packed position IDs (for example, Qwen3.5/3.8 uses `[3, num_tokens]`). Set `prune_lm_head=true` to add a `logits_indices` input, gather the packed hidden states consumed by generation or draft verification, and output `[num_logits, vocab_size]` logits. By default, it projects every packed hidden state and outputs `[num_tokens, vocab_size]` logits.
 
-Paged attention supports CUDA with `fp16` or `bf16` precision and WebGPU with `fp16` precision. Paged exports include the CPU `attention_metadata` input used by the runtime to provide stable query and KV bounds without downloading device sequence lengths in every attention layer. Paged attention cannot be combined with `exclude_lm_head`; `exclude_embeds` is supported only for the packed Qwen vision packages described below. `paged_block_size` defaults to `256` and must be a power of two and at least `16`, matching what the ONNX Runtime PagedAttention op accepts; for models with short and long rotary caches, it must also evenly divide `original_max_position_embeddings`. The vendored FlashAttention paged kernel needs the block to be a multiple of its tile as well (256 for `head_size <= 64`, 128 for `head_size <= 128`, otherwise 64), so a smaller block stays valid but makes ORT fall back to another attention backend. A quantized KV cache is exempt from the tile requirement alone: FlashAttention still serves it, through a dense dequantized path with no page alignment to satisfy. A block drafter (`dflash2_path`/`dspark_path`) shares the target's block size and usually has the smaller head size, so it reaches its tile at a larger block than the target does. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`. `paged_chunk_size` must be a positive integer and is written to `search.chunk_size`. It caps the prompt tokens a single request contributes to one step, whereas `max_scheduled_tokens` caps the step as a whole; a value at or above `max_scheduled_tokens` therefore has no effect, and a smaller one lets concurrent prefills interleave rather than letting one request consume the step budget on its own. Models whose sliding-window layers are served from a ring of blocks hold only `paged_chunk_size + window_size - 1` positions, so they require chunked prefill and default to `paged_block_size`. For every other paged model it is written only when passed.
+Paged attention supports CUDA with `fp16` or `bf16` precision and WebGPU with `fp16` precision. Paged exports include the CPU `attention_metadata` input used by the runtime to provide stable query and KV bounds without downloading device sequence lengths in every attention layer. Paged attention cannot be combined with `exclude_lm_head`; `exclude_embeds` is supported only for the packed vision packages described below. `paged_block_size` defaults to `256` and must be a power of two and at least `16`, matching what the ONNX Runtime PagedAttention op accepts; for models with short and long rotary caches, it must also evenly divide `original_max_position_embeddings`. The vendored FlashAttention paged kernel needs the block to be a multiple of its tile as well (256 for `head_size <= 64`, 128 for `head_size <= 128`, otherwise 64), so a smaller block stays valid but makes ORT fall back to another attention backend. A quantized KV cache is exempt from the tile requirement alone: FlashAttention still serves it, through a dense dequantized path with no page alignment to satisfy. A block drafter (`dflash2_path`/`dspark_path`) shares the target's block size and usually has the smaller head size, so it reaches its tile at a larger block than the target does. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`. `paged_chunk_size` must be a positive integer and is written to `search.chunk_size`. It caps the prompt tokens a single request contributes to one step, whereas `max_scheduled_tokens` caps the step as a whole; a value at or above `max_scheduled_tokens` therefore has no effect, and a smaller one lets concurrent prefills interleave rather than letting one request consume the step budget on its own. Models whose sliding-window layers are served from a ring of blocks hold only `paged_chunk_size + window_size - 1` positions, so they require chunked prefill and default to `paged_block_size`. For every other paged model it is written only when passed.
+
+### Ling vision for the Engine
+
+`inclusionAI/Ling-3.0-flash-VL` exports as `bailing_moe_v3_vl`. Complete vision
+requires CUDA, `use_paged_attention=true`, and `exclude_embeds=true`; it emits
+the decoder, CPU lookup, vision/projector, and processing assets. This is
+target-only execution: MTP and block drafters are unsupported. Context extension
+beyond the source's original maximum is unsupported.
+
+Choose resource limits for the deployment rather than patching the loaded
+package in application code. For example, save `ling_runtime.json`:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "num_blocks": 32,
+      "max_batch_size": 1,
+      "max_scheduled_tokens": 256,
+      "media_host_bytes": 1073741824
+    }
+  },
+  "search": {"chunk_size": 256}
+}
+```
+
+```bash
+python -m onnxruntime_genai.models.builder -i path_to_ling_checkpoint -o output -p int4 -e cuda \
+  --runtime_config ling_runtime.json \
+  --extra_options use_paged_attention=true exclude_embeds=true use_cuda_bf16=true embedding_quant_type=int8
+
+python examples/python/engine/vision-qa.py --model output --image screenshot.png \
+  --question "Explain this build failure." --max-session-tokens 8192
+```
+
+The runtime fragment is a capacity example, not a hardware-fit guarantee.
+Image expansion, prompt text, and generated tokens share the session limit.
+A source-valid large image can require more than the default 512 MiB host
+reservation; multiple images may exceed even this example's 1 GiB limit.
+Admission rejects an over-budget turn without corrupting the Request.
+
+Complete vision exports default CUDA graph capture off and enable
+`session.use_device_allocator_for_initializers=1`, so no corrective session
+overlay is needed in the example. Explicit `enable_cuda_graph=true` remains
+available but is not a vision qualification claim. The shared processor expands
+each image marker with the source-required newline; the example supplies only
+the question text, without adding another newline.
+
+For intentional text-only export, use `text_only=true exclude_embeds=false`
+instead. It emits `bailing_hybrid`, rejects images, and retains the text-only
+capture defaults. CUDA Bailing decoders, including text-only exports, disable
+TF32 for FP32 routing. Shared BF16 image preprocessing uses nearest-even
+conversion; it does not change general CPU tensor-cast semantics.
 
 ### Packed Qwen vision for the Engine
 
@@ -732,7 +802,7 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra
 
 ##### Device Allocator for Initializers
 
-`use_device_allocator_for_initializers=true` opts into `session.use_device_allocator_for_initializers=1` (default `false`). Paged Qwen3.8 sessions enable it automatically. Initializers then bypass the ONNX Runtime arena, avoiding retention of the original allocation when a kernel replaces a weight during `PrePack`.
+`use_device_allocator_for_initializers=true` opts into `session.use_device_allocator_for_initializers=1` (default `false`). Paged Qwen3.8 and complete Ling vision sessions enable it automatically. Initializers then bypass the ONNX Runtime arena, avoiding retention of the original allocation when a kernel replaces a weight during `PrePack`.
 
 ```bash
 # From wheel:
