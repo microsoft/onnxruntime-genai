@@ -63,7 +63,6 @@ struct RecurrentState {
   bool ShouldFixUpGraphCapture(int graph_id) const;
   void SaveForGraphCapture();
   void RestoreAfterGraphCapture(int graph_id);
-  void InvalidateCapturedGraphs() { graph_capture_fixed_up_.clear(); }
 
  private:
   void ZeroStates(std::vector<std::unique_ptr<OrtValue>>& states);

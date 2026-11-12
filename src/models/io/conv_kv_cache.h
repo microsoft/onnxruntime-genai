@@ -4,9 +4,12 @@
 #pragma once
 
 #include "kv_cache.h"
-#include "shared_cache_growth.h"
 
 namespace Generators {
+
+namespace WebGPU {
+struct ConvKeyValueCache;
+}
 
 bool HasConvKeyValueCache(const Model& model);
 
@@ -19,6 +22,7 @@ struct ConvKeyValueCache : KeyValueCache {
   void RewindTo(size_t index) override;
 
  private:
+  friend struct WebGPU::ConvKeyValueCache;
   template <typename ScoreType>
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
@@ -45,13 +49,12 @@ struct ConvKeyValueCache : KeyValueCache {
   std::vector<std::string> kv_input_name_strings_, kv_output_name_strings_;
   size_t kv_input_index_{~0U}, kv_output_index_{~0U};
   bool kv_is_first_update_{true};
-  // When true, attention KV aliases past and present (same OrtValue
+  // When true, attention KV uses one fixed-size buffer for past and present (same OrtValue
   // bound to both). Enabled the same way as DefaultKeyValueCache: via
   // IsPastPresentShareBufferEnabled (genai search options) and/or a fixed kv seq_len
-  // detected in the model graph by DetectAndConfigureFixedKvShape. Supported symbolic
-  // WebGPU caches grow on demand; fixed shapes retain their declared capacity.
+  // detected in the model graph by DetectAndConfigureFixedKvShape. Sequence capacity is
+  // the detected fixed dim when present, else search.max_length, except in window-sized layers (kv_windowed_).
   bool kv_share_buffer_{false};
-  std::unique_ptr<SharedCacheGrowth> shared_cache_growth_;
   // Per KV layer: a sliding_attention layer whose window-sized buffer is bound as past and present in every mode.
   std::vector<bool> kv_windowed_;
 

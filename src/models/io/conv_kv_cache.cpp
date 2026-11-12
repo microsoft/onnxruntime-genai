@@ -6,6 +6,9 @@
 #include "static_kv_cache.h"
 #include "../../logging.h"
 #include "../model.h"
+#if USE_WEBGPU
+#include "../../ep/webgpu/kv_cache.h"
+#endif
 
 #include <algorithm>
 
@@ -96,14 +99,13 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
     }
 
     if (kv_share_buffer_) {
-      if (fixed_kv_seq_len == 0 && SharedCacheGrowth::IsSupported(state_, kv_input_name_strings_, kv_output_name_strings_)) {
-        shared_cache_growth_ = std::make_unique<SharedCacheGrowth>(state_);
-      }
       int64_t seq_cap = fixed_kv_seq_len > 0 ? fixed_kv_seq_len
                                              : static_cast<int64_t>(state_.params_->search.max_length);
-      if (shared_cache_growth_) {
+#if USE_WEBGPU
+      if (fixed_kv_seq_len == 0 && WebGPU::SharedCacheGrowth::IsSupported(state_, kv_input_name_strings_, kv_output_name_strings_)) {
         seq_cap = 1;
       }
+#endif
       if (seq_cap <= 0) {
         throw std::runtime_error(
             "ConvKeyValueCache: past_present_share_buffer requires a fixed kv seq_len in the "
@@ -187,10 +189,6 @@ void ConvKeyValueCache::Add() {
 }
 
 void ConvKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
-  if (shared_cache_growth_) {
-    kv_shape_[2] = shared_cache_growth_->EnsureCapacity(total_length, !kv_is_first_update_, kv_presents_, kv_input_index_, kv_output_index_);
-    kv_is_first_update_ = false;
-  }
   // --- Update KV cache (attention layers) ---
   // Shared past/present have already grown together and are updated in place.
   // Nonshared caches swap the previous output into the next input.

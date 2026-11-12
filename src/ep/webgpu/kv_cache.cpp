@@ -1,17 +1,17 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "shared_cache_growth.h"
-#include "../graph_builder.h"
+#if USE_WEBGPU
+
 #include "kv_cache.h"
+#include "../../models/graph_builder.h"
 
 #include <algorithm>
 
-namespace Generators {
+namespace Generators::WebGPU {
 
 bool SharedCacheGrowth::IsSupported(const State& state, std::span<const std::string> input_names,
                                     std::span<const std::string> output_names) {
-  if (Ort::api->GetModelEditorApi() == nullptr) return false;
   const auto& model = state.model_;
   if (model.p_device_kvcache_->GetType() != DeviceType::WEBGPU ||
       !model.config_->model.decoder.pipeline.empty() ||
@@ -23,6 +23,8 @@ bool SharedCacheGrowth::IsSupported(const State& state, std::span<const std::str
 #if ORT_API_VERSION < 27
   if (state.params_->use_graph_capture) return false;
 #endif
+  if (Ort::api_version < 22 || (state.params_->use_graph_capture && Ort::api_version < 27) ||
+      Ort::api->GetModelEditorApi() == nullptr) return false;
   if (input_names.empty() || input_names.size() != output_names.size()) return false;
   for (size_t i = 0; i < input_names.size(); ++i) {
     const auto input_shape = model.session_info_.GetInputShape(input_names[i]);
@@ -34,6 +36,23 @@ bool SharedCacheGrowth::IsSupported(const State& state, std::span<const std::str
     }
   }
   return true;
+}
+
+void SharedCacheGrowth::InvalidateCapturedGraphs() {
+  if (state_.graph_capture_session_ && Ort::api_version < 27) {
+    throw std::runtime_error("WebGPU graph invalidation requires ORT 1.27 or newer.");
+  }
+#if ORT_API_VERSION >= 27
+  if (state_.graph_capture_session_) {
+    state_.graph_ids_.ForEachAssignedId([&](int id) { state_.graph_capture_session_->ReleaseCapturedGraph(id); });
+  }
+#else
+  if (state_.graph_capture_session_) throw std::runtime_error("WebGPU graph invalidation requires ORT 1.27 or newer.");
+#endif
+  // IDs are never recycled. Recurrent fix-up already treats a new ID as a new
+  // capture, so no epoch field is needed in the shared State or decoder layout.
+  state_.graph_ids_.Clear();
+  state_.graph_capture_fallback_logged_ = false;
 }
 
 void SharedCacheGrowth::Migrate(OrtValue& source, OrtValue& destination, int64_t extra_capacity) {
@@ -87,7 +106,7 @@ int64_t SharedCacheGrowth::EnsureCapacity(int total_length, bool has_content,
 
   // Release only this generator's captures before changing any bound addresses.
   // A failure leaves the old tensors bound and usable; never replay a stale graph.
-  state_.InvalidateCapturedGraphs();
+  InvalidateCapturedGraphs();
   std::vector<std::unique_ptr<OrtValue>> grown;
   grown.reserve(tensors.size());
   for (auto& tensor : tensors) {
@@ -107,4 +126,34 @@ int64_t SharedCacheGrowth::EnsureCapacity(int total_length, bool has_content,
   return capacity;
 }
 
-}  // namespace Generators
+SharedKeyValueCache::SharedKeyValueCache(State& state) : Generators::SharedKeyValueCache{state} {
+  if (past_present_share_buffer_ && SharedCacheGrowth::IsSupported(state, input_name_strings_, output_name_strings_)) {
+    growth_ = std::make_unique<SharedCacheGrowth>(state);
+  }
+}
+
+void SharedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+  if (growth_) {
+    shape_[2] = growth_->EnsureCapacity(total_length, current_length_ > 0, presents_, input_index_, output_index_);
+    for (auto& shape : layer_shapes_) shape[2] = shape_[2];
+  }
+  Generators::SharedKeyValueCache::Update(beam_indices, total_length);
+}
+
+ConvKeyValueCache::ConvKeyValueCache(State& state) : Generators::ConvKeyValueCache{state} {
+  if (kv_share_buffer_ && SharedCacheGrowth::IsSupported(state, kv_input_name_strings_, kv_output_name_strings_)) {
+    growth_ = std::make_unique<SharedCacheGrowth>(state);
+  }
+}
+
+void ConvKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+  if (growth_) {
+    kv_shape_[2] = growth_->EnsureCapacity(total_length, !kv_is_first_update_, kv_presents_, kv_input_index_, kv_output_index_);
+    kv_is_first_update_ = false;
+  }
+  Generators::ConvKeyValueCache::Update(beam_indices, total_length);
+}
+
+}  // namespace Generators::WebGPU
+
+#endif  // USE_WEBGPU

@@ -86,7 +86,6 @@ struct DecoderOnly_State : State {
   Logits logits_{*this};
   std::unique_ptr<KeyValueCache> kv_cache_;
   std::unique_ptr<RecurrentState> recurrent_state_;
-  uint64_t recurrent_capture_epoch_{0};
   std::unique_ptr<PleState> ple_state_;
   std::unique_ptr<IndexerCache> indexer_cache_;
   std::unique_ptr<PositionInputs> position_inputs_;

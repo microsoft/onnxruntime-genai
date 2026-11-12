@@ -20,6 +20,9 @@ namespace Generators {
 struct Tokenizer;
 struct MultiModalProcessor;
 class ThreadPool;
+namespace WebGPU {
+struct SharedCacheGrowth;
+}
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
@@ -88,9 +91,6 @@ struct State {
 
   void ClearIO();  // Clear all inputs/outputs
 
-  void InvalidateCapturedGraphs();
-  uint64_t GraphCaptureEpoch() const { return graph_capture_epoch_; }
-
   virtual void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
   virtual void SetRunOption(const char* key, const char* value);
   void SetRunOptions(const Config::RunOptions& config_run_options);
@@ -130,15 +130,15 @@ struct State {
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
+  friend struct WebGPU::SharedCacheGrowth;
   // Capture identity includes input length, execution variant, and active adapters.
-  // IDs are unique across states sharing a session and stay owned until invalidation or destruction.
+  // IDs are unique across states sharing a session and stay owned until destruction.
   GraphAnnotationIds graph_ids_;
   bool graph_capture_fallback_logged_{};
   // Session used for graph capture; not owned. Lifetime invariant: the OrtSession
   // outlives this State because State is owned by Generator, and Generator is
   // destroyed before the Model (and its session) that produced it.
   OrtSession* graph_capture_session_{nullptr};
-  uint64_t graph_capture_epoch_{0};
   std::shared_ptr<Adapters> adapters_;
   ExtraOutputs extra_outputs_;
 };

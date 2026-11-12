@@ -9,11 +9,27 @@
 #include "models/graph_builder.h"
 #include "models/io/shared_kv_cache.h"
 #include "models/decoder_only.h"
+#include "ep/webgpu/kv_cache.h"
 
 namespace Generators {
 namespace {
 
-std::unique_ptr<Config> MakeConfig() {
+using WebGPU::SharedCacheGrowth;
+
+bool GrowthAvailable(bool capture) {
+#if ORT_API_VERSION < 27
+  if (capture) return false;
+#endif
+  return Ort::api_version >= 22 && (!capture || Ort::api_version >= 27) && Ort::api->GetModelEditorApi() != nullptr;
+}
+
+class WebGpuGrowthTest : public ::testing::Test {
+  void SetUp() override {
+    if (!GrowthAvailable(false)) GTEST_SKIP() << "KV growth requires ORT model-editor support (API 22+).";
+  }
+};
+
+std::unique_ptr<Config> MakeConfig(bool capture = true) {
   auto config = std::make_unique<Config>();
   config->model.type = "qwen3";
   config->model.context_length = 4096;
@@ -25,7 +41,7 @@ std::unique_ptr<Config> MakeConfig() {
   config->model.decoder.hidden_size = 12;
   config->model.decoder.session_options.providers = {"WebGPU"};
   config->model.decoder.session_options.provider_options.push_back(
-      {"WebGPU", {{"enableGraphCapture", "1"}, {"validationMode", "basic"}}});
+      {"WebGPU", {{"enableGraphCapture", capture ? "1" : "0"}, {"validationMode", "basic"}}});
   config->search.max_length = 4093;
   config->search.batch_size = 2;
   config->search.past_present_share_buffer = true;
@@ -34,7 +50,7 @@ std::unique_ptr<Config> MakeConfig() {
 
 struct TestModel : Model {
   TestModel(int64_t fixed_capacity = -1, const char* op = "Identity",
-            ONNXTensorElementDataType cache_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) : Model{MakeConfig()} {
+            ONNXTensorElementDataType cache_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) : Model{MakeConfig(GrowthAvailable(true))} {
     for (const char* suffix : {"key", "value"}) {
       ModelConfig config(op);
       config.inputs.emplace_back(std::string{"past_key_values.0."} + suffix, cache_type,
@@ -58,11 +74,12 @@ struct TestState : State {
   DeviceSpan<float> Run(int, DeviceSpan<int32_t>&, DeviceSpan<int32_t>) override { return {}; }
   void Execute(OrtSession& session, int length = 1, int variant = 0) { State::Run(session, true, length, variant); }
   void ExecuteUncaptured(OrtSession& session) { State::Run(session, false); }
+  int CaptureId(int length = 1, int variant = 0) { return GraphIdForLength(length, variant); }
 };
 
 // Load a real GQA graph with sparse layer indices and custom cache names.
 struct TestGqaModel : Model {
-  TestGqaModel() : Model{MakeConfig()} {
+  explicit TestGqaModel(bool capture = true) : Model{MakeConfig(capture && GrowthAvailable(true))} {
     config_->model.decoder.num_key_value_heads = 1;
     config_->model.decoder.num_attention_heads = 2;
     config_->model.decoder.head_size = 64;
@@ -97,7 +114,7 @@ void CheckGrowth(const std::shared_ptr<TestModel>& model) {
   ASSERT_TRUE(SharedCacheGrowth::IsSupported(
       state, std::vector<std::string>{"past_key_values.0.key", "past_key_values.0.value"},
       std::vector<std::string>{"present.0.key", "present.0.value"}));
-  SharedKeyValueCache cache{state};
+  WebGPU::SharedKeyValueCache cache{state};
   cache.Add();
   ASSERT_EQ(cache.GetShape()[2], 1);
   cache.Update({}, 3);
@@ -130,7 +147,7 @@ void CheckGrowth(const std::shared_ptr<TestModel>& model) {
   EXPECT_EQ(cache.GetShape()[2], 4093);
 }
 
-TEST(SharedCacheGrowth, MigratesBatchesAndHeadsAndRetainsAliasing) {
+TEST_F(WebGpuGrowthTest, MigratesBatchesAndHeadsAndRetainsAliasing) {
   CheckGrowth(std::make_shared<TestModel>());
 }
 
@@ -218,8 +235,14 @@ void CheckFallbackGeneration(const char* filename, bool memory_model = false, in
     if (!name.starts_with("out.")) continue;
     ++cache_count;
     const auto cache = Read(*model->p_device_kvcache_, *state.outputs_[i]);
-    EXPECT_EQ(cache, Read(*reference->p_device_kvcache_, *eager->state_->outputs_[i]));
-    const auto expected_capacity = declared_capacity > 0 ? declared_capacity : (cross_growth ? 1024 : std::min(max_length, 512));
+    const auto expected_cache = Read(*reference->p_device_kvcache_, *eager->state_->outputs_[i]);
+    const auto live_elements = (prompt.size() + 5) * 64;
+    ASSERT_GE(cache.size(), live_elements);
+    ASSERT_GE(expected_cache.size(), live_elements);
+    EXPECT_TRUE(std::equal(cache.begin(), cache.begin() + live_elements, expected_cache.begin()));
+    const auto expected_capacity = declared_capacity > 0               ? declared_capacity
+                                   : GrowthAvailable(expected_capture) ? (cross_growth ? 1024 : std::min(max_length, 512))
+                                                                       : max_length;
     EXPECT_EQ(state.outputs_[i]->GetTensorTypeAndShapeInfo()->GetShape()[2], expected_capacity);
     EXPECT_NE(std::find(state.inputs_.begin(), state.inputs_.end(), state.outputs_[i]), state.inputs_.end());
     if (name.ends_with(".v")) {
@@ -332,22 +355,24 @@ TEST(WebGpuCaptureFallback, EagerFailureStillPropagates) {
   EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(config)), Ort::Exception);
 }
 
-TEST(SharedCacheGrowth, SymbolicShapeAloneDoesNotEnableSharing) {
+TEST_F(WebGpuGrowthTest, SymbolicShapeAloneDoesNotEnableSharing) {
   auto model = std::make_shared<TestModel>();
   auto params = CreateGeneratorParams(*model);
   params->search.past_present_share_buffer = false;
   EXPECT_FALSE(params->IsPastPresentShareBufferEnabled(model->config_->model.type));
   TestState state{*model, *params};
-  EXPECT_THROW(SharedKeyValueCache{state}, std::runtime_error);
+  if (params->use_graph_capture) {
+    EXPECT_THROW(WebGPU::SharedKeyValueCache{state}, std::runtime_error);
+  }
 }
 
-TEST(SharedCacheGrowth, SharesSparseGqaBindingsOnlyWhenRequested) {
+TEST_F(WebGpuGrowthTest, SharesSparseGqaBindingsOnlyWhenRequested) {
   auto model = std::make_shared<TestGqaModel>();
   auto params = CreateGeneratorParams(*model);
   ASSERT_TRUE(params->search.past_present_share_buffer);
   ASSERT_TRUE(params->IsPastPresentShareBufferEnabled(model->config_->model.type));
   TestState state{*model, *params};
-  SharedKeyValueCache cache{state};
+  WebGPU::SharedKeyValueCache cache{state};
   cache.Add();
   cache.Update({}, 128);
   auto* original = state.inputs_[0];
@@ -367,7 +392,9 @@ TEST(SharedCacheGrowth, SharesSparseGqaBindingsOnlyWhenRequested) {
   EXPECT_FALSE(SharedCacheGrowth::IsSupported(
       state, std::vector<std::string>{"kv.3.k", "kv.3.v"}, std::vector<std::string>{"out.3.k", "out.3.v"}));
   TestState unshared_state{*model, *params};
-  EXPECT_THROW(CreateStandardKeyValueCache(unshared_state), std::runtime_error);
+  if (params->use_graph_capture) {
+    EXPECT_THROW(CreateStandardKeyValueCache(unshared_state), std::runtime_error);
+  }
   params->use_graph_capture = false;
   auto unshared = CreateStandardKeyValueCache(unshared_state);
   ASSERT_NE(unshared, nullptr);
@@ -379,7 +406,7 @@ TEST(SharedCacheGrowth, SharesSparseGqaBindingsOnlyWhenRequested) {
   EXPECT_EQ(unshared_state.outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[2], 320);
 }
 
-TEST(SharedCacheGrowth, OtherDevicesRetainSharedMaxLengthPolicy) {
+TEST_F(WebGpuGrowthTest, OtherDevicesRetainSharedMaxLengthPolicy) {
   auto model = std::make_shared<TestModel>();
   model->p_device_kvcache_ = GetDeviceInterface(DeviceType::CPU);
   auto params = CreateGeneratorParams(*model);
@@ -393,11 +420,63 @@ TEST(SharedCacheGrowth, OtherDevicesRetainSharedMaxLengthPolicy) {
   EXPECT_EQ(cache.GetShape()[2], params->search.max_length);
 }
 
-TEST(SharedCacheGrowth, MigratesFloat16BatchesAndHeadsWithoutChangingBits) {
+TEST_F(WebGpuGrowthTest, ChecksDeviceAndRuntimeBeforeProbingOptionalApi) {
+  auto model = std::make_shared<TestModel>();
+  auto params = CreateGeneratorParams(*model);
+  TestState state{*model, *params};
+  const std::vector<std::string> inputs{"past_key_values.0.key"}, outputs{"present.0.key"};
+  const auto* original_api = Ort::api;
+  const auto original_version = Ort::api_version;
+  OrtApi unavailable_api{};
+  // A null probe would fail if either guard tried to access the optional entry.
+  Ort::api = &unavailable_api;
+  Ort::api_version = 21;
+  EXPECT_FALSE(SharedCacheGrowth::IsSupported(state, inputs, outputs));
+  Ort::api_version = 26;
+  params->use_graph_capture = true;
+  EXPECT_FALSE(SharedCacheGrowth::IsSupported(state, inputs, outputs));
+  model->p_device_kvcache_ = GetDeviceInterface(DeviceType::CPU);
+  Ort::api_version = original_version;
+  EXPECT_FALSE(SharedCacheGrowth::IsSupported(state, inputs, outputs));
+  Ort::api = original_api;
+  Ort::api_version = original_version;
+}
+
+TEST_F(WebGpuGrowthTest, WebGpuFactoryGrowsAttentionInConvCache) {
+  auto model = std::make_shared<TestModel>();
+  model->config_->model.decoder.layer_types = {"full_attention"};
+  auto params = CreateGeneratorParams(*model);
+  TestState state{*model, *params};
+  auto cache = CreateStandardKeyValueCache(state);
+  ASSERT_NE(dynamic_cast<WebGPU::ConvKeyValueCache*>(cache.get()), nullptr);
+  cache->Add();
+  cache->Update({}, 128);
+  ASSERT_EQ(state.outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[2], 512);
+  auto& device = *model->p_device_kvcache_;
+  auto values = WrapTensor<float>(device, *state.outputs_[0]);
+  std::fill(values.CpuSpan().begin(), values.CpuSpan().end(), 2.0f);
+  values.CopyCpuToDevice();
+  cache->Update({}, 513);
+  ASSERT_EQ(state.outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[2], 1024);
+  EXPECT_EQ(state.inputs_[0], state.outputs_[0]);
+  const auto migrated = Read(device, *state.outputs_[0]);
+  for (size_t head = 0; head < 6; ++head) {
+    EXPECT_EQ(migrated[head * 4096], 2.0f);
+    EXPECT_EQ(migrated[head * 4096 + 2048], 0.0f);
+  }
+  model->p_device_kvcache_ = GetDeviceInterface(DeviceType::CPU);
+  TestState cpu_state{*model, *params};
+  auto cpu_cache = CreateStandardKeyValueCache(cpu_state);
+  EXPECT_EQ(dynamic_cast<WebGPU::ConvKeyValueCache*>(cpu_cache.get()), nullptr);
+  cpu_cache->Add();
+  EXPECT_EQ(cpu_state.outputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[2], params->search.max_length);
+}
+
+TEST_F(WebGpuGrowthTest, MigratesFloat16BatchesAndHeadsWithoutChangingBits) {
   auto model = std::make_shared<TestModel>(-1, "Identity", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
   auto params = CreateGeneratorParams(*model);
   TestState state{*model, *params};
-  SharedKeyValueCache cache{state};
+  WebGPU::SharedKeyValueCache cache{state};
   cache.Add();
   cache.Update({}, 3);
   ASSERT_EQ(cache.GetShape()[2], 512);
@@ -425,12 +504,12 @@ TEST(SharedCacheGrowth, MigratesFloat16BatchesAndHeadsWithoutChangingBits) {
 }
 
 void CheckGqaDecodeThroughGrowth(bool capture) {
-  auto model = std::make_shared<TestGqaModel>();
+  auto model = std::make_shared<TestGqaModel>(capture);
   auto params = CreateGeneratorParams(*model);
-  ASSERT_TRUE(params->use_graph_capture);
+  ASSERT_EQ(params->use_graph_capture, capture);
   ASSERT_TRUE(params->IsPastPresentShareBufferEnabled(model->config_->model.type));
   TestState state{*model, *params};
-  SharedKeyValueCache cache{state};
+  WebGPU::SharedKeyValueCache cache{state};
   cache.Add();
   cache.Update({}, 510);
   ASSERT_EQ(cache.GetShape()[2], 512);
@@ -495,37 +574,38 @@ void CheckGqaDecodeThroughGrowth(bool capture) {
       }
     }
   };
-  const auto epoch = state.GraphCaptureEpoch();
+  const auto capture_id = state.CaptureId();
   decode();  // Record at length 511, then replay with changing values/lengths.
   decode();
-  EXPECT_EQ(state.GraphCaptureEpoch(), epoch);
+  EXPECT_EQ(state.CaptureId(), capture_id);
   decode();  // Grow to 1024, migrate and recapture at length 513.
   decode();
   ASSERT_EQ(cache.GetShape()[2], 1024);
-  EXPECT_EQ(state.GraphCaptureEpoch(), epoch + 1);
+  EXPECT_NE(state.CaptureId(), capture_id);
   for (size_t length : {size_t{2}, size_t{0}}) {
     cache.RewindTo(length);
     history.resize(length);
     decode();  // Old live tokens become masked tails; overwrite the new token.
     decode();
     EXPECT_EQ(cache.GetShape()[2], 1024);
-    EXPECT_EQ(state.GraphCaptureEpoch(), epoch + 1);
+    EXPECT_NE(state.CaptureId(), capture_id);
   }
 }
 
-TEST(SharedCacheGrowth, GqaUsesLogicalLengthThroughGrowthAndRewind) {
+TEST_F(WebGpuGrowthTest, GqaUsesLogicalLengthThroughGrowthAndRewind) {
   CheckGqaDecodeThroughGrowth(false);
 }
 
-TEST(SharedCacheGrowth, GqaReplayUsesLogicalLengthThroughGrowthAndRewind) {
+TEST_F(WebGpuGrowthTest, GqaReplayUsesLogicalLengthThroughGrowthAndRewind) {
+  if (!GrowthAvailable(true)) GTEST_SKIP() << "Captured growth requires ORT API 27+ and model-editor support.";
   CheckGqaDecodeThroughGrowth(true);
 }
 
-TEST(SharedCacheGrowth, PrefillReservesFirstDecodeToken) {
+TEST_F(WebGpuGrowthTest, PrefillReservesFirstDecodeToken) {
   auto model = std::make_shared<TestModel>();
   auto params = CreateGeneratorParams(*model);
   TestState state{*model, *params};
-  SharedKeyValueCache cache{state};
+  WebGPU::SharedKeyValueCache cache{state};
   cache.Add();
   cache.Update({}, 512);
   EXPECT_EQ(cache.GetShape()[2], 1024);
@@ -534,29 +614,29 @@ TEST(SharedCacheGrowth, PrefillReservesFirstDecodeToken) {
   EXPECT_EQ(state.inputs_[0], original);
 }
 
-TEST(SharedCacheGrowth, InitialReserveAvoidsShortDecodeMigration) {
+TEST_F(WebGpuGrowthTest, InitialReserveAvoidsShortDecodeMigration) {
   auto model = std::make_shared<TestModel>();
   auto params = CreateGeneratorParams(*model);
   TestState state{*model, *params};
-  SharedKeyValueCache cache{state};
+  WebGPU::SharedKeyValueCache cache{state};
   cache.Add();
   EXPECT_EQ(cache.GetShape()[2], 1);  // Defer the reserve until prefill.
   cache.Update({}, 128);
   ASSERT_EQ(cache.GetShape()[2], 512);
   const auto* original = state.inputs_[0];
-  const auto epoch = state.GraphCaptureEpoch();
+  const auto capture_id = state.CaptureId();
   cache.Update({}, 320);
   EXPECT_EQ(state.inputs_[0], original);
   EXPECT_EQ(state.inputs_[0], state.outputs_[0]);
-  EXPECT_EQ(state.GraphCaptureEpoch(), epoch);
+  EXPECT_EQ(state.CaptureId(), capture_id);
 }
 
-TEST(SharedCacheGrowth, InitialReserveRespectsSmallSearchLimit) {
+TEST_F(WebGpuGrowthTest, InitialReserveRespectsSmallSearchLimit) {
   auto model = std::make_shared<TestModel>();
   auto params = CreateGeneratorParams(*model);
   params->search.max_length = 257;
   TestState state{*model, *params};
-  SharedKeyValueCache cache{state};
+  WebGPU::SharedKeyValueCache cache{state};
   cache.Add();
   cache.Update({}, 128);
   ASSERT_EQ(cache.GetShape()[2], 257);
@@ -566,7 +646,7 @@ TEST(SharedCacheGrowth, InitialReserveRespectsSmallSearchLimit) {
   EXPECT_THROW(cache.Update({}, 258), std::runtime_error);
 }
 
-TEST(SharedCacheGrowth, DeclaredZeroDimensionIsNotGrowable) {
+TEST_F(WebGpuGrowthTest, DeclaredZeroDimensionIsNotGrowable) {
   auto model = std::make_shared<TestModel>(0);
   auto params = CreateGeneratorParams(*model);
   TestState state{*model, *params};
@@ -574,13 +654,13 @@ TEST(SharedCacheGrowth, DeclaredZeroDimensionIsNotGrowable) {
                                               std::vector<std::string>{"present.0.key"}));
 }
 
-TEST(SharedCacheGrowth, FixedShapePreservesDeclaredCapacity) {
+TEST_F(WebGpuGrowthTest, FixedShapePreservesDeclaredCapacity) {
   auto model = std::make_shared<TestModel>(32);
   auto params = CreateGeneratorParams(*model);
   params->search.past_present_share_buffer = false;
   EXPECT_FALSE(params->IsPastPresentShareBufferEnabled(model->config_->model.type));
   TestState state{*model, *params};
-  SharedKeyValueCache cache{state};
+  WebGPU::SharedKeyValueCache cache{state};
   cache.Add();
   EXPECT_EQ(cache.GetShape()[2], 32);
   const auto* original = state.inputs_[0];
@@ -589,7 +669,7 @@ TEST(SharedCacheGrowth, FixedShapePreservesDeclaredCapacity) {
   EXPECT_FALSE(params->search.past_present_share_buffer);
 }
 
-TEST(SharedCacheGrowth, ParallelSessionsHaveIndependentCapacityAndData) {
+TEST_F(WebGpuGrowthTest, ParallelSessionsHaveIndependentCapacityAndData) {
   auto first = std::make_shared<TestModel>();
   auto second = std::make_shared<TestModel>();
   auto run = std::async(std::launch::async, [&] { CheckGrowth(first); });
@@ -597,7 +677,8 @@ TEST(SharedCacheGrowth, ParallelSessionsHaveIndependentCapacityAndData) {
   run.get();
 }
 
-TEST(SharedCacheGrowth, GrowthRecapturesAllVariantsAndPreservesAnotherGenerator) {
+TEST_F(WebGpuGrowthTest, GrowthRecapturesAllVariantsAndPreservesAnotherGenerator) {
+  if (!GrowthAvailable(true)) GTEST_SKIP() << "Captured growth requires ORT API 27+ and model-editor support.";
   auto model = std::make_shared<TestModel>(-1, "Neg");
   auto params = CreateGeneratorParams(*model);
   TestState first{*model, *params}, second{*model, *params};
@@ -623,12 +704,14 @@ TEST(SharedCacheGrowth, GrowthRecapturesAllVariantsAndPreservesAnotherGenerator)
   first.Execute(session, 2, 1);
   second.Execute(session);
   const auto second_before = Read(device, *second.inputs_[0]);
+  const auto first_id = first.CaptureId();
+  const auto second_id = second.CaptureId();
   SharedCacheGrowth growth{first};
   EXPECT_EQ(growth.EnsureCapacity(9, true, first_tensors, 0, 0), 16);
   first_output = OrtValue::CreateTensor<float>(device.GetAllocator(), std::array<int64_t, 4>{2, 3, 16, 4});
   first.outputs_[0] = first_output.get();
-  EXPECT_EQ(first.GraphCaptureEpoch(), 1);
-  EXPECT_EQ(second.GraphCaptureEpoch(), 0);
+  EXPECT_NE(first.CaptureId(), first_id);
+  EXPECT_EQ(second.CaptureId(), second_id);
   second.Execute(session);
   const auto second_after = Read(device, *second.outputs_[0]);
   for (size_t i = 0; i < second_before.size(); ++i) EXPECT_EQ(second_after[i], -second_before[i]);

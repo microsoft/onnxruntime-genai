@@ -9,6 +9,9 @@
 #include "../../config_utils.h"
 #include "../../logging.h"
 #include "../model.h"
+#if USE_WEBGPU
+#include "../../ep/webgpu/kv_cache.h"
+#endif
 
 #include <algorithm>
 #include <sstream>
@@ -344,14 +347,13 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
   } else if (past_present_share_buffer_) {
     // For fixed kv-cache models the cache size comes from the model graph,
     // not from max_length — see the auto-detection block earlier in this ctor.
-    if (fixed_kv_seq_len == 0 && SharedCacheGrowth::IsSupported(state_, input_name_strings_, output_name_strings_)) {
-      shared_cache_growth_ = std::make_unique<SharedCacheGrowth>(state_);
-    }
     int64_t cache_seq_len = fixed_kv_seq_len > 0 ? fixed_kv_seq_len
                                                  : static_cast<int64_t>(state_.params_->search.max_length);
-    if (shared_cache_growth_) {
+#if USE_WEBGPU
+    if (fixed_kv_seq_len == 0 && WebGPU::SharedCacheGrowth::IsSupported(state_, input_name_strings_, output_name_strings_)) {
       cache_seq_len = 1;
     }
+#endif
     shape_[2] = cache_seq_len;
 
     // If per-layer shapes exist (from head_dim auto-detection), update their sequence dim too
