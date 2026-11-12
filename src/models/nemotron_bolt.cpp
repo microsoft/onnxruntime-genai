@@ -11,6 +11,8 @@
 namespace Generators {
 namespace {
 
+constexpr int kCaptureWarmupRuns = 4;
+
 void Require(bool condition, const std::string& message) {
   if (!condition)
     throw std::runtime_error("nemotron_bolt: " + message);
@@ -334,12 +336,15 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   }
   Reset();
   std::vector<int32_t> dummy(kBoltVerifyRows, 1);
-  // Capture on disposable state: warmup may execute in-place aliases more than once.
+  // The legacy two-run capture delay needs four calls through the first replay.
+  // Newer ORT can warm up and capture internally within a single Run().
+  // Use disposable state: warmup may re-execute in-place aliases before Reset().
   if (params.use_graph_capture) {
-    for (int i = 0; i < 4; ++i) Verify(dummy, i == 3);
+    for (int i = 0; i < kCaptureWarmupRuns; ++i)
+      Verify(dummy, i == kCaptureWarmupRuns - 1);
   }
   if (drafter_) {
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < kCaptureWarmupRuns; ++i) {
       drafter_->ReleaseAll();
       Propose(8, 0, 1);
     }
