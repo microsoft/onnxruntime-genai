@@ -35,6 +35,7 @@ def main() -> None:
         attention.outputs,
         ("output", "key_cache_out", "value_cache_out"),
         (["tokens", 64], [2, 16, 1, 64], [2, 16, 1, 64]),
+        strict=True,
     ):
         output.name = name
         output.type = ir.TensorType(ir.DataType.FLOAT16)
