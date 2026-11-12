@@ -11,6 +11,8 @@
 namespace Generators {
 namespace {
 
+constexpr int kCaptureWarmupRuns = 4;
+
 void Require(bool condition, const std::string& message) {
   if (!condition)
     throw std::runtime_error("nemotron_bolt: " + message);
@@ -116,6 +118,9 @@ std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
 
 std::unique_ptr<Config> CreateNemotronBoltDrafterConfig(const Config& config) {
   auto drafter = CreateDflash2Config(config);
+  // Supported external runtimes do not all retain Split's captured host buffers.
+  // Exclude only this fusion until the minimum runtime guarantees that fix;
+  // preserve caller exclusions without lowering the graph optimization level.
   auto& entries = drafter->model.decoder.session_options.config_entries;
   const auto entry = std::find_if(entries.rbegin(), entries.rend(), [](const auto& option) {
     return option.first == "optimization.disable_specified_optimizers";
@@ -321,12 +326,15 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   }
   Reset();
   std::vector<int32_t> dummy(kBoltVerifyRows, 1);
-  // Capture on disposable state: warmup may execute in-place aliases more than once.
+  // The legacy two-run capture delay needs four calls through the first replay.
+  // Newer ORT can warm up and capture internally within a single Run().
+  // Use disposable state: warmup may re-execute in-place aliases before Reset().
   if (params.use_graph_capture) {
-    for (int i = 0; i < 4; ++i) Verify(dummy, i == 3);
+    for (int i = 0; i < kCaptureWarmupRuns; ++i)
+      Verify(dummy, i == kCaptureWarmupRuns - 1);
   }
   if (drafter_) {
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < kCaptureWarmupRuns; ++i) {
       drafter_->ReleaseAll();
       Propose(8, 0, 1);
     }

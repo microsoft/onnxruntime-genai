@@ -230,8 +230,9 @@ TEST(NemotronBolt, PublicSpeculativeSetterAllowsZeroOnlyForBolt) {
 }
 
 TEST(NemotronBolt, PreservesDrafterOptimizerExclusions) {
-  for (const std::string existing : {"", "OtherFusion", "OtherFusion,GatherSliceToSplitFusion",
-                                     "GatherSliceToSplitFusionSuffix"}) {
+  for (const auto& existing : std::vector<std::optional<std::string>>{
+           std::nullopt, "", "OtherFusion", "OtherFusion,GatherSliceToSplitFusion",
+           "GatherSliceToSplitFusionSuffix"}) {
     Config config;
     config.model.vocab_size = 128;
     auto& drafter = config.model.dflash2;
@@ -243,17 +244,21 @@ TEST(NemotronBolt, PreservesDrafterOptimizerExclusions) {
     drafter.sliding_window = 8;
     drafter.session_options.emplace();
     auto& entries = drafter.session_options->config_entries;
-    entries.emplace_back("optimization.disable_specified_optimizers", "SupersededFusion");
-    entries.emplace_back("optimization.disable_specified_optimizers", existing);
+    if (existing) {
+      entries.emplace_back("optimization.disable_specified_optimizers", "SupersededFusion");
+      entries.emplace_back("optimization.disable_specified_optimizers", *existing);
+    }
     const auto projected = CreateNemotronBoltDrafterConfig(config);
     const auto& merged = projected->model.decoder.session_options.config_entries;
-    ASSERT_EQ(merged.size(), entries.size());
-    EXPECT_EQ(merged.front().second, "SupersededFusion");
+    ASSERT_EQ(merged.size(), entries.empty() ? 1 : entries.size());
+    if (existing) EXPECT_EQ(merged.front(), entries.front());
+    EXPECT_EQ(merged.back().first, "optimization.disable_specified_optimizers");
     EXPECT_EQ(merged.back().second,
-              existing.empty() ? "GatherSliceToSplitFusion"
-                               : existing + (existing == "OtherFusion,GatherSliceToSplitFusion"
-                                                 ? ""
-                                                 : ",GatherSliceToSplitFusion"));
+              !existing || existing->empty()
+                  ? "GatherSliceToSplitFusion"
+                  : *existing + (*existing == "OtherFusion,GatherSliceToSplitFusion"
+                                     ? ""
+                                     : ",GatherSliceToSplitFusion"));
   }
 }
 
