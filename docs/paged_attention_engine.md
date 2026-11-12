@@ -184,10 +184,14 @@ as an explicit choice, not substituted for missing profiling data.
 Existing configuration overlays, including `OgaConfigOverlay`, can set the
 budget before Model creation; there is no separate budget API.
 
-The supported path is one initial load of a CUDA paged decoder Model/Engine,
+The paged path supports one initial load of a CUDA paged decoder Model/Engine,
 including an enabled windowed DFlash 2 drafter. CPU embedding is supported.
-Other devices/backends and enabled MTP or DSpark auxiliary models are rejected
+Other paged devices/backends and enabled MTP or DSpark auxiliary models are rejected
 during Engine construction when this field is set.
+
+Native Bolt and Qwen also support these controls, but cap snapshot VRAM after fixed-state
+warmup instead of resizing exported graph caches. See [native memory-budget rules](#native-bolt-prefix-caching);
+the remaining sizing rules and table in this section describe paged decoders.
 
 An explicit budget overrides `num_blocks` and `gpu_utilization_factor`, including
 block counts supplied by runtime profiles. Other profile and execution settings
@@ -2443,11 +2447,30 @@ Prefix reuse is opt-in and shared by Generators and Engines using the same Model
 }
 ```
 
-For Bolt this configuration selects snapshot policy, not paged execution. `num_blocks`,
-`gpu_utilization_factor`, and device-memory budgeting are unsupported. The native target always
+For Bolt this configuration selects native memory/snapshot policy, not paged execution. `num_blocks`
+is unsupported because the exported target has fixed cache shapes. The native target always
 consumes eight-token blocks; one Engine prefill step processes the complete prompt synchronously.
-This backend rejects `device_memory_budget_bytes`. Device-resident checkpoints allocate additional
-VRAM at publication, so leave device headroom or configure RAM/disk snapshot tiers instead.
+Both native Bolt and Qwen accept `device_memory_budget_bytes`, configured before model loading,
+with an explicit `device_memory_headroom_bytes` allowance (zero is allowed). Fixed model weights,
+native state, and warmed graph allocations are charged first; remaining bytes cap retained VRAM
+snapshots, including the default device-resident policy. A fixed layout that cannot fit fails rather
+than silently shrinking the graph's caches. Checks run after native state warmup and before snapshot
+publication. Fixed-state validation also runs when prefix caching is disabled; Bolt warms that state
+lazily on its first execution.
+
+Without a byte budget, `gpu_utilization_factor` limits snapshot VRAM to that fraction of remaining
+free memory, with the same 0.9 fragmentation allowance as paged caching. A standalone
+`device_memory_headroom_bytes` is reserved before applying that fraction. An explicit byte budget
+takes precedence over the utilization factor. These are sizing/admission controls, not a hard
+allocator quota; profile headroom for lazy execution allocations and avoid concurrent external
+allocations while measuring the budget.
+
+The effective VRAM snapshot limit is the smaller of this allowance and an explicit
+`snapshot_cache.vram_bytes`. RAM/disk limits remain independent. A reduced allowance demotes or
+evicts unleased snapshots; protected checkpoints cannot be invalidated to satisfy a budget.
+For example, add `"device_memory_budget_bytes": 68719476736` and
+`"device_memory_headroom_bytes": 2147483648` inside `dynamic_batching` for a 64-GiB total allowance
+with 2 GiB reserved headroom; choose values that fit the actual model and native state.
 Snapshot storage uses the existing `snapshot_cache` VRAM/RAM/disk byte budgets and count limit.
 Without an explicit storage policy, at most one device-resident checkpoint is retained.
 `prefix_caching: false`, `max_snapshots: 0`, or explicitly zero storage budgets disable reuse.

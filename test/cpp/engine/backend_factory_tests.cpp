@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "engine/backend_factory.h"
+#include "engine/native-device-memory-budget.h"
 #include "engine/paged_key_value_cache.h"
 #include "models/decoder_only.h"
 #include "engine_test_doubles.h"
@@ -84,7 +85,7 @@ TEST(EngineBackendFactoryTest, ExplicitPagedPoolDoesNotDeductMediaAllowance) {
   EXPECT_EQ(model->config_->engine.dynamic_batching->num_blocks, blocks);
 }
 
-TEST(EngineBackendFactoryTest, Qwen38RejectsDeviceMemoryBudgetBeforeModelInitialization) {
+TEST(EngineBackendFactoryTest, Qwen38DeviceMemoryBudgetReachesNativeConfigurationValidation) {
   for (const size_t slots : {1u, 2u}) {
     for (const auto headroom : {std::optional<uint64_t>{}, std::optional<uint64_t>{0}}) {
       SCOPED_TRACE(slots);
@@ -97,12 +98,59 @@ TEST(EngineBackendFactoryTest, Qwen38RejectsDeviceMemoryBudgetBeforeModelInitial
       batching.device_memory_headroom_bytes = headroom;
       try {
         (void)CreateModel(GetOrtEnv(), std::move(config));
-        FAIL() << "Qwen38 must reject the budget before normalization or model initialization";
+        FAIL() << "The synthetic paged model is not a native Qwen package";
       } catch (const std::runtime_error& error) {
-        EXPECT_NE(std::string{error.what()}.find("device_memory_budget_bytes"), std::string::npos);
+        EXPECT_NE(std::string{error.what()}.find("qwen38_graph.ple_table"), std::string::npos);
       }
     }
   }
+}
+
+TEST(NativeDeviceMemoryBudgetTest, ChargesFixedStateButDoesNotDoubleChargeResidentSnapshots) {
+  Config::Engine::DynamicBatching settings;
+  settings.device_memory_budget_bytes = 600;
+  settings.device_memory_headroom_bytes = 50;
+  EXPECT_EQ(NativeSnapshotDeviceMemoryLimit(settings, 1000, 700, 0), 250u);
+  EXPECT_EQ(NativeSnapshotDeviceMemoryLimit(settings, 1000, 600, 100), 250u);
+  settings.gpu_utilization_factor = 0.1f;
+  EXPECT_EQ(NativeSnapshotDeviceMemoryLimit(settings, 1000, 600, 100), 250u);
+  EXPECT_THROW(NativeSnapshotDeviceMemoryLimit(settings, 1000, 300, 0), std::runtime_error);
+  settings.device_memory_headroom_bytes = 300;
+  EXPECT_EQ(NativeSnapshotDeviceMemoryLimit(settings, 1000, 700, 0), 0u);
+  settings.device_memory_headroom_bytes = 301;
+  EXPECT_THROW(NativeSnapshotDeviceMemoryLimit(settings, 1000, 700, 0), std::runtime_error);
+  settings.device_memory_headroom_bytes = 0;
+  settings.device_memory_budget_bytes = 300;
+  EXPECT_EQ(NativeSnapshotDeviceMemoryLimit(settings, 1000, 700, 0), 0u);
+}
+
+TEST(NativeDeviceMemoryBudgetTest, UtilizationAndStandaloneHeadroomConstrainReclaimableMemory) {
+  Config::Engine::DynamicBatching settings;
+  EXPECT_EQ(NativeSnapshotDeviceMemoryLimit(settings, std::nullopt, 1000, 0), std::nullopt);
+  settings.gpu_utilization_factor = 0.5f;
+  EXPECT_EQ(NativeSnapshotDeviceMemoryLimit(settings, std::nullopt, 600, 100), 315u);
+  settings.device_memory_headroom_bytes = 100;
+  EXPECT_EQ(NativeSnapshotDeviceMemoryLimit(settings, std::nullopt, 600, 100), 270u);
+  settings.gpu_utilization_factor.reset();
+  EXPECT_EQ(NativeSnapshotDeviceMemoryLimit(settings, std::nullopt, 600, 100), 600u);
+  settings.device_memory_headroom_bytes = 701;
+  EXPECT_THROW(NativeSnapshotDeviceMemoryLimit(settings, std::nullopt, 600, 100), std::runtime_error);
+}
+
+TEST(NativeDeviceMemoryBudgetTest, RejectsMissingBaselineHeadroomInvalidFactorsAndOverflow) {
+  Config::Engine::DynamicBatching settings;
+  settings.device_memory_budget_bytes = 600;
+  EXPECT_THROW(NativeSnapshotDeviceMemoryLimit(settings, 1000, 700, 0), std::runtime_error);
+  settings.device_memory_headroom_bytes = 0;
+  EXPECT_THROW(NativeSnapshotDeviceMemoryLimit(settings, std::nullopt, 700, 0), std::runtime_error);
+  settings.device_memory_budget_bytes.reset();
+  for (const float factor : {0.0f, -1.0f, 1.1f, std::numeric_limits<float>::quiet_NaN()}) {
+    settings.gpu_utilization_factor = factor;
+    EXPECT_THROW(NativeSnapshotDeviceMemoryLimit(settings, std::nullopt, 700, 0), std::runtime_error);
+  }
+  settings.gpu_utilization_factor = 1.0f;
+  EXPECT_THROW(NativeSnapshotDeviceMemoryLimit(settings, std::nullopt, std::numeric_limits<size_t>::max(), 1),
+               std::overflow_error);
 }
 
 #if USE_CUDA

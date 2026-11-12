@@ -1950,6 +1950,7 @@ std::shared_ptr<const Qwen38PrefixState> Qwen38GraphEngine::CapturePrefix() {
   }
   auto& cache = *model_.prefix_snapshot_cache_;
   SyncStream();
+  model_.memory_budget_.Refresh();
   try {
     if (!cache.Allocate(snapshot, model_.p_device_, "qwen38")) return nullptr;
     for (size_t i = 0; i < snapshot->buffers.size(); ++i) {
@@ -3408,10 +3409,6 @@ namespace {
 // library before Model::Model runs EnsureDeviceOrtInit or AddSharedInitializers.
 std::unique_ptr<Config> PreflightQwen38GraphModelConfig(std::unique_ptr<Config> config) {
   if (!config) return config;
-  if (config->engine.dynamic_batching &&
-      config->engine.dynamic_batching->device_memory_budget_bytes) {
-    throw std::runtime_error("device_memory_budget_bytes does not support qwen38_flash_graph.");
-  }
   const auto& q = config->model.qwen38_graph;
   if (!q.IsConfigured() || q.ple_table.empty())
     throw std::runtime_error(
@@ -3609,9 +3606,10 @@ std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Confi
 }
 
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
-    : Model{PreflightQwen38GraphModelConfig(std::move(config))} {
+    : Model{PreflightQwen38GraphModelConfig(std::move(config))}, memory_budget_{*this} {
   // Must precede ApplyQwen38DynamicBatchingConfig, which resets engine.dynamic_batching for a single slot.
   prefix_snapshot_cache_ = CreateQwen38PrefixSnapshotCache(*config_);
+  memory_budget_.SetSnapshotCache(prefix_snapshot_cache_);
   const bool has_dynamic_batching_kv = ApplyQwen38DynamicBatchingConfig(*config_);
   const auto& q = config_->model.qwen38_graph;
   const bool separate_prefill_sessions =
@@ -3902,6 +3900,7 @@ void Qwen38GraphModel::InitializeDecodeState(bool is_session_recreation) {
   engine_ = std::make_unique<Qwen38GraphEngine>(*this);
   try {
     engine_->Initialize(is_session_recreation);
+    memory_budget_.Refresh();
   } catch (...) {
     DestroyDecodeState();
     throw;

@@ -230,7 +230,7 @@ std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
 }
 
 NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env)
-    : Model{std::move(config)} {
+    : Model{std::move(config)}, memory_budget_{*this} {
 #if ORT_API_VERSION < 27
   // Each generator captures fresh graph ids in model-owned sessions; releasing them needs ORT 27.
   Require(false, "ONNX Runtime API 27 or later is required to release captured graphs");
@@ -240,18 +240,20 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
   Require(IsGraphCaptureEnabled(config_->model.decoder.session_options),
           "enable_cuda_graph must be 1");
   if (const auto& batching = config_->engine.dynamic_batching) {
-    Require(batching->max_batch_size == 1 && !batching->device_memory_budget_bytes &&
-                !batching->num_blocks && !batching->gpu_utilization_factor,
-            "native prefix caching requires max_batch_size=1 and does not support paged cache sizing");
+    Require(batching->max_batch_size == 1 && !batching->num_blocks,
+            "native Bolt requires max_batch_size=1 and does not support num_blocks for its fixed target caches");
     if (batching->prefix_caching.value_or(false) && batching->max_snapshots.value_or(1) != 0) {
       Require(config_->model.dflash2.sliding_window > 0, "prefix caching requires a windowed drafter");
       const auto& limits = batching->snapshot_cache;
       const bool resident = !limits.Configured();
-      if (resident || limits.Enabled())
-        prefix_cache_ = std::make_unique<NemotronBoltPrefixCache>(std::make_shared<PrefixSnapshotCache>(
+      if (resident || limits.Enabled()) {
+        auto storage = std::make_shared<PrefixSnapshotCache>(
             std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
             batching->max_snapshots.value_or(resident ? 1 : std::numeric_limits<size_t>::max()),
-            std::filesystem::path{fs::path{limits.directory}.c_str()}, resident));
+            std::filesystem::path{fs::path{limits.directory}.c_str()}, resident);
+        memory_budget_.SetSnapshotCache(storage);
+        prefix_cache_ = std::make_unique<NemotronBoltPrefixCache>(std::move(storage));
+      }
     }
     config_->engine.dynamic_batching.reset();
   }
@@ -340,6 +342,7 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
     const SessionInfo& info_;
   } packed{info};
   ValidateDflash2ModelCompatibility(*config_, packed, drafter_model_->session_info_, 256);
+  memory_budget_.Refresh();
 }
 
 std::unique_ptr<State> NemotronBoltModel::CreateState(DeviceSpan<int32_t>, const GeneratorParams& params) const {
@@ -436,6 +439,7 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     Propose(8, 0, 1);
   }
   Reset();
+  bolt_.memory_budget_.Refresh();
   unlock();
 }
 
@@ -512,6 +516,7 @@ void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int3
 
 void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
   std::lock_guard lock{bolt_.execution_mutex_};
+  bolt_.memory_budget_.Refresh();
   Require(!prefilled_ && !tokens.empty(), "AppendTokens requires a fresh or reset generator");
   for (const auto token : tokens)
     Require(token >= 0 && token < model_.config_->model.vocab_size, "token id outside vocabulary");
@@ -553,9 +558,11 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
       }
       length_ += valid;
       state_row_ = static_cast<int32_t>(valid - 1);
-      if (save)
+      if (save) {
+        bolt_.memory_budget_.Refresh();
         bolt_.prefix_cache_->Capture(tokens.first(checkpoint), caches_, state_row_, anchor_,
                                      *prefill_aux_, aux_start, aux_row_bytes);
+      }
     }
     const std::array<int64_t, 2> shape{static_cast<int64_t>(draft_rows), static_cast<int64_t>(bolt_.aux_width_)};
     Tensor features{OrtValue::CreateTensor(*model_.p_device_->GetMemoryInfo(),

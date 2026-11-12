@@ -2693,6 +2693,59 @@ TEST(PrefixSnapshotCacheTest, LegacyDeviceStorageReusesSnapshotsWithoutTierBudge
   }
 }
 
+TEST(PrefixSnapshotCacheTest, DeviceMemoryCapBoundsResidentStorageAndCompatibleReuse) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  PrefixSnapshotCache cache{{0, 0, 0}, 1, {}, true};
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(16, cpu));
+  auto first = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(first, nullptr);
+  auto replacement = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(replacement, nullptr);
+  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(cache.Used()[0], 16u);
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(15, cpu));
+  EXPECT_EQ(replacement->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(MakeStorageEntry(cache, cpu), nullptr);
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(0, cpu));
+  EXPECT_EQ(MakeStorageEntry(cache, cpu), nullptr);
+  EXPECT_EQ(cache.Used()[0], 0u);
+}
+
+TEST(PrefixSnapshotCacheTest, DeviceMemoryCapDemotesToHostTiersWithoutWideningConfiguredVram) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, true};
+  PrefixSnapshotCache cache{{16, 32, 0}, 3};
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(32, &device));
+  auto first = MakeStorageEntry(cache, &device);
+  auto second = MakeStorageEntry(cache, &device);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Ram);
+  EXPECT_EQ(second->tier, PrefixSnapshotCache::Tier::Vram);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{16, 16, 0}));
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(0, &device));
+  EXPECT_EQ(second->tier, PrefixSnapshotCache::Tier::Ram);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 32, 0}));
+  CheckStorageEntry(*first);
+  CheckStorageEntry(*second);
+}
+
+TEST(PrefixSnapshotCacheTest, ShrinkingDeviceMemoryCapDoesNotEvictLeasedStorageOrUnderflow) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  PrefixSnapshotCache cache{{0, 0, 0}, 1, {}, true};
+  auto first = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(first, nullptr);
+  auto lease = first;
+  EXPECT_FALSE(cache.SetDeviceMemoryLimit(0, cpu));
+  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(MakeStorageEntry(cache, cpu), nullptr);
+  CheckStorageEntry(*first);
+  lease.reset();
+  EXPECT_TRUE(cache.SetDeviceMemoryLimit(0, cpu));
+  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(cache.Used()[0], 0u);
+}
+
 TEST(PrefixSnapshotCacheTest, WebGpuReservationHonorsCountsAndPreservesTargetCapacity) {
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
   auto* cpu = model->p_device_kvcache_;

@@ -417,9 +417,10 @@ BackendCapabilities ResolveBackendCapabilities(
 EngineBackendBundle CreateEngineBackend(std::shared_ptr<Model> model) {
   if (!model) throw std::invalid_argument("Engine backend construction requires a model.");
   auto& batching = model->config_->engine.dynamic_batching;
-  if (batching && batching->device_memory_budget_bytes) {
+  if (batching && batching->device_memory_budget_bytes &&
+      !std::dynamic_pointer_cast<Qwen38GraphModel>(model) &&
+      !std::dynamic_pointer_cast<NemotronBoltModel>(model)) {
     if (model->p_device_kvcache_->GetType() != DeviceType::CUDA ||
-        std::dynamic_pointer_cast<Qwen38GraphModel>(model) ||
         !std::dynamic_pointer_cast<DecoderOnly_Model>(model)) {
       throw std::runtime_error("device_memory_budget_bytes requires a CUDA paged decoder Engine.");
     }

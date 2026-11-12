@@ -355,11 +355,23 @@ bool PrefixSnapshotCache::ReuseOldest(Entry& destination, std::string_view compo
   return true;
 }
 
+size_t PrefixSnapshotCache::Limit(Tier tier) const {
+  const size_t configured = limits_[static_cast<size_t>(tier)];
+  if (tier != Tier::Vram || !device_memory_limit_) return configured;
+  return device_resident_ ? *device_memory_limit_ : std::min(configured, *device_memory_limit_);
+}
+
+bool PrefixSnapshotCache::SetDeviceMemoryLimit(size_t bytes, DeviceInterface* device) {
+  device_memory_limit_ = bytes;
+  return MakeRoom(Tier::Vram, 0, device);
+}
+
 bool PrefixSnapshotCache::MakeRoom(Tier tier, size_t bytes, DeviceInterface* device) {
   if (tier == Tier::Disk && disk_writes_disabled_) return false;
   const size_t index = static_cast<size_t>(tier);
-  if (bytes > limits_[index]) return false;
-  while (bytes > limits_[index] - accounting_->used[index]) {
+  const size_t limit = Limit(tier);
+  if (bytes > limit) return false;
+  while (accounting_->used[index] > limit || bytes > limit - accounting_->used[index]) {
     std::weak_ptr<Entry>* selected = nullptr;
     uint64_t oldest = std::numeric_limits<uint64_t>::max();
     for (auto& weak : entries_) {
@@ -547,10 +559,12 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     LogEvent("refused", entry.get(), reason);
     return false;
   };
+  if (device_memory_limit_ && !MakeRoom(Tier::Vram, 0, device))
+    return refuse("device_memory_leased");
   if (entry->bytes == 0) return refuse("empty_payload");
   if (max_entries_ == 0 || component_max_entries == 0) return refuse("count_disabled");
-  if (!device_resident && std::none_of(limits_.begin(), limits_.end(),
-                                       [&](size_t limit) { return limit >= entry->bytes; })) {
+  if ((!device_resident || device_memory_limit_) &&
+      entry->bytes > Limit(Tier::Vram) && entry->bytes > limits_[1] && entry->bytes > limits_[2]) {
     return refuse("payload_exceeds_tiers");
   }
   Prune();
@@ -576,7 +590,8 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     if (!EvictOldest()) return refuse("shared_count_leased");
   }
   for (size_t index = 0; index < limits_.size(); ++index) {
-    if (!device_resident && !MakeRoom(static_cast<Tier>(index), entry->bytes, device)) continue;
+    if ((!device_resident || device_memory_limit_) &&
+        !MakeRoom(static_cast<Tier>(index), entry->bytes, device)) continue;
     Entry staged;
     staged.shapes = entry->shapes;
     staged.type = entry->type;

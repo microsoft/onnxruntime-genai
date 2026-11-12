@@ -64,8 +64,12 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   turn's input, not retained earlier-turn history.
   The existing `max_snapshots` and `snapshot_cache` VRAM/RAM/disk limits bound checkpoint storage; without explicit
   tier budgets or a count, at most one device-resident checkpoint is retained. `max_snapshots: 0` disables publication.
-  This backend does not accept `device_memory_budget_bytes`. Device-resident checkpoints allocate
-  additional VRAM at publish time, so leave device headroom or configure RAM/disk snapshot tiers instead.
+  Native `device_memory_budget_bytes`, `device_memory_headroom_bytes`, and `gpu_utilization_factor`
+  follow the [native memory-budget rules](../../../../../docs/paged_attention_engine.md#native-bolt-prefix-caching):
+  configure a byte budget before model loading with explicit headroom. Fixed weights, native buffers,
+  and warmed graphs are charged first; the remainder caps VRAM checkpoints without resizing the target's
+  fixed layout. Without a byte budget, the utilization factor limits remaining snapshot VRAM instead.
+  RAM/disk snapshot limits remain independent. Budget validation also runs with prefix caching disabled.
   With warning logging enabled, an explicit opt-in that is inactive because of multiple slots, zero snapshot count,
   or all-zero tier budgets emits a warning.
   DFlash checkpoints must retain enough target features to reconstruct its complete context window (or start at

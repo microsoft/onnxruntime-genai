@@ -79,11 +79,13 @@ class PrefixSnapshotCache {
   void Touch(const Entry& entry) noexcept;
   void Discard(const Entry& entry) noexcept;
   const std::array<size_t, 3>& Used() const noexcept { return accounting_->used; }
+  bool SetDeviceMemoryLimit(size_t bytes, DeviceInterface* device);
 
  private:
   void LogEvent(const char* action, const Entry* entry = nullptr,
                 const char* reason = "none", int64_t elapsed_us = 0) const noexcept;
   bool MakeRoom(Tier tier, size_t bytes, DeviceInterface* device);
+  size_t Limit(Tier tier) const;
   void DisableDisk(const std::system_error& error);
   void Move(Entry& entry, Tier tier, DeviceInterface* device);
   void AllocateStorage(Entry& entry, Tier tier, DeviceInterface* device);
@@ -96,6 +98,7 @@ class PrefixSnapshotCache {
   size_t max_entries_;
   std::filesystem::path directory_;
   bool device_resident_;
+  std::optional<size_t> device_memory_limit_;
   bool disk_writes_disabled_{};
   std::shared_ptr<Accounting> accounting_{std::make_shared<Accounting>()};
   // The prefix index is the only non-lease owner. Extra strong references protect adoption.

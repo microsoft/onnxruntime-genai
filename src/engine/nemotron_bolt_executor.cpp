@@ -140,7 +140,12 @@ struct BoltExecutor final : ModelExecutor {
   }
   void AddSpeculativeStats(SpeculativeStats& stats) const override {
     AddStats(stats, session->completed);
-    if (session->owner && session->state) AddStats(stats, session->state->Stats());
+    stats.effective_k = 0;
+    if (session->owner && session->state) {
+      const auto live = session->state->Stats();
+      AddStats(stats, live);
+      stats.effective_k = live.effective_k;
+    }
     stats.tokens_emitted += session->delivered;
     stats.tokens_discarded += session->discarded;
   }

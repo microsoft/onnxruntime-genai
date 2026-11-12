@@ -5,6 +5,7 @@
 #include "model.h"
 #include "dflash2_drafter.h"
 #include "engine/prefix_cache.h"
+#include "engine/native-device-memory-budget.h"
 #include <deque>
 #include <mutex>
 
@@ -59,6 +60,7 @@ struct NemotronBoltModel : Model {
   size_t aux_width_{};
   // Target and drafter CUDA graph sessions, and their shared snapshot index, have one host owner at a time.
   mutable std::mutex execution_mutex_;
+  NativeDeviceMemoryBudget memory_budget_;
   std::unique_ptr<NemotronBoltPrefixCache> prefix_cache_;
 };
 

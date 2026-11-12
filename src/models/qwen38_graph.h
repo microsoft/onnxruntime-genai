@@ -8,6 +8,7 @@
 // captured graphs) and implements Qwen38DecodeDevice, the interface the Engine executor drives
 // (src/engine/qwen38_graph_executor.h). The model is served by the Engine API only; there is no Generator state.
 #pragma once
+#include "engine/native-device-memory-budget.h"
 
 #include <array>
 #include <atomic>
@@ -962,6 +963,7 @@ struct Qwen38GraphModel : Model {
 
   // Declaration order = reverse destruction order: the engine and the sessions go first, then the shared weights / constants
   // they were given, then the plane library.
+  NativeDeviceMemoryBudget memory_budget_;
   std::unique_ptr<Qwen38Plane> plane_;
   std::unique_ptr<Qwen38WeightPool> pool_;
   std::unique_ptr<Qwen38FileMapping> embed_mapping_;

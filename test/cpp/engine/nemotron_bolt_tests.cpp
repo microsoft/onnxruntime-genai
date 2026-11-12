@@ -620,6 +620,7 @@ TEST(NemotronBoltGPU, PrefixCacheAcrossGeneratorsAndEngineRequests) {
   engine->Run(events);
   ASSERT_FALSE(request->IsTurnComplete());
   ASSERT_GT(engine->GetSpeculativeStats().tokens_buffered, 0u);
+  EXPECT_EQ(engine->GetSpeculativeStats().effective_k, 7u);
   ASSERT_TRUE(engine->CancelRequest(request, request->CurrentTurnId()));
   for (size_t runs = 0; engine->HasPendingRequests() && runs < 10; ++runs) engine->Run(events);
   const size_t old_history = request->TokensCpu().size();
@@ -639,7 +640,9 @@ TEST(NemotronBoltGPU, PrefixCacheAcrossGeneratorsAndEngineRequests) {
   EXPECT_EQ((std::vector<int32_t>{continued.begin() + history.size(), continued.end()}), reference);
   EXPECT_GT(engine->GetSpeculativeStats().tokens_discarded, 0u);
   EXPECT_EQ(engine->GetSpeculativeStats().tokens_emitted, 2u + reference.size());
+  EXPECT_EQ(engine->GetSpeculativeStats().effective_k, 7u);
   request->Close();
+  EXPECT_EQ(engine->GetSpeculativeStats().effective_k, 0u);
 }
 
 TEST(NemotronBolt, GgufInitializersConfigParsingAndPathValidation) {
