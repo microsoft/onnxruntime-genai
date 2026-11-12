@@ -26,6 +26,7 @@ _DEVICES = ["cpu"] + (["cuda"] if og.is_cuda_available() else [])
 class _Sink:
     def __init__(self):
         self.tokens = []
+        self.cached_prompt_tokens = None
 
 
 @pytest.fixture(params=_DEVICES)
@@ -82,6 +83,7 @@ def _run(engine, sinks):
             if event.flags & og.EngineEventFlags.TOKEN:
                 sink.tokens.append(event.token)
             if event.flags & og.EngineEventFlags.TURN_FINISHED:
+                sink.cached_prompt_tokens = event.usage.cached_prompt_tokens
                 event.request.close()
         steps += 1
         assert steps < 100
@@ -315,6 +317,52 @@ def test_mixed_unequal_requests_match_isolated_execution(model):
     requests = [_request(engine, prompt, max_new_tokens, sinks) for prompt in prompts]
     _run(engine, sinks)
     assert [sink.tokens for _, sink in requests] == expected
+
+
+@pytest.mark.parametrize("device", _DEVICES)
+def test_hybrid_prefix_rebuilds_after_unrelated_checkpoint_eviction(device):
+    def make_model(prefix_caching):
+        config = og.Config(str(_MODEL_DIR))
+        config.clear_providers()
+        if device != "cpu":
+            config.append_provider(device)
+        config.overlay(
+            json.dumps(
+                {
+                    "search": {"chunk_size": 4},
+                    "engine": {
+                        "dynamic_batching": {
+                            "block_size": 4,
+                            "max_batch_size": 1,
+                            "prefix_caching": prefix_caching,
+                        }
+                    },
+                }
+            )
+        )
+        return og.Model(config)
+
+    def run_prompt(engine, prompt):
+        sinks = {}
+        _, sink = _request(engine, prompt, 3, sinks)
+        _run(engine, sinks)
+        return sink
+
+    prompt = [2, 3, 4, 5, 6, 7, 8, 9, 10]
+    reference_model = make_model(False)
+    reference_engine = og.Engine(reference_model)
+    reference = run_prompt(reference_engine, prompt)
+
+    cached_model = make_model(True)
+    cached_engine = og.Engine(cached_model)
+    first = run_prompt(cached_engine, prompt[:5])
+    unrelated = run_prompt(cached_engine, [20, 21, 22, 23, 24])
+    rebuild = run_prompt(cached_engine, prompt)
+    repeat = run_prompt(cached_engine, prompt)
+
+    assert [sink.cached_prompt_tokens for sink in (first, unrelated, rebuild, repeat)] == [0, 0, 0, 8]
+    assert len(reference.tokens) == 3
+    assert rebuild.tokens == repeat.tokens == reference.tokens
 
 
 def test_webgpu_fixed_state_staging_persists_across_steps(webgpu_model):

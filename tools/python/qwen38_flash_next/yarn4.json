@@ -1,0 +1,11 @@
+{
+  "rope_type": "yarn",
+  "factor": 4.0,
+  "original_max_position_embeddings": 262144,
+  "rope_theta": 10000000,
+  "head_dim": 256,
+  "partial_rotary_factor": 0.25,
+  "beta_fast": 32,
+  "beta_slow": 1,
+  "mrope_sections": [11, 11, 10]
+}

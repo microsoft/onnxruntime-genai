@@ -73,13 +73,13 @@ void MediaItem::ReleaseFeatures() {
   accounting->device_bytes -= feature_bytes;
 }
 
-std::array<int64_t, 3> MediaPosition(std::span<const MediaSpan> media, size_t row, size_t merge_size) {
+std::array<int64_t, 3> MediaPosition(std::span<const MediaSpan> media, size_t row) {
   std::array<int64_t, 3> result;
-  MediaPositions(media, row, merge_size, {std::span<int64_t>{&result[0], 1}, std::span<int64_t>{&result[1], 1}, std::span<int64_t>{&result[2], 1}});
+  MediaPositions(media, row, {std::span<int64_t>{&result[0], 1}, std::span<int64_t>{&result[1], 1}, std::span<int64_t>{&result[2], 1}});
   return result;
 }
 
-void MediaPositions(std::span<const MediaSpan> media, size_t first_row, size_t merge_size,
+void MediaPositions(std::span<const MediaSpan> media, size_t first_row,
                     const std::array<std::span<int64_t>, 3>& positions) {
   const size_t count = positions[0].size();
   if (positions[1].size() != count || positions[2].size() != count)
@@ -91,8 +91,7 @@ void MediaPositions(std::span<const MediaSpan> media, size_t first_row, size_t m
     const size_t row = first_row + index;
     while (span_index < media.size() && row >= media[span_index].start + media[span_index].item->rows) {
       const auto& span = media[span_index++];
-      delta += std::max(span.item->grid[1], span.item->grid[2]) / static_cast<int64_t>(merge_size) -
-               static_cast<int64_t>(span.item->rows);
+      delta += span.item->positions.extent - static_cast<int64_t>(span.item->rows);
     }
     if (span_index == media.size() || row < media[span_index].start) {
       const size_t end = span_index == media.size() ? count : std::min(count, media[span_index].start - first_row);
@@ -102,14 +101,15 @@ void MediaPositions(std::span<const MediaSpan> media, size_t first_row, size_t m
       continue;
     }
     const auto& span = media[span_index];
-    const auto width = span.item->grid[2] / static_cast<int64_t>(merge_size);
+    const auto& layout = span.item->positions;
+    const auto width = layout.width;
     const auto base = static_cast<int64_t>(span.start) + delta;
     const size_t end = index + std::min(count - index, span.item->rows - (row - span.start));
     for (; index < end; ++index) {
       const auto offset = static_cast<int64_t>(first_row + index - span.start);
-      positions[0][index] = base;
-      positions[1][index] = base + offset / width;
-      positions[2][index] = base + offset % width;
+      positions[0][index] = base + layout.origin[0];
+      positions[1][index] = base + layout.origin[1] + offset / width;
+      positions[2][index] = base + layout.origin[2] + offset % width;
     }
   }
 }
@@ -188,6 +188,7 @@ void MediaStore::ValidateTextTokens(std::span<const int32_t> tokens) const {
 PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const int32_t> raw_tokens,
                                       const Images* images, size_t first_row, size_t remaining_rows) {
   const auto& config = model_->config_->model;
+  const auto& processor = *model_->vision_->processor->processor_;
   const size_t count = images ? images->num_images_ : 0;
   size_t markers = 0;
   for (size_t index = 0; index < raw_tokens.size(); ++index) {
@@ -202,7 +203,7 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
     }
   }
   if (markers != count) throw std::invalid_argument("Image marker count does not match the ordered image inputs.");
-  if (raw_tokens.empty() || raw_tokens.size() > remaining_rows)
+  if (raw_tokens.empty() || (count == 0 && raw_tokens.size() > remaining_rows))
     throw std::invalid_argument("The formatted turn does not fit the remaining session rows.");
   if (count == 0) return {std::vector<int32_t>{raw_tokens.begin(), raw_tokens.end()}, {}};
   if (images->info_.size() != count) throw std::invalid_argument("Image header metadata is unavailable.");
@@ -212,12 +213,17 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
   // Extensions output, the FP32 copy and the converted tensor coexist during preprocessing.
   const size_t patch_bytes = MultiplyBytes(static_cast<size_t>(pixel_shape[1]),
                                            2 * sizeof(float) + Ort::SizeOf(model_->cpu_embedding_->type_));
+  std::vector<int64_t> expected_grids;
+  if (MultiplyBytes(count, 3 * sizeof(int64_t)) > host_limit_)
+    throw std::invalid_argument("Image grid metadata exceeds the configured media host budget.");
+  expected_grids.reserve(MultiplyBytes(count, 3));
   size_t estimate = 0, maximum_patches = 0, expected_rows = raw_tokens.size();
   for (const auto& info : images->info_) {
     if (info.width == 0 || info.height == 0)
       throw std::invalid_argument("Packed vision requires PNG or JPEG dimensions before preprocessing.");
     const size_t source_pixels = MultiplyBytes(info.width, info.height);
     const auto grid = MediaImageGrid(info.width, info.height, patch, merge, min_pixels_, max_pixels_);
+    expected_grids.insert(expected_grids.end(), grid.begin(), grid.end());
     const size_t height = MultiplyBytes(static_cast<size_t>(grid[1]), patch);
     const size_t width = MultiplyBytes(static_cast<size_t>(grid[2]), patch);
     const size_t patches = MultiplyBytes(static_cast<size_t>(grid[1]), static_cast<size_t>(grid[2]));
@@ -229,17 +235,24 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
       throw std::invalid_argument("An image cannot fit the configured device media budget.");
     estimate = AddBytes(estimate, AddBytes(MultiplyBytes(source_pixels, 16), MultiplyBytes(MultiplyBytes(height, width), 64)));
   }
-  if (expected_rows > remaining_rows) throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
+  if (expected_rows > remaining_rows)
+    throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
   estimate = AddBytes(estimate, MultiplyBytes(MultiplyBytes(count, maximum_patches), patch_bytes));
-  estimate = AddBytes(estimate, MultiplyBytes(expected_rows, 128));
+  estimate = AddBytes(estimate, MultiplyBytes(AddBytes(expected_rows, count), 128));
+  estimate = AddBytes(estimate, MultiplyBytes(prompt.size(), 16));
+  estimate = AddBytes(estimate, MultiplyBytes(expected_grids.size(), sizeof(int64_t)));
   MakeHostRoom(estimate);
   accounting_->host_bytes += estimate;
   HostReservation reservation{accounting_, estimate};
+  const auto expected_tokens = processor.ExpandImagePrompt(*model_->vision_->processor->tokenizer_, prompt, expected_grids);
+  if (expected_tokens.size() > remaining_rows)
+    throw std::invalid_argument("Expanded image rows exceed the remaining session capacity.");
   auto processed = model_->vision_->processor->Process(prompt, images, nullptr);
   const auto ids = processed->at(std::string{Config::Defaults::InputIdsName});
   PreparedMediaTurn result;
   result.tokens.assign(ids->GetData<int32_t>(), ids->GetData<int32_t>() + ids->GetElementCount());
-  if (result.tokens.size() != expected_rows) throw std::runtime_error("Image preprocessing violated its expanded-row estimate.");
+  if (result.tokens != expected_tokens)
+    throw std::runtime_error("Image preprocessing disagreed with admission tokenization.");
   const auto grids = processed->at(std::string{Config::Defaults::ImageGridThwName});
   const auto pixels = processed->at(std::string{Config::Defaults::PixelValuesName});
   const auto shape = pixels->GetShape();
@@ -247,6 +260,8 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
       pixels->GetType() != model_->cpu_embedding_->type_ || (shape.size() != 2 && shape.size() != 3) ||
       shape.back() != pixel_shape[1] || (shape.size() == 3 && shape[0] != static_cast<int64_t>(count)))
     throw std::runtime_error("Image preprocessing returned an unsupported patch/grid layout.");
+  if (!std::equal(expected_grids.begin(), expected_grids.end(), grids->GetData<int64_t>()))
+    throw std::runtime_error("Image preprocessing disagreed with admission grids.");
   const size_t physical_patches = pixels->GetElementCount() / static_cast<size_t>(shape.back());
   size_t logical_patches = 0;
   for (size_t image = 0; image < count; ++image) {
@@ -299,6 +314,7 @@ PreparedMediaTurn MediaStore::Prepare(const std::string& prompt, std::span<const
         throw std::overflow_error("Engine media prefix identity space is exhausted.");
       item = std::make_shared<MediaItem>();
       item->grid = {grid[0], grid[1], grid[2]};
+      item->positions = processor.GetImagePositionLayout(item->grid);
       item->rows = rows;
       item->prefix_base = static_cast<int32_t>(next_prefix_row_);
       next_prefix_row_ += rows;

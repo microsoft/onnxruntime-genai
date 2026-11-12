@@ -60,8 +60,16 @@ def test_block_size_is_parsed_from_a_string():
 @pytest.mark.parametrize(
     ("model_type", "has_vision", "text_only", "supported"),
     [
+        ("bailing_moe_v3_vl", True, False, True),
+        ("bailing_moe_v3_vl", True, True, False),
+        ("bailing_moe_v3_vl", False, False, False),
+        ("bailing_hybrid", True, False, False),
         ("qwen3_5", True, False, True),
         ("qwen3_5_moe", True, False, True),
+        ("qwen4_exp", True, False, True),
+        ("qwen4_exp", True, True, False),
+        ("qwen4_exp", False, False, False),
+        ("qwen4_exp_text", True, False, False),
         ("qwen3_5", True, True, False),
         ("qwen3_5", False, False, False),
         ("llama", True, False, False),
@@ -80,7 +88,7 @@ def test_paged_excluded_embeddings_require_a_vision_composite(
     if supported:
         builder_module.check_extra_options("dummy-model", "", "", "fp16", "cuda", "", options)
     else:
-        with pytest.raises(ValueError, match="requires a Qwen3.5 vision composite"):
+        with pytest.raises(ValueError, match="requires a complete supported vision composite"):
             builder_module.check_extra_options("dummy-model", "", "", "fp16", "cuda", "", options)
 
 
