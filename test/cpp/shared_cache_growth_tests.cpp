@@ -6,8 +6,6 @@
 #include <future>
 #include <numeric>
 #include <type_traits>
-#include "ep_registration.h"
-#include "ort_genai_c.h"
 #include "models/graph_builder.h"
 #include "models/io/shared_kv_cache.h"
 #include "models/decoder_only.h"
@@ -732,17 +730,3 @@ TEST_F(WebGpuGrowthTest, GrowthRecapturesAllVariantsAndPreservesAnotherGenerator
 
 }  // namespace
 }  // namespace Generators
-
-int main(int argc, char** argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  std::filesystem::path ep_dir;
-  for (int i = 1; i < argc; ++i) {
-    if (std::string_view{argv[i]} == "--ep_dir" && i + 1 < argc) ep_dir = argv[++i];
-  }
-  test_ep::EpRegistrar ep_registrar;
-  ep_registrar.DiscoverFromDirectory(ep_dir);
-  ep_registrar.RegisterAll();
-  const int result = RUN_ALL_TESTS();
-  OgaShutdown();
-  return result;
-}

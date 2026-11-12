@@ -147,14 +147,9 @@ jobs:
           copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
           & .\$env:binaryDir\Release\unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep
 
-      - name: Run WebGPU KV growth and capture fallback tests
-        run: |
-          & .\$env:binaryDir\Release\shared_cache_growth_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep
-          if ($LASTEXITCODE -ne 0) { throw "WebGPU KV tests failed: $LASTEXITCODE" }
-
       - name: Run required WebGPU Engine tests
         run: |
-          & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep --gtest_filter="DeviceSpanTest.*:GraphBuilderTest.*:BackingOwners/WebGpuStateReplayTest.*:WebGpuFixedStatePoolTest.*:FixedStatePoolTest.DeferredReplayFailurePoisonsPool:VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder" --gtest_output="xml:webgpu-engine-tests.xml"
+          & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep --gtest_filter="DeviceSpanTest.*:GraphBuilderTest.*:BackingOwners/WebGpuStateReplayTest.*:WebGpuFixedStatePoolTest.*:FixedStatePoolTest.DeferredReplayFailurePoisonsPool:VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder:WebGpuGrowthTest.*:WebGpuCaptureFallback.*" --gtest_output="xml:webgpu-engine-tests.xml"
           if ($LASTEXITCODE -ne 0) { throw "WebGPU Engine tests failed: $LASTEXITCODE" }
           [xml]$results = Get-Content webgpu-engine-tests.xml
           $required = @(
