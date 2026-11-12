@@ -1,0 +1,86 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <string>
+#include <string_view>
+
+#if defined(_WIN32)
+#include <Windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+namespace {
+struct CloseModule {
+  void operator()(void* module) const {
+#if defined(_WIN32)
+    FreeLibrary(static_cast<HMODULE>(module));
+#else
+    dlclose(module);
+#endif
+  }
+};
+
+bool RunCycle(const std::string& path, std::string_view expected_version) {
+#if defined(_WIN32)
+  std::unique_ptr<void, CloseModule> module{LoadLibraryA(path.c_str())};
+#else
+  std::unique_ptr<void, CloseModule> module{dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL)};
+#endif
+  if (!module) {
+    std::fputs("FAIL: could not load SDK version fixture\n", stderr);
+    return false;
+  }
+
+  using Getter = const char* (*)();
+#if defined(_WIN32)
+  const auto symbol = GetProcAddress(static_cast<HMODULE>(module.get()), "TelemetryReloadSdkVersion");
+#else
+  const auto symbol = dlsym(module.get(), "TelemetryReloadSdkVersion");
+#endif
+  Getter getter{};
+  static_assert(sizeof(getter) == sizeof(symbol));
+  std::memcpy(&getter, &symbol, sizeof(getter));
+  if (!getter) {
+    return false;
+  }
+
+  const std::string_view version{getter()};
+  if (version.substr(0, 4) != "EVT-" || version.find(expected_version) == std::string_view::npos ||
+      version.data() != getter()) {
+    std::fputs("FAIL: unexpected SDK version value or unstable storage\n", stderr);
+    return false;
+  }
+
+  module.reset();
+#if defined(_WIN32)
+  const bool unloaded = GetModuleHandleA(path.c_str()) == nullptr;
+#else
+  std::unique_ptr<void, CloseModule> retained{dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD)};
+  const bool unloaded = !retained;
+#endif
+  if (!unloaded) {
+    std::fputs("FAIL: SDK version fixture remained loaded\n", stderr);
+  }
+
+  return unloaded;
+}
+}  // namespace
+
+int main(int argc, char** argv) {
+  if (argc != 2 && argc != 3) {
+    return 1;
+  }
+
+  const std::string path{argv[1]};
+  const std::string_view expected_version = argc == 3 ? argv[2] : "";
+  if (!RunCycle(path, expected_version) || !RunCycle(path, expected_version)) {
+    return 1;
+  }
+
+  std::fputs("PASS: two real SDK version unload/reload cycles\n", stderr);
+  return 0;
+}

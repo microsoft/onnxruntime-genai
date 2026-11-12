@@ -7,13 +7,14 @@
 #include <string>
 #include <utility>
 
+#include "telemetry_string.h"
+
 namespace Generators::TelemetryInternal {
 
 // These PAL-populated fields are not needed by ONNX Runtime GenAI.
 // ext.os.locale is not populated by this SDK path.
-inline constexpr std::array<const char*, 5> kSuppressedCommonContextFields{
+inline constexpr std::array<const char*, 4> kSuppressedCommonContextFields{
     "AppInfo.Language",
-    "AppInfo.Name",
     "UserInfo.Language",
     "UserInfo.TimeZone",
     "M365aInfo.EnrolledTenantId",
@@ -42,6 +43,13 @@ template <typename SemanticContext>
 void SuppressUnneededCommonContext(SemanticContext& context) {
   for (const char* field : kSuppressedCommonContextFields) {
     context.SetCommonField(field, std::string{});
+  }
+}
+
+template <typename SemanticContext>
+void SetApplicationNameFromProcessName(SemanticContext& context, const std::string& process_name) {
+  if (!process_name.empty()) {
+    context.SetCommonField("AppInfo.Name", BoundTelemetryString(process_name));
   }
 }
 
