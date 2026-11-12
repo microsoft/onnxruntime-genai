@@ -15,6 +15,14 @@ inline std::string ReadTelemetryInput(std::istream& input) {
   return contents;
 }
 
+inline std::string ProcessNameFromTelemetryInput(std::string_view path) {
+  path = path.substr(0, path.find('\0'));
+  if (path.size() > kMaxTelemetryInputBytes) return {};
+  const size_t separator = path.find_last_of("/\\");
+  if (separator != std::string_view::npos) path.remove_prefix(separator + 1);
+  return BoundTelemetryString(path);
+}
+
 inline std::string CpuModelFromTelemetryInput(std::string_view contents) {
   contents = contents.substr(0, kMaxTelemetryInputBytes);
   while (!contents.empty()) {

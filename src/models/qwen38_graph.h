@@ -239,8 +239,9 @@ struct Qwen38GraphContext {
 Qwen38GraphContext SyncQwen38GraphContext(int64_t graph_positions, int configured_max_length, bool context_requested);
 
 // Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
-// before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple
-// plane capability, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
+// before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with `format int8`, or a negative scale
+// and no format line) needs the int8_ple plane capability, an IQ4_NL or Q8_0 one (`format iq4_nl`, `format q8_0`) needs
+// iq4_nl_ple or q8_0_ple, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
 // one float scale per row) needs int8_embedding, the folded MTP verify path (model.qwen38_graph.fold.enabled), which
 // prepares all the rows of a verify step with one call, needs negative_pos_add_batch, and a configuration with several request
 // slots (ResolveQwen38MaxBatchSize > 1), which prepares the rows of every slot with one call too, needs batched_prep and

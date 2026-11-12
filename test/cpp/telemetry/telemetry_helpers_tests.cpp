@@ -99,6 +99,30 @@ TEST(TelemetryInputTests, BoundsFileReadsAndCpuNameParsing) {
             "unknown");
 }
 
+TEST(TelemetryInputTests, ExtractsOnlyTheProcessBasename) {
+  EXPECT_EQ(TelemetryInternal::ProcessNameFromTelemetryInput(
+                R"(C:\Users\Private User\bin\host-app.exe)"),
+            "host-app.exe");
+  EXPECT_EQ(TelemetryInternal::ProcessNameFromTelemetryInput("/home/private user/bin/host-app"),
+            "host-app");
+  EXPECT_EQ(TelemetryInternal::ProcessNameFromTelemetryInput("host-app"), "host-app");
+  const char cmdline[] = "/home/private user/host-app\0--model=/private/model";
+  EXPECT_EQ(TelemetryInternal::ProcessNameFromTelemetryInput(
+                std::string_view(cmdline, sizeof(cmdline) - 1)),
+            "host-app");
+  EXPECT_TRUE(TelemetryInternal::ProcessNameFromTelemetryInput("").empty());
+  EXPECT_TRUE(TelemetryInternal::ProcessNameFromTelemetryInput("/private/directory/").empty());
+}
+
+TEST(TelemetryInputTests, BoundsProcessNamesWithoutLeakingTruncatedPaths) {
+  EXPECT_TRUE(TelemetryInternal::ProcessNameFromTelemetryInput(
+                  "/" + std::string(kMaxTelemetryInputBytes, 'x') + "/host-app")
+                  .empty());
+  EXPECT_EQ(TelemetryInternal::ProcessNameFromTelemetryInput(
+                "/private/" + std::string(kMaxTelemetryStringLength - 1, 'x') + "\xC2\xA2"),
+            std::string(kMaxTelemetryStringLength - 1, 'x'));
+}
+
 TEST(TelemetryInputTests, BoundsEnvironmentEvidenceProcessing) {
   EXPECT_EQ(TelemetryInternal::ToLowerAscii(std::string(1024 * 1024, 'A')).size(),
             TelemetryInternal::kMaxProcessingBytes);
