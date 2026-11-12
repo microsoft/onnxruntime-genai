@@ -82,14 +82,29 @@ def paged_onnx_source(tmp_path):
     source.make_initializer(np.arange(512, dtype=np.int32).astype(np.uint8), "packed_weight")
     source.make_node(
         "PagedAttention",
-        inputs=["qkv", "", "", "past_keys_0", "past_values_0", "cumulative_sequence_lengths", "past_sequence_lengths", "block_table", *([""] * 8), "attention_metadata"],
+        inputs=[
+            "qkv",
+            "",
+            "",
+            "past_keys_0",
+            "past_values_0",
+            "cumulative_sequence_lengths",
+            "past_sequence_lengths",
+            "block_table",
+            *([""] * 8),
+            "attention_metadata",
+        ],
         outputs=["attention", "present_keys_0", "present_values_0"],
         name="attention",
         domain="com.microsoft",
         num_heads=6,
         kv_num_heads=1,
     )
-    for name, shape in (("attention", [3, 768]), ("present_keys_0", [1, 256, 1, 128]), ("present_values_0", [1, 256, 1, 128])):
+    for name, shape in (
+        ("attention", [3, 768]),
+        ("present_keys_0", [1, 256, 1, 128]),
+        ("present_values_0", [1, 256, 1, 128]),
+    ):
         source.graph.outputs.append(source.make_value(name, ir.DataType.BFLOAT16, shape))
     source_dir = tmp_path / "source"
     source_dir.mkdir()
@@ -106,7 +121,10 @@ def paged_onnx_source(tmp_path):
 
 
 @pytest.mark.parametrize(("quantized", "shadow"), [(False, False), (True, False), (True, True)])
-def test_onnx_source_preserves_weights_and_applies_cache_policy(tmp_path, paged_onnx_source, quantized, shadow):
+@pytest.mark.parametrize("filename", [None, "imported.onnx"])
+def test_onnx_source_preserves_weights_and_applies_cache_policy(
+    tmp_path, paged_onnx_source, quantized, shadow, filename
+):
     source_path, decoder = paged_onnx_source
     options = {}
     if quantized:
@@ -122,10 +140,20 @@ def test_onnx_source_preserves_weights_and_applies_cache_policy(tmp_path, paged_
         )
         options = {"kv_cache_quant_scheme": "int8_per_channel", "kv_cache_scale_file": str(scale_path)}
     options["int8_prefill_shadow"] = shadow
+    if filename is not None:
+        options["filename"] = filename
     source_bytes = source_path.read_bytes()
     source_data = source_path.with_suffix(".onnx.data").read_bytes()
     model = OnnxSourceModel.from_pretrained(source_path, decoder, options)
+    assert model.filename == (filename or source_path.name)
+    assert model.kv_cache_attrs == {
+        "quant_scheme": "int8_per_channel" if quantized else "none",
+        "quant_mode": "PER_CHANNEL",
+        "scales_path": options.get("kv_cache_scale_file", ""),
+        "prefill_shadow": shadow,
+    }
     exported_path = model.save_model(tmp_path / "exported")
+    assert exported_path.name == model.filename
     exported = ir.load(exported_path)
     assert exported.metadata_props["source_record"] == "preserved"
     assert source_path.read_bytes() == source_bytes
@@ -150,6 +178,8 @@ def test_onnx_source_preserves_weights_and_applies_cache_policy(tmp_path, paged_
         assert controls[0].dtype == ir.DataType.INT64 and list(controls[0].shape) == [3]
         assert attention.inputs[17] is controls[0]
     if quantized:
+        assert (model.num_layers, model.num_kv_heads, model.head_size) == (1, 1, 128)
+        assert model.input_names["past_key_values.key"] == {0: "past_keys_0"}
         assert attention.attributes["k_quant_type"].as_string() == "PER_CHANNEL"
         for index, expected in ((14, 0.125), (15, 0.25)):
             scale = attention.inputs[index].const_value.numpy()
@@ -157,7 +187,7 @@ def test_onnx_source_preserves_weights_and_applies_cache_policy(tmp_path, paged_
             np.testing.assert_array_equal(scale, np.full((1, 1, 128), expected, dtype=np.float32))
     else:
         assert "k_quant_type" not in attention.attributes
-    assert all(value.const_value.location == "model.onnx.data" for value in exported.graph.initializers.values())
+    assert all(value.const_value.location == f"{model.filename}.data" for value in exported.graph.initializers.values())
 
 
 def test_onnx_source_adds_shadow_to_existing_int8_target(tmp_path, paged_onnx_source):
