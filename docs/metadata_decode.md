@@ -273,7 +273,8 @@ Python uses `ASRPostProcessor(generator)`, `process_next()`,
 `timestamp_result` properties. `ASRPostProcessorTimestampResult` objects expose
 `words` and `segments`;
 records expose `text`, `frame_interval`, and `time_interval`. Interval properties
-return two-element integer tuples ordered as `(start, stop)`, in milliseconds. These pybind11 properties
+return two-element integer tuples ordered as `(start, stop)`. `frame_interval` is in acoustic
+frames; `time_interval` is in milliseconds. These pybind11 properties
 call the C++ wrapper getters, which delegate to the per-field C API. The binding
 constructs Python strings, tuples, and lists without exposing native layouts.
 
