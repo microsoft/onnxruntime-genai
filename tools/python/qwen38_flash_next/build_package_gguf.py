@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
 """
 Export Unsloth Qwen3.8-Flash-Next GGUF models (UD-IQ1_S, UD-IQ2_XS, UD-IQ3_XXS)
-and the corresponding IQ4_NL engram GGUF to ONNX Runtime GenAI
+and the corresponding IQ4_NL or Q8_0 engram GGUF to ONNX Runtime GenAI
 model-data packages (`model.type = "qwen38_flash_graph"`):
 
   - Routed MoE experts (48 layers x 3 tensors: gate, up, down):
@@ -14,22 +16,30 @@ model-data packages (`model.type = "qwen38_flash_graph"`):
       `ple_table.txt` (`format iq4_nl` or `format q8_0`) pointing directly to the engram `.gguf`
   - Small weights (HyperConnectionLowRankMix, RouterGateUpProj, shared expert down_proj,
     CausalConvWithState, GatedDeltaNet A_log/dt_bias, RMSNorms):
-      Converted from the GGUF tensors to `gguf_small_weights.data` & inline initializers
-      to reuse the existing optimized contrib operators.
+      Converted from the GGUF tensors (or lossless HF BF16) to `gguf_small_weights.data` &
+      inline initializers, with indexer caches in an output-owned `attn_consts.data`.
 
-Install compatible official runtime packages or build the runtimes from source
-separately. Generated model packages contain model assets only, not runtime libraries.
+Package contents (model assets only):
+  - ONNX graphs: `model.onnx` (plus optional `model_int8kv.onnx`), `dflash2.onnx`, `embedding.onnx`
+  - Weight & cache blobs: linked/copied `.gguf` model and engram shards, `gguf_small_weights.data`,
+    `attn_consts.data` (or consolidated `model.onnx.data`), `dflash2.onnx.data`, `expert-profile.bin`
+  - Manifests & tokenizer metadata: `genai_config.json`, `package_manifest.json`, `ple_table.txt`,
+    `weights_pool.txt`, `chat_template.jinja`, `generation_config.json`, `tokenizer.json`, `tokenizer_config.json`
+
+Runtime distribution libraries (`libonnxruntime*`, `libonnxruntime_providers_*`) and standalone plane
+binaries (`libqwen38_plane*`) are excluded from generated model packages. Install compatible runtime
+packages or build from source separately: register the CUDA EP plugin via
+`og.register_execution_provider_library("CUDAExecutionProvider", ...)` (`--provider` or `$QWEN_PROVIDER`),
+and `model.qwen38_graph.plane_library` defaults to `""` so `qwen38_flash_graph` resolves the CUDA data
+plane compiled into `onnxruntime-genai-cuda`.
 """
 
 from __future__ import annotations
 
 import argparse
-import io
 import json
-import os
 import re
 import shutil
-import struct
 import sys
 import time
 from pathlib import Path
@@ -54,50 +64,73 @@ from build_package import (  # noqa: E402
     align_up,
     default_base_genai_config,
     ensure_unified_dynamic_cache_model,
+    link_file,
     make_ext_init,
 )
 from package_config import migrate_qwen38_graph_config  # noqa: E402
+from package_io import (  # noqa: E402
+    GGML_TYPE_INFO,
+    GGUF_MIN_NUM_BLOCKS_32K,
+    GGUF_MIN_NUM_BLOCKS_64K,
+    GGUF_MIN_NUM_BLOCKS_128K,
+    GGUF_MIN_NUM_BLOCKS_256K,
+    GGUF_NUM_BLOCKS_64K,
+    CheckpointTensorLoader,
+    compute_gguf_model_weight_stats,
+    default_gguf_runtime_profiles,
+    estimate_gguf_peak_vram_and_thresholds,
+    format_gguf_ple_table_lines,
+    parse_gguf_header_stream,
+    read_ple_table_spec,
+    validate_engram_gguf,
+)
 from package_paths import reject_output_overlap  # noqa: E402
+from precision_options import (  # noqa: E402
+    add_precision_cli_args,
+    apply_precision_config_to_package,
+    precision_config_needs_hf_checkpoint,
+    resolve_precision_config,
+    validate_gguf_precision_config,
+)
 
-# Exact block counts at block_size=256 with DFLASH2_RESERVED_BLOCKS=13:
-#   32K (32,768 tokens -> min 141 blocks, kv_cap=32,776; RC5 33,024 tokens -> 142 blocks, kv_cap=33,032)
-#   64K (65,536 tokens -> min 269 blocks, kv_cap=65,544; RC5 65,792 tokens -> 270 blocks, kv_cap=65,800)
-#   128K (131,072 tokens -> 525 blocks, kv_cap=131,080)
-#   256K (262,144 tokens -> 1037 blocks, kv_cap=262,152)
-MIN_NUM_BLOCKS_32K = 128 + DFLASH2_RESERVED_BLOCKS  # 141
-MIN_NUM_BLOCKS_64K = 256 + DFLASH2_RESERVED_BLOCKS  # 269
-NUM_BLOCKS_64K = 257 + DFLASH2_RESERVED_BLOCKS  # 270
-MIN_NUM_BLOCKS_128K = NUM_BLOCKS_128K  # 525
-MIN_NUM_BLOCKS_256K = NUM_BLOCKS_256K  # 1037
+MIN_NUM_BLOCKS_32K = GGUF_MIN_NUM_BLOCKS_32K
+MIN_NUM_BLOCKS_64K = GGUF_MIN_NUM_BLOCKS_64K
+MIN_NUM_BLOCKS_128K = GGUF_MIN_NUM_BLOCKS_128K
+MIN_NUM_BLOCKS_256K = GGUF_MIN_NUM_BLOCKS_256K
+NUM_BLOCKS_64K = GGUF_NUM_BLOCKS_64K
 
-GGML_TYPE_INFO: dict[int, tuple[str, int, int]] = {
-    0: ("F32", 1, 4),
-    1: ("F16", 1, 2),
-    2: ("Q4_0", 32, 18),
-    3: ("Q4_1", 32, 20),
-    6: ("Q5_0", 32, 22),
-    7: ("Q5_1", 32, 24),
-    8: ("Q8_0", 32, 34),
-    10: ("Q2_K", 256, 84),
-    11: ("Q3_K", 256, 110),
-    12: ("Q4_K", 256, 144),
-    13: ("Q5_K", 256, 176),
-    14: ("Q6_K", 256, 210),
-    16: ("IQ2_XXS", 256, 66),
-    17: ("IQ2_XS", 256, 74),
-    18: ("IQ3_XXS", 256, 98),
-    19: ("IQ1_S", 256, 50),
-    20: ("IQ4_NL", 32, 18),
-    21: ("IQ3_S", 256, 110),
-    22: ("IQ2_S", 256, 82),
-    23: ("IQ4_XS", 256, 136),
-    29: ("IQ1_M", 256, 56),
-    30: ("BF16", 1, 2),
-    39: ("MXFP4", 32, 17),
-    40: ("NVFP4", 64, 36),
-    41: ("Q1_0", 128, 18),
-    42: ("Q2_0", 64, 18),
-}
+__all__ = [
+    "BASE_PACKAGE_MODEL_ASSETS",
+    "DFLASH2_RESERVED_BLOCKS",
+    "GGML_TYPE_INFO",
+    "MIN_NUM_BLOCKS_32K",
+    "MIN_NUM_BLOCKS_64K",
+    "MIN_NUM_BLOCKS_128K",
+    "MIN_NUM_BLOCKS_256K",
+    "NUM_BLOCKS_32K",
+    "NUM_BLOCKS_64K",
+    "NUM_BLOCKS_128K",
+    "NUM_BLOCKS_256K",
+    "SmallWeightBlobWriter",
+    "build_gguf_package",
+    "configure_gguf_genai_config",
+    "default_base_genai_config",
+    "default_gguf_runtime_profiles",
+    "dequant_gguf_tensor_f32",
+    "estimate_gguf_peak_vram_and_thresholds",
+    "f32_to_bf16_u16",
+    "main",
+    "parse_gguf_header",
+]
+
+BASE_PACKAGE_MODEL_ASSETS: tuple[str, ...] = (
+    "chat_template.jinja",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "expert-profile.bin",
+    "dflash2.onnx.data",
+)
 
 
 def f32_to_bf16_u16(arr: np.ndarray) -> np.ndarray:
@@ -107,78 +140,8 @@ def f32_to_bf16_u16(arr: np.ndarray) -> np.ndarray:
 
 
 def parse_gguf_header(path: Path) -> tuple[dict, list[dict], int]:
-    with open(path, "rb") as rawf:
-        buf = rawf.read(16 * 1024 * 1024)
-    f = io.BytesIO(buf)
-    magic, version, n_tensors, n_kv = struct.unpack("<4sIQQ", f.read(24))
-    assert magic == b"GGUF", f"Not a GGUF file: {path}"
-
-    def read_str() -> str:
-        n = struct.unpack("<Q", f.read(8))[0]
-        return f.read(n).decode("utf-8", errors="replace")
-
-    def skip_val(vtype: int) -> object:
-        if vtype in (0, 1, 7):
-            return struct.unpack("<B", f.read(1))[0]
-        if vtype in (2, 3):
-            return struct.unpack("<H", f.read(2))[0]
-        if vtype in (4, 5):
-            return struct.unpack("<I", f.read(4))[0]
-        if vtype == 6:
-            return struct.unpack("<f", f.read(4))[0]
-        if vtype == 8:
-            return read_str()
-        if vtype == 9:
-            atype, alen = struct.unpack("<IQ", f.read(12))
-            if atype in (0, 1, 7):
-                f.seek(alen, 1)
-            elif atype in (2, 3):
-                f.seek(alen * 2, 1)
-            elif atype in (4, 5, 6):
-                f.seek(alen * 4, 1)
-            elif atype in (10, 11, 12):
-                f.seek(alen * 8, 1)
-            else:
-                for _ in range(alen):
-                    skip_val(atype)
-            return f"arr[{alen}]"
-        if vtype in (10, 11, 12):
-            return struct.unpack("<Q", f.read(8))[0]
-        raise ValueError(f"Unknown GGUF kv type {vtype}")
-
-    kvs = {}
-    for _ in range(n_kv):
-        k = read_str()
-        vt = struct.unpack("<I", f.read(4))[0]
-        kvs[k] = skip_val(vt)
-
-    align = int(kvs.get("general.alignment", 32))
-    tensors = []
-    for _ in range(n_tensors):
-        name = read_str()
-        nd = struct.unpack("<I", f.read(4))[0]
-        dims = [struct.unpack("<Q", f.read(8))[0] for _ in range(nd)]
-        ttype, rel_off = struct.unpack("<IQ", f.read(12))
-        tensors.append({"name": name, "dims": dims, "ggml_type": ttype, "rel_offset": rel_off})
-
-    pos = f.tell()
-    data_offset = (pos + align - 1) // align * align
-    for t in tensors:
-        tname, blck_elems, blck_bytes = GGML_TYPE_INFO[t["ggml_type"]]
-        d0 = t["dims"][0]
-        assert d0 % blck_elems == 0, f"{t['name']}: d0={d0} not divisible by {blck_elems}"
-        row_bytes = (d0 // blck_elems) * blck_bytes
-        c_dims = [int(d) for d in reversed(t["dims"][1:])]
-        n_rows = 1
-        for d in c_dims:
-            n_rows *= d
-        t["type_name"] = tname
-        t["row_bytes"] = row_bytes
-        t["n_bytes"] = n_rows * row_bytes
-        t["data_offset"] = data_offset + t["rel_offset"]
-        t["onnx_u8_shape"] = [*c_dims, row_bytes] if c_dims else [row_bytes]
-
-    return kvs, tensors, data_offset
+    """Stream-parse a GGUF header of arbitrary metadata size and validate all tensor byte ranges."""
+    return parse_gguf_header_stream(Path(path).expanduser(), validate_bounds=True)
 
 
 def dequant_gguf_tensor_f32(shard_path: Path, tinfo: dict) -> np.ndarray:
@@ -189,6 +152,11 @@ def dequant_gguf_tensor_f32(shard_path: Path, tinfo: dict) -> np.ndarray:
     with open(shard_path, "rb") as f:
         f.seek(tinfo["data_offset"])
         raw = f.read(tinfo["n_bytes"])
+    if len(raw) != tinfo["n_bytes"]:
+        raise ValueError(
+            f"Truncated tensor payload for {tinfo['name']} in {shard_path}: "
+            f"expected {tinfo['n_bytes']} bytes, got {len(raw)}"
+        )
     ttype = tinfo["ggml_type"]
     if ttype == 0:  # F32
         return np.frombuffer(raw, dtype=np.float32).copy().reshape(c_shape)
@@ -247,180 +215,12 @@ def set_inline_bf16(tensor: TensorProto, arr: np.ndarray) -> None:
     tensor.raw_data = u16.tobytes()
 
 
-def estimate_gguf_peak_vram_and_thresholds(total_weight_bytes: int, moe_bytes: int = 0) -> dict:
-    """Estimate peak GPU VRAM (`cudaMemGetInfo` used bytes) and `runtime_profiles` VRAM thresholds for GGUF packages.
-
-    Calibrated against empirical H200 measurements across all three GGUF variants:
-      - `UD-IQ1_S`   (weights=35.656 GiB / 38.286 GB):
-          32K (num_blocks=142, chunk=4096): peak = 41.393 GiB (44.446 GB / 42,387 MiB)
-          32K (num_blocks=142, chunk=8192): peak = 43.432 GiB (46.635 GB / 44,475 MiB)
-          64K (num_blocks=270, chunk=4096): peak = 41.741 GiB (44.819 GB / 42,743 MiB)
-          128K (num_blocks=525, chunk=4096): peak = 42.845 GiB (46.004 GB / 43,873 MiB)
-          256K (num_blocks=1037, chunk=4096): peak = 45.538 GiB (48.896 GB / 46,631 MiB)
-      - `UD-IQ2_XS`  (weights=44.460 GiB / 47.739 GB):
-          32K (num_blocks=142, chunk=4096): peak = 50.138 GiB (53.835 GB / 51,341 MiB)
-          32K (num_blocks=142, chunk=8192): peak = 52.177 GiB (56.024 GB / 53,429 MiB)
-          64K (num_blocks=270, chunk=4096): peak = 50.485 GiB (54.208 GB / 51,697 MiB)
-          128K (num_blocks=525, chunk=4096): peak = 51.589 GiB (55.393 GB / 52,827 MiB)
-          256K (num_blocks=1037, chunk=4096): peak = 54.280 GiB (58.283 GB / 55,583 MiB)
-      - `UD-IQ3_XXS` (weights=51.730 GiB / 55.545 GB):
-          32K (num_blocks=142, chunk=4096): peak = 57.444 GiB (61.680 GB / 58,823 MiB)
-          32K (num_blocks=142, chunk=8192): peak = 59.481 GiB (63.868 GB / 60,909 MiB)
-          64K (num_blocks=270, chunk=4096): peak = 57.792 GiB (62.054 GB / 59,179 MiB)
-          128K (num_blocks=525, chunk=4096): peak = 58.893 GiB (63.236 GB / 60,307 MiB)
-          256K (num_blocks=1037, chunk=4096): peak = 61.587 GiB (66.128 GB / 63,065 MiB)
-    """
-    peak_32k_bytes = total_weight_bytes + 6_160_000_000
-    peak_32k_c8192_bytes = total_weight_bytes + 8_350_000_000
-    peak_64k_bytes = total_weight_bytes + 6_535_000_000
-    peak_128k_bytes = total_weight_bytes + 7_720_000_000
-    peak_256k_bytes = total_weight_bytes + 10_610_000_000
-
-    gb = 1_000_000_000
-    min_vram_32k = ((peak_32k_bytes + 2 * gb + gb - 1) // gb) * gb
-    min_vram_64k = max(min_vram_32k + gb, ((peak_64k_bytes + 2 * gb + gb - 1) // gb) * gb)
-    min_vram_128k = max(min_vram_64k + gb, ((peak_128k_bytes + 2 * gb + gb - 1) // gb) * gb)
-    min_vram_256k = max(min_vram_128k + 3 * gb, ((peak_256k_bytes + 2_500_000_000 + gb - 1) // gb) * gb)
-
-    return {
-        "total_weight_bytes": total_weight_bytes,
-        "total_weight_gib": round(total_weight_bytes / 2**30, 3),
-        "total_weight_gb": round(total_weight_bytes / 1e9, 3),
-        "moe_bytes": moe_bytes,
-        "moe_gib": round(moe_bytes / 2**30, 3),
-        "min_num_blocks_32k": MIN_NUM_BLOCKS_32K,
-        "min_num_blocks_64k": MIN_NUM_BLOCKS_64K,
-        "min_num_blocks_128k": MIN_NUM_BLOCKS_128K,
-        "min_num_blocks_256k": MIN_NUM_BLOCKS_256K,
-        "num_blocks_32k": NUM_BLOCKS_32K,
-        "num_blocks_64k": NUM_BLOCKS_64K,
-        "num_blocks_128k": NUM_BLOCKS_128K,
-        "num_blocks_256k": NUM_BLOCKS_256K,
-        "peak_32k_bytes": peak_32k_bytes,
-        "peak_32k_gib": round(peak_32k_bytes / 2**30, 3),
-        "peak_32k_gb": round(peak_32k_bytes / 1e9, 3),
-        "peak_32k_c8192_bytes": peak_32k_c8192_bytes,
-        "peak_32k_c8192_gib": round(peak_32k_c8192_bytes / 2**30, 3),
-        "peak_32k_c8192_gb": round(peak_32k_c8192_bytes / 1e9, 3),
-        "peak_64k_bytes": peak_64k_bytes,
-        "peak_64k_gib": round(peak_64k_bytes / 2**30, 3),
-        "peak_64k_gb": round(peak_64k_bytes / 1e9, 3),
-        "peak_128k_bytes": peak_128k_bytes,
-        "peak_128k_gib": round(peak_128k_bytes / 2**30, 3),
-        "peak_128k_gb": round(peak_128k_bytes / 1e9, 3),
-        "peak_256k_bytes": peak_256k_bytes,
-        "peak_256k_gib": round(peak_256k_bytes / 2**30, 3),
-        "peak_256k_gb": round(peak_256k_bytes / 1e9, 3),
-        "min_vram_32k_bytes": min_vram_32k,
-        "min_vram_64k_bytes": min_vram_64k,
-        "min_vram_128k_bytes": min_vram_128k,
-        "min_vram_256k_bytes": min_vram_256k,
-    }
-
-
-def default_gguf_runtime_profiles(total_weight_bytes: int, decoder_filename: str = "model.onnx") -> list[dict]:
-    """Hardware-matched `runtime_profiles` sizing `num_blocks` (`32K`/`64K`/`128K`/`256K`) to the GGUF model's VRAM footprint."""
-    vram_info = estimate_gguf_peak_vram_and_thresholds(total_weight_bytes)
-    min_32k = vram_info["min_vram_32k_bytes"]
-    min_64k = vram_info["min_vram_64k_bytes"]
-    min_128k = vram_info["min_vram_128k_bytes"]
-    min_256k = vram_info["min_vram_256k_bytes"]
-    return [
-        {
-            "id": "gpu-32k",
-            "eligibility": {
-                "minimum_total_device_memory_bytes": min_32k,
-                "maximum_total_device_memory_bytes": min_64k - 1,
-                "is_integrated": False,
-            },
-            "overlay": {
-                "model": {
-                    "decoder": {
-                        "filename": decoder_filename,
-                    }
-                },
-                "engine": {
-                    "dynamic_batching": {
-                        "num_blocks": NUM_BLOCKS_32K,
-                        "max_batch_size": 1,
-                        "max_scheduled_tokens": 4096,
-                    }
-                },
-            },
-        },
-        {
-            "id": "gpu-64k",
-            "eligibility": {
-                "minimum_total_device_memory_bytes": min_64k,
-                "maximum_total_device_memory_bytes": min_128k - 1,
-                "is_integrated": False,
-            },
-            "overlay": {
-                "model": {
-                    "decoder": {
-                        "filename": decoder_filename,
-                    }
-                },
-                "engine": {
-                    "dynamic_batching": {
-                        "num_blocks": NUM_BLOCKS_64K,
-                        "max_batch_size": 1,
-                        "max_scheduled_tokens": 8192,
-                    }
-                },
-            },
-        },
-        {
-            "id": "gpu-128k",
-            "eligibility": {
-                "minimum_total_device_memory_bytes": min_128k,
-                "maximum_total_device_memory_bytes": min_256k - 1,
-                "is_integrated": False,
-            },
-            "overlay": {
-                "model": {
-                    "decoder": {
-                        "filename": decoder_filename,
-                    }
-                },
-                "engine": {
-                    "dynamic_batching": {
-                        "num_blocks": NUM_BLOCKS_128K,
-                        "max_batch_size": 1,
-                        "max_scheduled_tokens": 8192,
-                    }
-                },
-            },
-        },
-        {
-            "id": "gpu-256k",
-            "eligibility": {
-                "minimum_total_device_memory_bytes": min_256k,
-                "is_integrated": False,
-            },
-            "overlay": {
-                "model": {
-                    "decoder": {
-                        "filename": decoder_filename,
-                    }
-                },
-                "engine": {
-                    "dynamic_batching": {
-                        "num_blocks": NUM_BLOCKS_256K,
-                        "max_batch_size": 1,
-                        "max_scheduled_tokens": 8192,
-                    }
-                },
-            },
-        },
-    ]
-
-
 def configure_gguf_genai_config(
     config: dict,
     *,
     total_weight_bytes: int,
     include_runtime_profiles: bool = True,
+    kv_cache_dtype: str = "int8",
 ) -> dict:
     """Update `genai_config.json` in place using the canonical RC5 schema and GGUF `runtime_profiles`."""
     model_sec = config.setdefault("model", {})
@@ -436,20 +236,30 @@ def configure_gguf_genai_config(
         if isinstance(po, dict) and isinstance(po.get("cuda"), dict):
             po["cuda"].pop("min_num_runs_before_cuda_graph_capture", None)
 
+    prefill_chunk_long = int(RC5_PREFILL_CONFIG["chunk"])
     qwen = model_sec.get("qwen38_graph")
     if isinstance(qwen, dict):
         migrate_qwen38_graph_config(qwen)
-        qwen.setdefault("plane_library", "provider/libqwen38_plane.so")
+        # Generated packages exclude standalone binaries; empty string selects the plane built into onnxruntime-genai-cuda.
+        qwen["plane_library"] = ""
         prefill = qwen.setdefault("prefill", {})
         if prefill.get("enabled", True):
             prefill["chunk"] = RC5_PREFILL_CONFIG["chunk"]
             prefill["warmup_lengths"] = list(RC5_PREFILL_CONFIG["warmup_lengths"])
+        elif prefill.get("chunk"):
+            prefill_chunk_long = int(prefill["chunk"])
 
     config["engine"] = json.loads(json.dumps(DEFAULT_ENGINE_CONFIG))
     config.setdefault("search", {})["max_length"] = DEFAULT_MAX_CONTEXT_LENGTH
     if include_runtime_profiles:
         dec_fname = model_sec.get("decoder", {}).get("filename", "model.onnx")
-        config["runtime_profiles"] = default_gguf_runtime_profiles(total_weight_bytes, dec_fname)
+        config["runtime_profiles"] = default_gguf_runtime_profiles(
+            total_weight_bytes,
+            dec_fname,
+            kv_cache_dtype=kv_cache_dtype,
+            prefill_chunk_32k=4096,
+            prefill_chunk_long=prefill_chunk_long,
+        )
     else:
         config.pop("runtime_profiles", None)
     return config
@@ -488,6 +298,39 @@ class SmallWeightBlobWriter:
         self.fh.close()
 
 
+def _read_base_tensor(base_pkg: Path, tensor: TensorProto) -> tuple[bytes, int, list[int]]:
+    dtype = int(tensor.data_type)
+    dims = [int(d) for d in tensor.dims]
+    if tensor.data_location == TensorProto.EXTERNAL:
+        ext = {e.key: e.value for e in tensor.external_data}
+        loc = ext["location"]
+        off = int(ext.get("offset", 0))
+        ln = int(ext["length"])
+        src_path = base_pkg / loc
+        if not src_path.is_file():
+            raise FileNotFoundError(f"Missing external data file {src_path} for initializer {tensor.name}")
+        with open(src_path, "rb") as f:
+            f.seek(off)
+            raw = f.read(ln)
+        if len(raw) != ln:
+            raise ValueError(
+                f"Truncated external data for {tensor.name} in {src_path}: expected {ln} bytes at offset {off}, got {len(raw)}"
+            )
+        return raw, dtype, dims
+    raw = bytes(tensor.raw_data) if tensor.raw_data else numpy_helper.to_array(tensor).tobytes()
+    return raw, dtype, dims
+
+
+def _format_pool_entry(pool_id: int, tensor: TensorProto) -> str:
+    ext = {e.key: e.value for e in tensor.external_data}
+    loc = ext["location"]
+    off = int(ext.get("offset", 0))
+    ln = int(ext["length"])
+    dims = [int(d) for d in tensor.dims]
+    dims_str = " ".join(str(d) for d in dims)
+    return f"pool {pool_id} {int(tensor.data_type)} {off} {ln} {len(dims)} {dims_str} {loc}"
+
+
 def build_gguf_package(
     variant_name: str,
     gguf_dir: Path,
@@ -496,120 +339,116 @@ def build_gguf_package(
     out_dir: Path,
     *,
     small_weights_source: str = "gguf",
-    hf_dir: Path = Path("/data/tlwu/Qwen3.8-Flash-Next"),
+    hf_dir: Path | None = None,
 ) -> dict:
     t0 = time.time()
+    gguf_dir = Path(gguf_dir).expanduser()
+    engram_gguf = Path(engram_gguf).expanduser()
+    base_pkg = Path(base_pkg).expanduser()
+    out_dir = Path(out_dir).expanduser()
+    effective_hf_dir = (
+        Path(hf_dir).expanduser() if hf_dir is not None else (Path.home() / "models" / "Qwen3.8-Flash-Next")
+    )
+
     out_dir = reject_output_overlap(
         out_dir,
         {
             "--gguf-root variant": gguf_dir,
             "engram GGUF": engram_gguf,
             "--base-pkg": base_pkg,
+            "--hf-dir": effective_hf_dir,
         },
     )
-    if out_dir.exists() or out_dir.is_symlink():
-        shutil.rmtree(out_dir)
-    out_dir.mkdir(parents=True)
+    if small_weights_source not in ("gguf", "hf_bf16"):
+        raise ValueError(f"Unsupported small_weights_source={small_weights_source!r}; expected 'gguf' or 'hf_bf16'")
+    if not (base_pkg / "model.onnx").is_file():
+        raise FileNotFoundError(f"Missing target model.onnx in --base-pkg: {base_pkg / 'model.onnx'}")
+    if not (base_pkg / "dflash2.onnx").is_file():
+        raise FileNotFoundError(f"Missing dflash2.onnx in --base-pkg: {base_pkg / 'dflash2.onnx'}")
 
-    # 1. Parse all GGUF shards in gguf_dir and hard-link non-empty shards + engram into out_dir
-    gguf_tensors: dict[str, dict] = {}
-    shard_files: list[str] = []
+    hf_reader = CheckpointTensorLoader(effective_hf_dir) if small_weights_source == "hf_bf16" else None
+
+    base_model = onnx.load(str(base_pkg / "model.onnx"), load_external_data=False)
+    base_props = {p.key: p.value for p in base_model.metadata_props}
+    if json.loads(base_props.get("qwen38.position_config", "{}")).get("capacity") is not None:
+        raise ValueError("--base-pkg cannot convert an explicit-capacity package")
+    base_inits = {t.name: t for t in base_model.graph.initializer}
+    for req_cache in (
+        "model.rotary_emb.cos_cache",
+        "model.rotary_emb.sin_cache",
+        "capture.indexer_cos_cache.folded",
+        "capture.indexer_sin_cache.folded",
+    ):
+        if req_cache not in base_inits:
+            raise KeyError(f"Missing required initializer {req_cache!r} in {base_pkg / 'model.onnx'}")
+
+    # Validate PLE specification, engram GGUF, and all model GGUF shards before modifying out_dir
+    ple_spec = read_ple_table_spec(base_pkg / "ple_table.txt" if (base_pkg / "ple_table.txt").is_file() else None)
+    engram_dst_name, ple_format, ple_row_bytes, engram_doff = validate_engram_gguf(engram_gguf, ple_spec)
+
+    parsed_shards: list[tuple[Path, list[dict]]] = []
     for shard_path in sorted(gguf_dir.glob("*.gguf")):
         _, ts, _ = parse_gguf_header(shard_path)
         if not ts or (len(ts) == 1 and ts[0]["name"] == "per_layer_token_embd.weight"):
             continue
+        parsed_shards.append((shard_path, ts))
+    if not parsed_shards:
+        raise ValueError(f"No model GGUF shards found in {gguf_dir}")
+
+    # Pre-read retained RoPE and indexer caches from base_pkg before removing out_dir
+    cos_raw, cos_dt, cos_dims = _read_base_tensor(base_pkg, base_inits["model.rotary_emb.cos_cache"])
+    sin_raw, sin_dt, sin_dims = _read_base_tensor(base_pkg, base_inits["model.rotary_emb.sin_cache"])
+    icos_raw, icos_dt, icos_dims = _read_base_tensor(base_pkg, base_inits["capture.indexer_cos_cache.folded"])
+    isin_raw, isin_dt, isin_dims = _read_base_tensor(base_pkg, base_inits["capture.indexer_sin_cache.folded"])
+
+    if out_dir.exists() or out_dir.is_symlink():
+        if out_dir.is_symlink() or out_dir.is_file():
+            out_dir.unlink()
+        else:
+            shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+
+    # 1. Link (or copy across filesystems) validated model GGUF shards + engram GGUF into out_dir
+    gguf_tensors: dict[str, dict] = {}
+    shard_files: list[str] = []
+    for shard_path, ts in parsed_shards:
         dst_shard = out_dir / shard_path.name
-        os.link(shard_path, dst_shard)
+        link_file(shard_path, dst_shard)
         shard_files.append(shard_path.name)
         for t in ts:
             t["shard_file"] = shard_path.name
             t["shard_path"] = shard_path
             gguf_tensors[t["name"]] = t
 
-    # Hard-link engram GGUF (supports IQ4_NL = 20 and Q8_0 = 8)
-    _, engram_ts, engram_doff = parse_gguf_header(engram_gguf)
-    assert len(engram_ts) == 1 and engram_ts[0]["name"] == "per_layer_token_embd.weight"
-    engram_ttype = engram_ts[0]["ggml_type"]
-    if engram_ttype == 20:  # IQ4_NL
-        engram_dst_name = "Qwen3.8-Flash-Next-engram-IQ4_NL.gguf"
-        ple_format = "iq4_nl"
-        ple_row_bytes = (160 // 32) * 18  # 90 bytes per row
-    elif engram_ttype == 8:  # Q8_0
-        engram_dst_name = "Qwen3.8-Flash-Next-engram-Q8_0.gguf"
-        ple_format = "q8_0"
-        ple_row_bytes = (160 // 32) * 34  # 170 bytes per row
-    else:
-        raise ValueError(f"Unsupported engram GGUF tensor type {engram_ttype} in {engram_gguf}")
-    os.link(engram_gguf, out_dir / engram_dst_name)
-
+    link_file(engram_gguf, out_dir / engram_dst_name)
     print(f"[{variant_name}] Indexed {len(gguf_tensors)} tensors across {shard_files} + {engram_dst_name}")
 
-    # 2. Copy static non-weight assets from base_pkg
-    for fname in (
-        "chat_template.jinja",
-        "generation_config.json",
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "expert-profile.bin",
-        "attn_consts.data",
-        "dflash2.onnx.data",
-    ):
+    # 2. Copy static model assets only from base_pkg (runtime distributions and standalone plane binaries are excluded)
+    for fname in BASE_PACKAGE_MODEL_ASSETS:
         src = base_pkg / fname
         if src.exists():
-            shutil.copy2(src, out_dir / fname)
-
-    if (base_pkg / "provider").is_dir():
-        (out_dir / "provider").mkdir(exist_ok=True)
-        for p in (base_pkg / "provider").iterdir():
-            if p.is_file():
-                shutil.copy2(p, out_dir / "provider" / p.name)
+            shutil.copy2(src.resolve(), out_dir / fname)
 
     # 3. Write ple_table.txt pointing directly to engram GGUF. GGUF blocks carry their own fp16 scales, so the table names
     #    its format and has no scale line (a scale of -8.0 or -20.0 alone would read as INT8).
-    ple_lines = [
-        "qwen38_ple_table 1",
-        "n_heads 16",
-        "head_dim 160",
-        "heads_per_ngram 8",
-        "eos 248044",
-        f"format {ple_format}",
-        "mult 23703573157769 20109073645365 8052911324071 0",
-        "vocab 20000003 20000023 20000033 20000047 20000059 20000063 20000069 20000077 20000081 20000093 20000107 20000147 20000153 20000159 20000161 20000171",
-        "offset 0 20000003 40000026 60000059 80000106 100000165 120000228 140000297 160000374 180000455 200000548 220000655 240000802 260000955 280001114 300001275",
-    ]
-    rows_per_shard = 2500012
-    total_ple_rows = 300001275 + 20000171  # 320,001,446
-    cur_row = 0
-    for _s_idx in range(128):
-        r_cnt = min(rows_per_shard, total_ple_rows - cur_row)
-        if r_cnt <= 0:
-            break
-        byte_off = engram_doff + cur_row * ple_row_bytes
-        ple_lines.append(f"shard {engram_dst_name} {byte_off} {r_cnt}")
-        cur_row += r_cnt
+    ple_lines = format_gguf_ple_table_lines(engram_dst_name, ple_format, engram_doff, ple_row_bytes, ple_spec)
     (out_dir / "ple_table.txt").write_text("\n".join(ple_lines) + "\n")
 
-    # 4. Convert small weights from GGUF + copy RoPE caches into gguf_small_weights.data
+    # 4. Convert small weights from GGUF + copy RoPE/indexer caches into output-owned blobs
     small_writer = SmallWeightBlobWriter(out_dir, "gguf_small_weights.data")
-    base_model = onnx.load(str(base_pkg / "model.onnx"), load_external_data=False)
-    base_inits = {t.name: t for t in base_model.graph.initializer}
+    cos_info = small_writer.write_raw(cos_raw, cos_dt, cos_dims)
+    sin_info = small_writer.write_raw(sin_raw, sin_dt, sin_dims)
 
-    def read_base_ext_bytes(init_name: str) -> bytes:
-        t = base_inits[init_name]
-        ext = {e.key: e.value for e in t.external_data}
-        with open(base_pkg / ext["location"], "rb") as f:
-            f.seek(int(ext.get("offset", 0)))
-            return f.read(int(ext["length"]))
+    attn_writer = SmallWeightBlobWriter(out_dir, "attn_consts.data")
+    try:
+        icos_info = attn_writer.write_raw(icos_raw, icos_dt, icos_dims)
+        isin_info = attn_writer.write_raw(isin_raw, isin_dt, isin_dims)
+    finally:
+        attn_writer.close()
 
-    # Copy cos_cache and sin_cache (32 MiB total) into gguf_small_weights.data at offsets 0 and 16777216
-    cos_info = small_writer.write_raw(
-        read_base_ext_bytes("model.rotary_emb.cos_cache"), TensorProto.BFLOAT16, [262144, 32]
-    )
-    sin_info = small_writer.write_raw(
-        read_base_ext_bytes("model.rotary_emb.sin_cache"), TensorProto.BFLOAT16, [262144, 32]
-    )
-
-    true_perm = np.arange(48).reshape(16, 3).T.flatten()
+    num_gdn_v_heads = int(np.prod(gguf_tensors["blk.0.ssm_a"]["dims"]))
+    num_gdn_k_heads = num_gdn_v_heads // 3
+    true_perm = np.arange(num_gdn_v_heads).reshape(num_gdn_k_heads, 3).T.flatten()
     inv_perm = np.argsort(true_perm)
 
     new_inits: dict[str, TensorProto] = {}
@@ -641,11 +480,11 @@ def build_gguf_package(
         loc, off, ln, dt, dims = small_writer.write_bf16(arr_f32)
         new_inits[onnx_name] = make_ext_init(onnx_name, loc, off, ln, dt, dims)
 
-    # Register RoPE and indexer caches
+    # Register RoPE and indexer caches in output-owned blobs
     new_inits["model.rotary_emb.cos_cache"] = make_ext_init("model.rotary_emb.cos_cache", *cos_info)
     new_inits["model.rotary_emb.sin_cache"] = make_ext_init("model.rotary_emb.sin_cache", *sin_info)
-    new_inits["capture.indexer_cos_cache.folded"] = base_inits["capture.indexer_cos_cache.folded"]
-    new_inits["capture.indexer_sin_cache.folded"] = base_inits["capture.indexer_sin_cache.folded"]
+    new_inits["capture.indexer_cos_cache.folded"] = make_ext_init("capture.indexer_cos_cache.folded", *icos_info)
+    new_inits["capture.indexer_sin_cache.folded"] = make_ext_init("capture.indexer_sin_cache.folded", *isin_info)
 
     # Copy all inline initializers from base_model first, then update norms / A_log / dt_bias from GGUF
     for name, t in base_inits.items():
@@ -709,11 +548,10 @@ def build_gguf_package(
         set_inline_bf16(new_inits[oname], dequant_gguf_tensor_f32(ti["shard_path"], ti).flatten())
 
     # Convert small external weights per layer from GGUF (or lossless HF BF16 when small_weights_source == "hf_bf16")
-    hf_reader = None
-    if small_weights_source == "hf_bf16":
-        from build_package import HFCheckpointReader
-
-        hf_reader = HFCheckpointReader(hf_dir)
+    gdn_v_dim = int(gguf_tensors["blk.0.attn_gate.weight"]["dims"][1])
+    gdn_qkv_dim = int(gguf_tensors["blk.0.attn_qkv.weight"]["dims"][1])
+    gdn_qk_dim = gdn_qkv_dim - gdn_v_dim
+    gdn_head_v_dim = gdn_v_dim // num_gdn_v_heads
 
     for lid in range(48):
         lpfx = f"model.language_model.layers.{lid}"
@@ -727,11 +565,11 @@ def build_gguf_package(
                 w_inj = hf_reader.read_bf16_tensor(f"{lpfx}.{kind_onnx}.block_inject_weight.weight").float().numpy().T
             else:
                 ti_down = gguf_tensors[f"blk.{lid}.{kind_gguf}_down.weight"]
-                w_down = dequant_gguf_tensor_f32(ti_down["shard_path"], ti_down).T  # [10240, 320]
+                w_down = dequant_gguf_tensor_f32(ti_down["shard_path"], ti_down).T
                 ti_up = gguf_tensors[f"blk.{lid}.{kind_gguf}_up.weight"]
-                w_up = dequant_gguf_tensor_f32(ti_up["shard_path"], ti_up).T  # [320, 10240]
+                w_up = dequant_gguf_tensor_f32(ti_up["shard_path"], ti_up).T
                 ti_inj = gguf_tensors[f"blk.{lid}.{kind_gguf}_inject.weight"]
-                w_inj = dequant_gguf_tensor_f32(ti_inj["shard_path"], ti_inj).T  # [10240, 4]
+                w_inj = dequant_gguf_tensor_f32(ti_inj["shard_path"], ti_inj).T
 
             add_small_bf16_init(
                 f"model.layers.{lid}.{kind_onnx}.input_mix_weight_down.weight_t.hc_tiled_down.untiled_bf16", w_down
@@ -741,26 +579,24 @@ def build_gguf_package(
             )
             add_small_bf16_init(f"model.layers.{lid}.{kind_onnx}.block_inject_weight.weight_t", w_inj)
 
-        # RouterGateUpProj merged weight [2560, 1792] = [router(512) | shared_gate(640) | shared_up(640)]
+        # RouterGateUpProj merged weight [hidden, router + shared_gate + shared_up]
         if hf_reader is not None:
             w_r = hf_reader.read_bf16_tensor(f"{lpfx}.mlp.gate.weight").float().numpy().T
             w_sg = hf_reader.read_bf16_tensor(f"{lpfx}.mlp.shared_expert.gate_proj.weight").float().numpy().T
             w_su = hf_reader.read_bf16_tensor(f"{lpfx}.mlp.shared_expert.up_proj.weight").float().numpy().T
             w_sd = hf_reader.read_bf16_tensor(f"{lpfx}.mlp.shared_expert.down_proj.weight").float().numpy().T
-            w_sgate = (
-                hf_reader.read_bf16_tensor(f"{lpfx}.mlp.shared_expert_gate.weight").float().numpy().reshape(2560, 1)
-            )
+            w_sgate = hf_reader.read_bf16_tensor(f"{lpfx}.mlp.shared_expert_gate.weight").float().numpy().reshape(-1, 1)
         else:
             ti_r = gguf_tensors[f"blk.{lid}.ffn_gate_inp.weight"]
             ti_sg = gguf_tensors[f"blk.{lid}.ffn_gate_shexp.weight"]
             ti_su = gguf_tensors[f"blk.{lid}.ffn_up_shexp.weight"]
-            w_r = dequant_gguf_tensor_f32(ti_r["shard_path"], ti_r).T  # [2560, 512]
-            w_sg = dequant_gguf_tensor_f32(ti_sg["shard_path"], ti_sg).T  # [2560, 640]
-            w_su = dequant_gguf_tensor_f32(ti_su["shard_path"], ti_su).T  # [2560, 640]
+            w_r = dequant_gguf_tensor_f32(ti_r["shard_path"], ti_r).T
+            w_sg = dequant_gguf_tensor_f32(ti_sg["shard_path"], ti_sg).T
+            w_su = dequant_gguf_tensor_f32(ti_su["shard_path"], ti_su).T
             ti_sd = gguf_tensors[f"blk.{lid}.ffn_down_shexp.weight"]
-            w_sd = dequant_gguf_tensor_f32(ti_sd["shard_path"], ti_sd).T  # [640, 2560]
+            w_sd = dequant_gguf_tensor_f32(ti_sd["shard_path"], ti_sd).T
             ti_sgate = gguf_tensors[f"blk.{lid}.ffn_gate_inp_shexp.weight"]
-            w_sgate = dequant_gguf_tensor_f32(ti_sgate["shard_path"], ti_sgate).reshape(2560, 1)
+            w_sgate = dequant_gguf_tensor_f32(ti_sgate["shard_path"], ti_sgate).reshape(-1, 1)
 
         w_rgup = np.concatenate([w_r, w_sg, w_su], axis=1)
         rgup_idx = lid * 2 + 1 if lid == 0 else lid * 2 + 2
@@ -771,33 +607,38 @@ def build_gguf_package(
         # GDN conv1d, norm, alpha, beta (for GDN layers lid % 4 != 3) or QSA indexer_qk (for lid % 4 == 3)
         if lid % 4 != 3:
             ti_conv = gguf_tensors[f"blk.{lid}.ssm_conv1d.weight"]
-            w_conv = dequant_gguf_tensor_f32(ti_conv["shard_path"], ti_conv).reshape(10240, 4).copy()
-            w_conv[4096:] = w_conv[4096:].reshape(48, 128, 4)[inv_perm].reshape(6144, 4)
-            add_small_bf16_init(f"model.layers.{lid}.linear_attn.conv1d.weight", w_conv.reshape(10240, 1, 4))
+            raw_conv = dequant_gguf_tensor_f32(ti_conv["shard_path"], ti_conv)
+            conv_ch = raw_conv.size // 4
+            w_conv = raw_conv.reshape(conv_ch, 4).copy()
+            w_conv[gdn_qk_dim:] = (
+                w_conv[gdn_qk_dim:].reshape(num_gdn_v_heads, gdn_head_v_dim, 4)[inv_perm].reshape(gdn_v_dim, 4)
+            )
+            add_small_bf16_init(f"model.layers.{lid}.linear_attn.conv1d.weight", w_conv.reshape(conv_ch, 1, 4))
 
             ti_snorm = gguf_tensors[f"blk.{lid}.ssm_norm.weight"]
             w_snorm = dequant_gguf_tensor_f32(ti_snorm["shard_path"], ti_snorm).flatten()
             add_small_bf16_init(f"model.layers.{lid}.linear_attn.norm.weight", w_snorm)
 
             ti_alpha = gguf_tensors[f"blk.{lid}.ssm_alpha.weight"]
-            w_alpha = dequant_gguf_tensor_f32(ti_alpha["shard_path"], ti_alpha)[inv_perm].T  # [2560, 48]
+            w_alpha = dequant_gguf_tensor_f32(ti_alpha["shard_path"], ti_alpha)[inv_perm].T
             add_small_bf16_init(f"model.layers.{lid}.linear_attn.alpha.weight_t", w_alpha)
 
             ti_beta = gguf_tensors[f"blk.{lid}.ssm_beta.weight"]
-            w_beta = dequant_gguf_tensor_f32(ti_beta["shard_path"], ti_beta)[inv_perm].T  # [2560, 48]
+            w_beta = dequant_gguf_tensor_f32(ti_beta["shard_path"], ti_beta)[inv_perm].T
             add_small_bf16_init(f"model.layers.{lid}.linear_attn.beta.weight_t", w_beta)
         else:
             ti_iq = gguf_tensors[f"blk.{lid}.indexer.q_proj.weight"]
             ti_ik = gguf_tensors[f"blk.{lid}.indexer.k_proj.weight"]
-            w_iq = dequant_gguf_tensor_f32(ti_iq["shard_path"], ti_iq).T  # [2560, 512]
-            w_ik = dequant_gguf_tensor_f32(ti_ik["shard_path"], ti_ik).T  # [2560, 128]
+            w_iq = dequant_gguf_tensor_f32(ti_iq["shard_path"], ti_iq).T
+            w_ik = dequant_gguf_tensor_f32(ti_ik["shard_path"], ti_ik).T
             add_small_bf16_init(
                 f"model.layers.{lid}.self_attn.indexer_qk.weight_t", np.concatenate([w_iq, w_ik], axis=1)
             )
 
     # Layer 1 PLE conv1d & output HC down/up
     ti_ple_conv = gguf_tensors["blk.1.ple_conv1d.weight"]
-    w_ple_conv = dequant_gguf_tensor_f32(ti_ple_conv["shard_path"], ti_ple_conv).reshape(10240, 1, 4)
+    raw_ple_conv = dequant_gguf_tensor_f32(ti_ple_conv["shard_path"], ti_ple_conv)
+    w_ple_conv = raw_ple_conv.reshape(raw_ple_conv.size // 4, 1, 4)
     add_small_bf16_init("model.layers.1.ple.conv1d.weight", w_ple_conv)
 
     ti_out_down = gguf_tensors["output_hc_down.weight"]
@@ -815,6 +656,7 @@ def build_gguf_package(
 
     # 5. Register token_embd.weight and rewrite model.onnx nodes (GatherPacked, MatMulPacked, MoEPacked)
     _, emb_tinfo = register_gguf_direct_init("model.embed_tokens.weight", "token_embd.weight", share=True)
+    emb_k = int(emb_tinfo["dims"][0])
 
     new_nodes: list[onnx.NodeProto] = []
     # Prepend GatherPacked node so model.onnx computes inputs_embeds on GPU directly from token_embd.weight
@@ -824,24 +666,24 @@ def build_gguf_package(
         ["inputs_embeds"],
         name="model/embed_tokens/GatherPacked",
         domain="com.microsoft",
-        K=2560,
+        K=emb_k,
         packed_type=int(emb_tinfo["ggml_type"]),
         output_dtype=int(TensorProto.BFLOAT16),
     )
     new_nodes.append(gather_node)
 
-    # Helper shape constants for GDN [3, 16, 128] <-> [16, 3, 128] V-head permutation in the ONNX graph
+    # Helper shape constants for GDN [3, num_k_heads, head_v_dim] <-> [num_k_heads, 3, head_v_dim] V-head permutation
     new_inits["const_gdn_split_4096_6144"] = numpy_helper.from_array(
-        np.array([4096, 6144], dtype=np.int64), name="const_gdn_split_4096_6144"
+        np.array([gdn_qk_dim, gdn_v_dim], dtype=np.int64), name="const_gdn_split_4096_6144"
     )
     new_inits["const_gdn_v_3_16_128"] = numpy_helper.from_array(
-        np.array([0, 0, 3, 16, 128], dtype=np.int64), name="const_gdn_v_3_16_128"
+        np.array([0, 0, 3, num_gdn_k_heads, gdn_head_v_dim], dtype=np.int64), name="const_gdn_v_3_16_128"
     )
     new_inits["const_gdn_v_6144"] = numpy_helper.from_array(
-        np.array([0, 0, 6144], dtype=np.int64), name="const_gdn_v_6144"
+        np.array([0, 0, gdn_v_dim], dtype=np.int64), name="const_gdn_v_6144"
     )
     new_inits["const_gdn_out_16_3_128"] = numpy_helper.from_array(
-        np.array([-1, 16, 3, 128], dtype=np.int64), name="const_gdn_out_16_3_128"
+        np.array([-1, num_gdn_k_heads, 3, gdn_head_v_dim], dtype=np.int64), name="const_gdn_out_16_3_128"
     )
 
     # Map merged_proj indices to layers and consumer Split nodes in base_model
@@ -886,13 +728,14 @@ def build_gguf_package(
             _, gw_info = register_gguf_direct_init(gw_name, f"blk.{lid}.ffn_gate_exps.weight")
             _, uw_info = register_gguf_direct_init(uw_name, f"blk.{lid}.ffn_up_exps.weight")
             _, dw_info = register_gguf_direct_init(dw_name, f"blk.{lid}.ffn_down_exps.weight")
+            moe_k = int(next((helper.get_attribute_value(a) for a in n.attribute if a.name == "k"), 10))
             moe_node = helper.make_node(
                 "MoEPacked",
                 [n.input[0], n.input[1], gw_name, uw_name, dw_name],
                 list(n.output),
                 name=n.name.replace("QMoE", "MoEPacked"),
                 domain="com.microsoft",
-                k=10,
+                k=moe_k,
                 normalize_routing_weights=1,
                 activation_type="swiglu",
                 gate_type=int(gw_info["ggml_type"]),
@@ -918,8 +761,8 @@ def build_gguf_package(
                         [out_name],
                         name=n.name.replace("MatMulNBits", "MatMulPacked"),
                         domain="com.microsoft",
-                        K=6144,
-                        N=2560,
+                        K=int(b_info["dims"][0]),
+                        N=int(b_info["dims"][1]),
                         packed_type=int(b_info["ggml_type"]),
                     )
                 )
@@ -935,8 +778,8 @@ def build_gguf_package(
                         [out_name],
                         name=n.name.replace("MatMulNBits", "MatMulPacked"),
                         domain="com.microsoft",
-                        K=6144,
-                        N=2560,
+                        K=int(b_info["dims"][0]),
+                        N=int(b_info["dims"][1]),
                         packed_type=int(b_info["ggml_type"]),
                     )
                 )
@@ -951,8 +794,8 @@ def build_gguf_package(
                         [out_name],
                         name=n.name.replace("MatMulNBits", "MatMulPacked"),
                         domain="com.microsoft",
-                        K=2560,
-                        N=248320,
+                        K=int(b_info["dims"][0]),
+                        N=int(b_info["dims"][1]),
                         packed_type=int(b_info["ggml_type"]),
                     )
                 )
@@ -976,8 +819,8 @@ def build_gguf_package(
                         [key_out],
                         name=f"{n.name}/key_proj/MatMulPacked",
                         domain="com.microsoft",
-                        K=2560,
-                        N=10240,
+                        K=int(b0_info["dims"][0]),
+                        N=int(b0_info["dims"][1]),
                         packed_type=int(b0_info["ggml_type"]),
                     )
                 )
@@ -988,8 +831,8 @@ def build_gguf_package(
                         [val_out],
                         name=f"{n.name}/value_proj/MatMulPacked",
                         domain="com.microsoft",
-                        K=2560,
-                        N=2560,
+                        K=int(b1_info["dims"][0]),
+                        N=int(b1_info["dims"][1]),
                         packed_type=int(b1_info["ggml_type"]),
                     )
                 )
@@ -1033,8 +876,8 @@ def build_gguf_package(
                             [qkv_raw],
                             name=f"{n.name}/qkv/MatMulPacked",
                             domain="com.microsoft",
-                            K=2560,
-                            N=10240,
+                            K=int(qkv_info["dims"][0]),
+                            N=int(qkv_info["dims"][1]),
                             packed_type=int(qkv_info["ggml_type"]),
                         )
                     )
@@ -1089,8 +932,8 @@ def build_gguf_package(
                             [gate_out],
                             name=f"{n.name}/gate/MatMulPacked",
                             domain="com.microsoft",
-                            K=2560,
-                            N=6144,
+                            K=int(gate_info["dims"][0]),
+                            N=int(gate_info["dims"][1]),
                             packed_type=int(gate_info["ggml_type"]),
                         )
                     )
@@ -1112,7 +955,7 @@ def build_gguf_package(
                     )
                     matmul_packed_count += 2
                 else:
-                    # QSA input projection: indexer_qk (640), attn_q (12288), attn_k (512), attn_v (512)
+                    # QSA input projection: indexer_qk, attn_q, attn_k, attn_v
                     idx_qk_out, q_out, k_out, v_out = (
                         sp_node.output[0],
                         sp_node.output[1],
@@ -1141,8 +984,8 @@ def build_gguf_package(
                             [q_out],
                             name=f"{n.name}/q_proj/MatMulPacked",
                             domain="com.microsoft",
-                            K=2560,
-                            N=12288,
+                            K=int(qw_info["dims"][0]),
+                            N=int(qw_info["dims"][1]),
                             packed_type=int(qw_info["ggml_type"]),
                         )
                     )
@@ -1153,8 +996,8 @@ def build_gguf_package(
                             [k_out],
                             name=f"{n.name}/k_proj/MatMulPacked",
                             domain="com.microsoft",
-                            K=2560,
-                            N=512,
+                            K=int(kw_info["dims"][0]),
+                            N=int(kw_info["dims"][1]),
                             packed_type=int(kw_info["ggml_type"]),
                         )
                     )
@@ -1165,8 +1008,8 @@ def build_gguf_package(
                             [v_out],
                             name=f"{n.name}/v_proj/MatMulPacked",
                             domain="com.microsoft",
-                            K=2560,
-                            N=512,
+                            K=int(vw_info["dims"][0]),
+                            N=int(vw_info["dims"][1]),
                             packed_type=int(vw_info["ggml_type"]),
                         )
                     )
@@ -1195,17 +1038,24 @@ def build_gguf_package(
     onnx.save(base_model, str(out_dir / "model.onnx"))
 
     # Compute total GPU weight bytes (MoEPacked + MatMulPacked + GatherPacked + gguf_small_weights.data)
-    moe_weight_bytes = 0
-    for n in base_model.graph.node:
-        if n.op_type == "MoEPacked":
-            for wi in n.input[2:5]:
-                moe_weight_bytes += gguf_tensors[gguf_init_map[wi]["gguf_name"]]["n_bytes"]
-    gguf_direct_bytes = sum(
-        gguf_tensors[meta["gguf_name"]]["n_bytes"] for name, meta in gguf_init_map.items() if name in used_inputs
-    )
+    weight_stats = compute_gguf_model_weight_stats(base_model)
+    moe_weight_bytes = weight_stats["moe_bytes"]
+    gguf_direct_bytes = weight_stats["gguf_bytes"]
     small_weight_bytes = (out_dir / "gguf_small_weights.data").stat().st_size
     total_weight_bytes = gguf_direct_bytes + small_weight_bytes
-    vram_info = estimate_gguf_peak_vram_and_thresholds(total_weight_bytes, moe_bytes=moe_weight_bytes)
+
+    kv_vi = next((vi for vi in base_model.graph.input if re.match(r"^past_key_values\.\d+\.key$", vi.name)), None)
+    kv_elem = kv_vi.type.tensor_type.elem_type if kv_vi is not None else TensorProto.INT8
+    base_kv_dtype = (
+        "fp16" if kv_elem == TensorProto.FLOAT16 else ("bf16" if kv_elem == TensorProto.BFLOAT16 else "int8")
+    )
+    vram_info = estimate_gguf_peak_vram_and_thresholds(
+        total_weight_bytes,
+        moe_bytes=moe_weight_bytes,
+        kv_cache_dtype=base_kv_dtype,
+    )
+    vram_info["baseline_small_file_bytes"] = small_weight_bytes
+    vram_info["baseline_non_gguf_tensor_bytes"] = weight_stats["non_gguf_bytes"]
 
     # Also build standalone embedding.onnx using GatherPacked on CPU EP
     emb_graph = helper.make_graph(
@@ -1216,14 +1066,14 @@ def build_gguf_package(
                 ["inputs_embeds"],
                 name="/model/embed_tokens/GatherPacked",
                 domain="com.microsoft",
-                K=2560,
+                K=emb_k,
                 packed_type=int(emb_tinfo["ggml_type"]),
                 output_dtype=int(TensorProto.BFLOAT16),
             )
         ],
         "embedding_gguf",
         [helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["num_tokens"])],
-        [helper.make_tensor_value_info("inputs_embeds", TensorProto.BFLOAT16, ["num_tokens", 2560])],
+        [helper.make_tensor_value_info("inputs_embeds", TensorProto.BFLOAT16, ["num_tokens", emb_k])],
         [
             make_ext_init(
                 "model.embed_tokens.weight",
@@ -1260,7 +1110,7 @@ def build_gguf_package(
                     ["/dflash2/embed_tokens/Cast/output_0"],
                     name="/dflash2/embed_tokens/GatherPacked",
                     domain="com.microsoft",
-                    K=2560,
+                    K=emb_k,
                     packed_type=int(emb_tinfo["ggml_type"]),
                     output_dtype=int(TensorProto.BFLOAT16),
                 )
@@ -1275,8 +1125,8 @@ def build_gguf_package(
                     list(n.output),
                     name="/lm_head/MatMulPacked",
                     domain="com.microsoft",
-                    K=2560,
-                    N=248320,
+                    K=int(lm_tinfo["dims"][0]),
+                    N=int(lm_tinfo["dims"][1]),
                     packed_type=int(lm_tinfo["ggml_type"]),
                 )
             )
@@ -1287,44 +1137,63 @@ def build_gguf_package(
     dflash_model.graph.node.extend(dflash_nodes)
 
     dflash_used = {inp for n in dflash_model.graph.node for inp in n.input if inp}
-    dflash_inits = [
-        t
-        for t in dflash_model.graph.initializer
-        if t.name in dflash_used and t.name not in ("model.embed_tokens.weight", "lm_head.gguf_weight")
-    ]
-    dflash_inits.append(
-        make_ext_init(
-            "model.embed_tokens.weight",
-            emb_tinfo["shard_file"],
-            emb_tinfo["data_offset"],
-            emb_tinfo["n_bytes"],
-            TensorProto.UINT8,
-            emb_tinfo["onnx_u8_shape"],
-        )
+    dflash_inits: list[TensorProto] = []
+    dflash_blob_path = out_dir / "dflash2.onnx.data"
+    for t in dflash_model.graph.initializer:
+        if t.name not in dflash_used or t.name in ("model.embed_tokens.weight", "lm_head.gguf_weight"):
+            continue
+        kept_t = t
+        if kept_t.data_location == TensorProto.EXTERNAL:
+            ext = {e.key: e.value for e in kept_t.external_data}
+            loc = ext.get("location", "")
+            off = int(ext.get("offset", 0))
+            ln = int(ext["length"])
+            if (
+                loc != "dflash2.onnx.data"
+                or not dflash_blob_path.is_file()
+                or off + ln > dflash_blob_path.stat().st_size
+            ):
+                raw_df, dt_df, dims_df = _read_base_tensor(base_pkg, kept_t)
+                cur_sz = dflash_blob_path.stat().st_size if dflash_blob_path.is_file() else 0
+                new_off = align_up(cur_sz)
+                with open(dflash_blob_path, "ab") as df_fh:
+                    if new_off > cur_sz:
+                        df_fh.write(b"\x00" * (new_off - cur_sz))
+                    df_fh.write(raw_df)
+                kept_t = make_ext_init(kept_t.name, "dflash2.onnx.data", new_off, len(raw_df), dt_df, dims_df)
+        dflash_inits.append(kept_t)
+
+    dflash_emb_init = make_ext_init(
+        "model.embed_tokens.weight",
+        emb_tinfo["shard_file"],
+        emb_tinfo["data_offset"],
+        emb_tinfo["n_bytes"],
+        TensorProto.UINT8,
+        emb_tinfo["onnx_u8_shape"],
     )
-    dflash_inits.append(
-        make_ext_init(
-            "lm_head.gguf_weight",
-            lm_tinfo["shard_file"],
-            lm_tinfo["data_offset"],
-            lm_tinfo["n_bytes"],
-            TensorProto.UINT8,
-            lm_tinfo["onnx_u8_shape"],
-        )
+    dflash_lm_init = make_ext_init(
+        "lm_head.gguf_weight",
+        lm_tinfo["shard_file"],
+        lm_tinfo["data_offset"],
+        lm_tinfo["n_bytes"],
+        TensorProto.UINT8,
+        lm_tinfo["onnx_u8_shape"],
     )
+    dflash_inits.append(dflash_emb_init)
+    dflash_inits.append(dflash_lm_init)
     del dflash_model.graph.initializer[:]
     dflash_model.graph.initializer.extend(dflash_inits)
     onnx.save(dflash_model, str(out_dir / "dflash2.onnx"))
 
-    # 7. Write weights_pool.txt (shares RoPE caches, indexer caches, token_embd.weight, and lm_head.gguf_weight on GPU!)
+    # 7. Write weights_pool.txt generated from actual tensor metadata
     pool_lines = [
         "qwen38_weights_pool 1",
-        f"pool 0 16 {cos_info[1]} {cos_info[2]} 2 262144 32 {cos_info[0]}",
-        f"pool 1 16 {sin_info[1]} {sin_info[2]} 2 262144 32 {sin_info[0]}",
-        "pool 2 16 0 33554432 2 262144 64 attn_consts.data",
-        "pool 3 16 33554432 33554432 2 262144 64 attn_consts.data",
-        f"pool 4 2 {emb_tinfo['data_offset']} {emb_tinfo['n_bytes']} 2 {emb_tinfo['onnx_u8_shape'][0]} {emb_tinfo['onnx_u8_shape'][1]} {emb_tinfo['shard_file']}",
-        f"pool 5 2 {lm_tinfo['data_offset']} {lm_tinfo['n_bytes']} 2 {lm_tinfo['onnx_u8_shape'][0]} {lm_tinfo['onnx_u8_shape'][1]} {lm_tinfo['shard_file']}",
+        _format_pool_entry(0, new_inits["model.rotary_emb.cos_cache"]),
+        _format_pool_entry(1, new_inits["model.rotary_emb.sin_cache"]),
+        _format_pool_entry(2, new_inits["capture.indexer_cos_cache.folded"]),
+        _format_pool_entry(3, new_inits["capture.indexer_sin_cache.folded"]),
+        _format_pool_entry(4, new_inits.get("model.embed_tokens.weight", dflash_emb_init)),
+        _format_pool_entry(5, new_inits.get("lm_head.gguf_weight", dflash_lm_init)),
         "session target model.rotary_emb.cos_cache 0",
         "session target model.rotary_emb.sin_cache 1",
         "session target capture.indexer_cos_cache.folded 2",
@@ -1339,7 +1208,12 @@ def build_gguf_package(
     # 8. Write genai_config.json with RC5 protocol boundary tokens, dynamic_batching, and 32K/64K/128K/256K runtime_profiles
     base_cfg_path = base_pkg / "genai_config.json"
     config = json.loads(base_cfg_path.read_text()) if base_cfg_path.exists() else default_base_genai_config()
-    configure_gguf_genai_config(config, total_weight_bytes=total_weight_bytes, include_runtime_profiles=True)
+    configure_gguf_genai_config(
+        config,
+        total_weight_bytes=total_weight_bytes,
+        include_runtime_profiles=True,
+        kv_cache_dtype=base_kv_dtype,
+    )
     (out_dir / "genai_config.json").write_text(json.dumps(config, indent=2) + "\n")
 
     # 9. Write package_manifest.json
@@ -1361,51 +1235,83 @@ def build_gguf_package(
     return manifest
 
 
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
+    home_models = Path.home() / "models"
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--gguf-root", type=Path, default=Path("~/models/qwen_flash_next_ggufs"))
+    ap.add_argument("--gguf-root", type=Path, default=home_models / "qwen_flash_next_ggufs")
     ap.add_argument(
         "--base-pkg",
         type=Path,
-        default=Path("~/models/qwen_flash_next_int4_int8_rc5_contrib_dflash2"),
+        default=home_models / "qwen_flash_next_int4_int8_rc5_contrib_dflash2",
     )
-    ap.add_argument("--hf-dir", type=Path, default=Path("/data/tlwu/Qwen3.8-Flash-Next"))
-    ap.add_argument("--out-root", type=Path, default=Path("~/models"))
+    ap.add_argument("--hf-dir", type=Path, default=home_models / "Qwen3.8-Flash-Next")
+    ap.add_argument("--out-root", type=Path, default=home_models)
     ap.add_argument("--variants", default="UD-IQ1_S,UD-IQ2_XS,UD-IQ3_XXS")
     ap.add_argument("--engram-gguf", type=Path, default=None, help="Explicit path to engram .gguf_file")
     ap.add_argument("--pkg-suffix", default="", help="Optional suffix for output package directory name")
-    from precision_options import (
-        DEFAULT_ENGRAM_Q8_GGUF,
-        add_precision_cli_args,
-        apply_precision_config_to_package,
-        resolve_precision_config,
-    )
-
     add_precision_cli_args(ap)
-    args = ap.parse_args()
-    pcfg = resolve_precision_config(args)
+    return ap
 
-    if args.engram_gguf is not None:
-        engram_gguf = args.engram_gguf
+
+def main(argv: list[str] | None = None) -> int:
+    ap = build_arg_parser()
+    args = ap.parse_args(argv)
+    gguf_root = Path(args.gguf_root).expanduser()
+    base_pkg = Path(args.base_pkg).expanduser()
+    hf_dir = Path(args.hf_dir).expanduser()
+    out_root = Path(args.out_root).expanduser()
+    explicit_engram = Path(args.engram_gguf).expanduser() if args.engram_gguf is not None else None
+    args.engram_gguf = explicit_engram
+
+    pcfg = resolve_precision_config(args)
+    validate_gguf_precision_config(pcfg)
+
+    if explicit_engram is not None:
+        engram_gguf = explicit_engram
     elif pcfg.ple_engram == "q8_0":
-        engram_gguf = DEFAULT_ENGRAM_Q8_GGUF
+        engram_gguf = gguf_root / "engram" / "Qwen3.8-Flash-Next-engram-Q8_0.gguf_file"
     else:
-        engram_gguf = args.gguf_root / "engram/Qwen3.8-Flash-Next-engram-IQ4_NL.gguf_file"
-    assert engram_gguf.exists(), f"Missing {engram_gguf}"
+        engram_gguf = gguf_root / "engram" / "Qwen3.8-Flash-Next-engram-IQ4_NL.gguf_file"
+    pcfg.engram_gguf_path = engram_gguf
+    if not engram_gguf.exists():
+        raise FileNotFoundError(f"Missing engram GGUF: {engram_gguf}")
 
     eff_small_src = "hf_bf16" if pcfg.small_weights_source == "hf_bf16" else "gguf"
-    for v in [x.strip() for x in args.variants.split(",") if x.strip()]:
-        v_dir = args.gguf_root / v
-        assert v_dir.is_dir(), f"Missing GGUF variant dir {v_dir}"
+    needs_hf = eff_small_src == "hf_bf16" or (pcfg.is_non_default() and precision_config_needs_hf_checkpoint(pcfg))
+
+    variants = [x.strip() for x in args.variants.split(",") if x.strip()]
+    variant_jobs: list[tuple[str, Path, Path]] = []
+    all_variant_dirs = {f"--gguf-root variant {v}": gguf_root / v for v in variants}
+    for v in variants:
+        v_dir = gguf_root / v
+        if not v_dir.is_dir():
+            raise FileNotFoundError(f"Missing GGUF variant dir {v_dir}")
         slug = v.lower().replace("-", "_")
         pkg_name = f"qwen_flash_next_gguf_{slug}{args.pkg_suffix}"
-        out_dir = args.out_root / pkg_name
-        if eff_small_src == "gguf":
+        out_dir = out_root / pkg_name
+        reject_output_overlap(
+            out_dir,
+            {
+                "--gguf-root": gguf_root,
+                **all_variant_dirs,
+                "engram GGUF": engram_gguf,
+                "--base-pkg": base_pkg,
+                "--hf-dir": hf_dir,
+            },
+        )
+        variant_jobs.append((pkg_name, v_dir, out_dir))
+
+    if needs_hf:
+        CheckpointTensorLoader(hf_dir)
+
+    default_hf_dir = Path.home() / "models" / "Qwen3.8-Flash-Next"
+    for pkg_name, v_dir, out_dir in variant_jobs:
+        if eff_small_src == "gguf" and hf_dir == default_hf_dir:
             build_gguf_package(
                 pkg_name,
                 v_dir,
                 engram_gguf,
-                args.base_pkg,
+                base_pkg,
                 out_dir,
             )
         else:
@@ -1413,13 +1319,13 @@ def main() -> int:
                 pkg_name,
                 v_dir,
                 engram_gguf,
-                args.base_pkg,
+                base_pkg,
                 out_dir,
                 small_weights_source=eff_small_src,
-                hf_dir=args.hf_dir,
+                hf_dir=hf_dir,
             )
         if pcfg.is_non_default():
-            apply_precision_config_to_package(out_dir, pcfg, hf_dir=args.hf_dir)
+            apply_precision_config_to_package(out_dir, pcfg, hf_dir=hf_dir)
     return 0
 
 
