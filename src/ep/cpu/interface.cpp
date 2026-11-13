@@ -125,19 +125,13 @@ struct CpuInterface : DeviceInterface {
   }
 
   template <typename T>
-  void UpdateAttentionMask(T* next_mask_data, T* mask_data, int batch_beam_size, int total_length) {
-    if (batch_beam_size == 1) {
-      // For batch size == 1 we assume no padding. We make this explicit for continuous decoding.
-      for (int i = 0; i < total_length; i++)
-        next_mask_data[i] = 1;
-    } else {
-      // For batch size > 1 we increment attention mask by 1... continuous decoding is not supported
-      for (int i = 0; i < batch_beam_size; i++) {
-        for (int j = 0; j < total_length - 1; j++) {
-          next_mask_data[i * total_length + j] = mask_data[i * (total_length - 1) + j];
-        }
-        next_mask_data[i * total_length + total_length - 1] = 1;
-      }
+  void UpdateAttentionMask(T* next_mask_data, T* mask_data, int batch_beam_size, int new_kv_length, int total_length) {
+    const int previous_length = total_length - new_kv_length;
+    for (int i = 0; i < batch_beam_size; i++) {
+      auto* row = next_mask_data + i * total_length;
+      if (previous_length > 0)
+        std::copy_n(mask_data + i * previous_length, previous_length, row);
+      std::fill_n(row + previous_length, new_kv_length, static_cast<T>(1));
     }
   }
 
@@ -158,9 +152,9 @@ struct CpuInterface : DeviceInterface {
         UpdateAttentionMaskStatic(static_cast<int64_t*>(mask_data), batch_beam_size, new_kv_length, total_length, max_length);
     } else {
       if (type == Ort::TypeToTensorType<int32_t>)
-        UpdateAttentionMask(static_cast<int32_t*>(next_mask_data), static_cast<int32_t*>(mask_data), batch_beam_size, total_length);
+        UpdateAttentionMask(static_cast<int32_t*>(next_mask_data), static_cast<int32_t*>(mask_data), batch_beam_size, new_kv_length, total_length);
       else
-        UpdateAttentionMask(static_cast<int64_t*>(next_mask_data), static_cast<int64_t*>(mask_data), batch_beam_size, total_length);
+        UpdateAttentionMask(static_cast<int64_t*>(next_mask_data), static_cast<int64_t*>(mask_data), batch_beam_size, new_kv_length, total_length);
     }
     return true;
   }
