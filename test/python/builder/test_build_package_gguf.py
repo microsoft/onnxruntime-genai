@@ -26,7 +26,7 @@ BUILDER_TEST_DIR = Path(__file__).resolve().parent
 if str(BUILDER_TEST_DIR) not in sys.path:
     sys.path.insert(0, str(BUILDER_TEST_DIR))
 
-from _qwen38_tools_test_utils import prefill_chunk_problem, unknown_qwen38_graph_keys  # noqa: E402
+from qwen38_tools_test_utils import prefill_chunk_problem, unknown_qwen38_graph_keys  # noqa: E402
 
 
 @pytest.fixture

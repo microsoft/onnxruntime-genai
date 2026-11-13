@@ -66,6 +66,18 @@ ctest --build-config Release --output-on-failure
 
 ## Code Patterns & Conventions
 
+### Naming
+
+Do not introduce filenames, functions, or methods with leading underscores.
+Use descriptive names such as `builder_test_utils.py` and `load_builder_module`
+instead. Python-required special names such as `__init__.py`, `__init__`, and
+`__enter__` are exempt. The explicitly allowed top-level `test/python/_test_utils.py`
+is a legacy exception, not a naming pattern for new files.
+
+During automated reviews, flag new or renamed filenames and custom functions
+or methods that violate this rule, and recommend a name without the leading
+underscore. Keep imports and call sites consistent when renaming.
+
 ### ONNX Runtime API Wrappers
 
 Use the C++ wrapper methods defined in `src/models/onnxruntime_inline.h` rather

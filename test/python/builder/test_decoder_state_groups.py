@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from _builder_test_utils import load_builder_module
+from builder_test_utils import load_builder_module
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))

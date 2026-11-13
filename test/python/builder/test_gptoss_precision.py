@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import onnx_ir as ir
 import pytest
-from _builder_test_utils import load_builder_module
+from builder_test_utils import load_builder_module
 from test_precision import builder_module
 from transformers import GptOssConfig
 

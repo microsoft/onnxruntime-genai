@@ -35,7 +35,7 @@ def _ort_runs_tensor_scatter():
     builder_tests_dir = str(Path(__file__).resolve().parents[1] / "builder")
     if builder_tests_dir not in sys.path:
         sys.path.insert(0, builder_tests_dir)
-    from _builder_test_utils import ort_runs_tensor_scatter  # noqa: PLC0415
+    from builder_test_utils import ort_runs_tensor_scatter  # noqa: PLC0415
 
     return ort_runs_tensor_scatter()
 

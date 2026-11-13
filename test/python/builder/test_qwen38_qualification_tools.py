@@ -23,7 +23,7 @@ from typing import ClassVar
 
 import numpy as np
 import pytest
-from _qwen38_tools_test_utils import (
+from qwen38_tools_test_utils import (
     QWEN38_GRAPH_KEYS,
     REMOVED_QWEN38_GRAPH_KEYS,
     load_tools,

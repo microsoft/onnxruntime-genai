@@ -18,7 +18,7 @@ import numpy as np
 import onnxruntime as ort
 import pytest
 import torch
-from _builder_test_utils import load_builder_module
+from builder_test_utils import load_builder_module
 
 base_module = load_builder_module("base")
 lfm2_module = load_builder_module("lfm2")

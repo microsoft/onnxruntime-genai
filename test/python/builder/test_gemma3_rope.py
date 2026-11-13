@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from _builder_test_utils import load_builder_module
+from builder_test_utils import load_builder_module
 
 gemma = load_builder_module("gemma")
 
@@ -142,7 +142,7 @@ def transformers_reference(config):
 )
 def test_caches_match_transformers_rotary_embedding(rope_config, tmp_path):
     transformers = pytest.importorskip("transformers")
-    # _builder_test_utils installs an importable transformers stub when the package is absent.
+    # builder_test_utils installs an importable transformers stub when the package is absent.
     if not hasattr(transformers, "Gemma3TextConfig"):
         pytest.skip("transformers does not provide Gemma3TextConfig")
     config = transformers.Gemma3TextConfig(**SMALL_CONFIG, **rope_config)

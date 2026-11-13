@@ -8,7 +8,7 @@ import types
 
 import numpy as np
 import pytest
-from _qwen38_tools_test_utils import load_tools, make_kv_calibration_stubs
+from qwen38_tools_test_utils import load_tools, make_kv_calibration_stubs
 
 onnx = pytest.importorskip("onnx")
 ort = pytest.importorskip("onnxruntime")

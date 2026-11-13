@@ -6,7 +6,7 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
-from _builder_test_utils import load_builder_module
+from builder_test_utils import load_builder_module
 
 
 def export_caches(tmp_path, ep="cpu", graph_capture=False, paged=False):

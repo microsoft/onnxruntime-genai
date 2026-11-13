@@ -9,7 +9,7 @@ Covers:
 3. Path safety (`reject_output_overlap`) across all input flags before any file deletion or write.
 4. `model.qwen38_graph` config migration (`migrate_qwen38_graph_config`), INT3 scratch session options, and `runtime_profiles`.
 5. RC5 graph surgery (`SpeculativePrefixCommit` 7-in/3-out, `RouterGateUpProj` fusion, `QMoE` `(x, y, z)` rewriting, context tiers).
-6. Unified GPU + QMoE offload readiness (`_qwen38_qmoe_offload_contract` simulation for INT4, INT3, INT2, NVFP4, and STRP v1 plans).
+6. Unified GPU + QMoE offload readiness (`qwen38_qmoe_offload_contract` simulation for INT4, INT3, INT2, NVFP4, and STRP v1 plans).
 """
 
 from __future__ import annotations
@@ -33,17 +33,17 @@ import numpy as np
 import onnx
 import pytest
 import torch
-from _qwen38_qmoe_offload_contract import (
+from onnx import TensorProto, helper, numpy_helper
+from qwen38_qmoe_offload_contract import (
     parse_node_overrides,
     simulate_session_creation,
     validate_popularity_file,
 )
-from _qwen38_tools_test_utils import (
+from qwen38_tools_test_utils import (
     REPO_ROOT,
     prefill_chunk_problem,
     unknown_qwen38_graph_keys,
 )
-from onnx import TensorProto, helper, numpy_helper
 
 ALIGN = 4096
 STRP_MAGIC = 0x50525453

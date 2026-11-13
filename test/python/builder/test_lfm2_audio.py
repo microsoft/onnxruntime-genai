@@ -17,7 +17,7 @@ import sys
 import types
 
 import pytest
-from _builder_test_utils import load_builder_module
+from builder_test_utils import load_builder_module
 from test_lfm2_vl import builder_module
 
 base_module = load_builder_module("base")
@@ -27,7 +27,7 @@ LFM2AudioModel = lfm2_module.LFM2AudioModel
 torch = pytest.importorskip("torch")
 transformers = pytest.importorskip("transformers")
 save_file = pytest.importorskip("safetensors.torch").save_file
-# `_builder_test_utils` substitutes a stub for transformers when it is missing, which has none of the
+# `builder_test_utils` substitutes a stub for transformers when it is missing, which has none of the
 # LFM2 classes these tests build a checkpoint from.
 pytestmark = pytest.mark.skipif(
     not hasattr(transformers, "Lfm2ForCausalLM"), reason="transformers does not provide the LFM2 model classes"

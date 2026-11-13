@@ -14,7 +14,7 @@ from unittest import TestCase, main, mock, skipIf
 import numpy as np
 import onnx
 import torch
-from _builder_test_utils import ort_runs_tensor_scatter
+from builder_test_utils import ort_runs_tensor_scatter
 from onnx import TensorProto, helper
 from transformers import GenerationConfig
 

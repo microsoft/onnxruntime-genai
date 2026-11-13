@@ -10,7 +10,7 @@ import onnx
 import onnx_ir as ir
 import onnxruntime as ort
 import pytest
-from _builder_test_utils import load_builder_module, ort_runs_tensor_scatter
+from builder_test_utils import load_builder_module, ort_runs_tensor_scatter
 from onnx import TensorProto, helper, numpy_helper
 from transformers import LlamaConfig
 

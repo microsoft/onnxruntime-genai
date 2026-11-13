@@ -18,7 +18,7 @@ import re
 
 import numpy as np
 import pytest
-from _builder_test_utils import check_node_shapes, load_builder_module, ort_runs_causal_conv_with_state
+from builder_test_utils import check_node_shapes, load_builder_module, ort_runs_causal_conv_with_state
 
 torch = pytest.importorskip("torch")
 onnx = pytest.importorskip("onnx")
@@ -26,7 +26,7 @@ onnx = pytest.importorskip("onnx")
 onnx_utils = pytest.importorskip("onnx.utils")
 ort = pytest.importorskip("onnxruntime")
 if not hasattr(ort, "InferenceSession"):
-    # _builder_test_utils puts an empty onnxruntime module in place when the package is missing.
+    # builder_test_utils puts an empty onnxruntime module in place when the package is missing.
     pytest.skip("onnxruntime is not installed", allow_module_level=True)
 
 lfm2_module = load_builder_module("lfm2")
@@ -35,7 +35,7 @@ LFM2Model = lfm2_module.LFM2Model
 LFM2MoEModel = lfm2_module.LFM2MoEModel
 
 transformers = pytest.importorskip("transformers")
-# `_builder_test_utils` substitutes a stub for transformers when it is missing, which has none of the
+# `builder_test_utils` substitutes a stub for transformers when it is missing, which has none of the
 # LFM2 classes these tests build a model from.
 pytestmark = pytest.mark.skipif(
     not hasattr(transformers, "Lfm2ForCausalLM"), reason="transformers does not provide the LFM2 model classes"
