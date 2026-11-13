@@ -555,6 +555,12 @@ bool GeneratorParams::GetSearchBool(std::string_view name) const {
 }
 
 void GeneratorParams::SetSpeculativeNumber(std::string_view name, double value) {
+  // Bolt uses zero for target-only decoding. Accept it in the public setter
+  // before shared validation rejects it; other models retain the 1..16 bound.
+  if (config.model.type == "nemotron_bolt" && name == "max_draft_tokens" && value == 0) {
+    speculative.max_draft_tokens = 0;
+    return;
+  }
   Generators::SetSpeculativeNumber(speculative, name, value);
 }
 
