@@ -93,13 +93,8 @@ void ValidateNemotronBoltSearch(const GeneratorParams& params) {
           "CUDA graph capture must be enabled for speculative decoding");
 }
 
-size_t NemotronBoltPrefillChunkRows(std::optional<size_t> configured, const char* env_override, size_t capacity) {
-  size_t requested = configured.value_or(0) != 0 ? *configured : kBoltDefaultPrefillChunkRows;
-  if (env_override) {
-    char* end = nullptr;
-    const long long parsed = std::strtoll(env_override, &end, 10);
-    if (end != env_override && *end == '\0' && parsed > 0) requested = static_cast<size_t>(parsed);
-  }
+size_t NemotronBoltPrefillChunkRows(std::optional<size_t> configured, size_t capacity) {
+  const size_t requested = configured.value_or(0) != 0 ? *configured : kBoltDefaultPrefillChunkRows;
   const size_t limit = capacity > kBoltVerifyRows ? capacity - kBoltVerifyRows : 0;
   return std::max(kBoltVerifyRows, std::min(requested, limit));
 }
@@ -359,8 +354,7 @@ Tensor& NemotronBoltState::AddTensor(const std::string& name, bool input, Device
 NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const GeneratorParams& params)
     : State{params, model}, bolt_{model}, request_{std::make_unique<Request>(model, params.search.max_length)} {
   if (model.dynamic_prefill_) {
-    prefill_chunk_rows_ = NemotronBoltPrefillChunkRows(params.search.chunk_size,
-                                                       std::getenv("BOLT_PREFILL_CHUNK_ROWS"), model.capacity_);
+    prefill_chunk_rows_ = NemotronBoltPrefillChunkRows(params.search.chunk_size, model.capacity_);
   }
   const auto& info = model.session_info_;
   verify_inputs_span_ = model.p_device_->Allocate<int32_t>(2 * kBoltVerifyRows + 8);

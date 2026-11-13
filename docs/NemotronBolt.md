@@ -176,9 +176,7 @@ rows per chunk with the standard `search.chunk_size` option, either in `genai_co
 | 1–8 | fixed R8 path |
 | > 8 | that many rows per chunk, capped at the KV capacity minus 8 |
 
-A valid positive `BOLT_PREFILL_CHUNK_ROWS` environment variable overrides `search.chunk_size`
-for every generator created while it is set; an empty, nonpositive or non-numeric value is
-ignored. Fixed `[1, 8]` targets accept only `search.chunk_size <= 8` and reject larger values.
+Fixed `[1, 8]` targets accept only `search.chunk_size <= 8` and reject larger values.
 
 The pinned native H128 Flash attention route partitions split-K work in 128-key tiles using the
 padded endpoint of each R8 call. Crossing a tile boundary inside a speculative

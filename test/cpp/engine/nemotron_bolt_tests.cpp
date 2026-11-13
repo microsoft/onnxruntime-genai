@@ -673,7 +673,7 @@ TEST(NemotronBolt, RejectsUnsupportedSearchInsteadOfIgnoringIt) {
   EXPECT_THROW(CreateSearch(*invalid_sliding), std::runtime_error);
 }
 
-TEST(NemotronBolt, PrefillChunkRowsFollowSearchChunkSizeWithEnvironmentOverride) {
+TEST(NemotronBolt, PrefillChunkRowsFollowSearchChunkSize) {
   constexpr size_t capacity = 135168;
   Config config;
   config.model.type = "nemotron_bolt";
@@ -683,19 +683,14 @@ TEST(NemotronBolt, PrefillChunkRowsFollowSearchChunkSizeWithEnvironmentOverride)
   auto params = std::make_shared<GeneratorParams>(config);
   params->use_graph_capture = true;
   EXPECT_NO_THROW(ValidateNemotronBoltSearch(*params));
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(std::nullopt, nullptr, capacity), kBoltDefaultPrefillChunkRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{0}, nullptr, capacity), kBoltDefaultPrefillChunkRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{2048}, nullptr, capacity), 2048u);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{1}, nullptr, capacity), kBoltVerifyRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{8}, nullptr, capacity), kBoltVerifyRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{1} << 20, nullptr, capacity), capacity - kBoltVerifyRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(std::nullopt, nullptr, 1024), 1024u - kBoltVerifyRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(std::nullopt, nullptr, 12), kBoltVerifyRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{2048}, "1024", capacity), 1024u);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{2048}, "4", capacity), kBoltVerifyRows);
-  for (const char* ignored : {"", "0", "-16", "abc", "512rows"}) {
-    EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{2048}, ignored, capacity), 2048u) << ignored;
-  }
+  EXPECT_EQ(NemotronBoltPrefillChunkRows(std::nullopt, capacity), kBoltDefaultPrefillChunkRows);
+  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{0}, capacity), kBoltDefaultPrefillChunkRows);
+  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{2048}, capacity), 2048u);
+  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{1}, capacity), kBoltVerifyRows);
+  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{8}, capacity), kBoltVerifyRows);
+  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{1} << 20, capacity), capacity - kBoltVerifyRows);
+  EXPECT_EQ(NemotronBoltPrefillChunkRows(std::nullopt, 1024), 1024u - kBoltVerifyRows);
+  EXPECT_EQ(NemotronBoltPrefillChunkRows(std::nullopt, 12), kBoltVerifyRows);
 }
 
 TEST(NemotronBolt, TargetOnlySearchDoesNotRequireCapture) {

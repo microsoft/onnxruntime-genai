@@ -16,10 +16,10 @@ struct NemotronBoltTestAccess;
 inline constexpr size_t kBoltVerifyRows = 8;
 inline constexpr size_t kBoltDefaultPrefillChunkRows = 4096;
 
-// Rows per dynamic-prefill target pass. `configured` is search.chunk_size (genai_config.json or
-// set_search_options); a valid positive BOLT_PREFILL_CHUNK_ROWS overrides it. Values <= 8 select
-// the fixed R8 path; larger values are capped to the KV capacity minus the verification scratch.
-size_t NemotronBoltPrefillChunkRows(std::optional<size_t> configured, const char* env_override, size_t capacity);
+// Rows per dynamic-prefill target pass from search.chunk_size (genai_config.json or set_search_options).
+// Values <= 8 select the fixed R8 path; larger values are capped to the KV capacity minus the
+// verification scratch.
+size_t NemotronBoltPrefillChunkRows(std::optional<size_t> configured, size_t capacity);
 size_t NemotronBoltVerifyPrefixRows(size_t position);
 size_t NemotronBoltVerifyUsableRows(size_t position, size_t capacity, int max_length);
 void ValidateNemotronBoltSearch(const GeneratorParams& params);
