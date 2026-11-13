@@ -4,7 +4,9 @@
 """Keep raw source validation ahead of lossy public ONNX IR conversion."""
 
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import numpy as np
 import onnx
@@ -91,6 +93,66 @@ def test_schema_checker_must_validate_original_source(tmp_path, component_proto)
     onnx.checker.check_model(ir.serde.serialize_model(normalized))
     with pytest.raises(ValueError, match="source is not a valid ONNX model"):
         loader.validate()
+
+
+def test_concurrent_ort_schema_validation_preserves_registration_lifetime(tmp_path, monkeypatch):
+    pytest.importorskip("onnxruntime.capi._pybind_state")
+    if onnx.defs.has("SimplifiedLayerNormalization"):
+        pytest.skip("The standard ONNX registry already provides this operator.")
+    input_value = ir.Value(name="input", type=ir.TensorType(ir.DataType.FLOAT), shape=ir.Shape([1, 4]))
+    scale = ir.Value(name="scale", const_value=ir.tensor(np.ones(4, dtype=np.float32)))
+    output = ir.Value(name="output", type=ir.TensorType(ir.DataType.FLOAT), shape=ir.Shape([1, 4]))
+    graph = ir.Graph(
+        inputs=[input_value],
+        outputs=[output],
+        nodes=[ir.node("SimplifiedLayerNormalization", inputs=[input_value, scale], outputs=[output])],
+        name="concurrent_validation",
+        opset_imports={"": 21},
+    )
+    graph.register_initializer(scale)
+    model = ir.Model(graph, ir_version=10)
+    first_path, second_path = tmp_path / "first.onnx", tmp_path / "second.onnx"
+    ir.save(model, first_path)
+    ir.save(model, second_path)
+    first_inside_checker = Event()
+    second_started = Event()
+    second_inside_checker = Event()
+    release_first = Event()
+    first_finished = Event()
+    original_checker = onnx.checker.check_model
+
+    def coordinated_checker(path, *args, **kwargs):
+        if Path(path) == first_path:
+            first_inside_checker.set()
+            assert release_first.wait(10), "First validator was not released."
+        else:
+            second_inside_checker.set()
+            assert first_finished.wait(10), "First validator did not clean up."
+        return original_checker(path, *args, **kwargs)
+
+    def validate_first():
+        try:
+            ComponentModelLoader(first_path, "first").validate(allow_ort_extensions=True)
+        finally:
+            first_finished.set()
+
+    def validate_second():
+        second_started.set()
+        ComponentModelLoader(second_path, "second").validate(allow_ort_extensions=True)
+
+    monkeypatch.setattr(onnx.checker, "check_model", coordinated_checker)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(validate_first)
+        try:
+            assert first_inside_checker.wait(10), "First validator did not reach the checker."
+            second = executor.submit(validate_second)
+            assert second_started.wait(10), "Second validator did not start."
+            second_inside_checker.wait(1)
+        finally:
+            release_first.set()
+        first.result(timeout=10)
+        second.result(timeout=10)
+    assert not onnx.defs.has("SimplifiedLayerNormalization")
 
 
 def test_external_tensor_remains_lazy_public_ir(tmp_path, component_proto, monkeypatch):
