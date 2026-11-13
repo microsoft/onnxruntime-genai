@@ -2829,15 +2829,22 @@ class Model:
         # state_window=W widens past_conv_state / present_conv_state to [W, B, C, K-1]: the carry
         # states after the last W positions, right-aligned. Slot W-1 is the state after the final
         # position (i.e. what the unwindowed op produces) and is the only slot the op reads.
+        attributes = {
+            "ndim": kwargs.get("ndim", 1),
+            "activation": kwargs.get("activation", "silu"),
+        }
+        # 0 is the legacy unwindowed I/O. Only write the attribute when a window is requested;
+        # ORT 1.28 and earlier reject an unknown state_window even when its value is 0.
+        state_window = self.context_length_attrs["state_window"]
+        if state_window:
+            attributes["state_window"] = state_window
         self.make_node(
             "CausalConvWithState",
             inputs=inputs,
             outputs=[output, kwargs["present_conv_state"]],
             name=name,
             domain="com.microsoft",
-            ndim=kwargs.get("ndim", 1),
-            activation=kwargs.get("activation", "silu"),
-            state_window=self.context_length_attrs["state_window"],
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
         self.make_value(kwargs["present_conv_state"], self.io_dtype, shape=self.output_shapes["present.conv"])
@@ -4918,20 +4925,26 @@ class Model:
         ]
         output = f"{name}/output_0"
 
+        attributes = {
+            "q_num_heads": kwargs["q_num_heads"],
+            "kv_num_heads": kwargs["kv_num_heads"],
+            "update_rule": kwargs.get("update_rule", "gated_delta"),
+            "scale": kwargs.get("scale", 1.0),
+        }
+        # state_window=W widens past/present_recurrent_state to [W, B, H_kv, d_k, d_v]: the
+        # recurrent states after the last W tokens, right-aligned. Slot W-1 is the state after the
+        # final token (i.e. what the unwindowed op produces) and is the only slot the op reads.
+        # Omit the attribute when W is 0 so ORT 1.28 and earlier can still load the unwindowed graph.
+        state_window = self.context_length_attrs["state_window"]
+        if state_window:
+            attributes["state_window"] = state_window
         self.make_node(
             "LinearAttention",
             inputs=inputs,
             outputs=[output, kwargs["present_recurrent_state"]],
             name=name,
             domain="com.microsoft",
-            q_num_heads=kwargs["q_num_heads"],
-            kv_num_heads=kwargs["kv_num_heads"],
-            update_rule=kwargs.get("update_rule", "gated_delta"),
-            scale=kwargs.get("scale", 1.0),
-            # state_window=W widens past/present_recurrent_state to [W, B, H_kv, d_k, d_v]: the
-            # recurrent states after the last W tokens, right-aligned. Slot W-1 is the state after the
-            # final token (i.e. what the unwindowed op produces) and is the only slot the op reads.
-            state_window=self.context_length_attrs["state_window"],
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.linear_value_dim])
 

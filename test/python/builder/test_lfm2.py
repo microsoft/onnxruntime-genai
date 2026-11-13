@@ -511,3 +511,24 @@ def test_lfm2_paged_conv_layers_keep_each_sequence_apart(kind):
 def test_lfm2_paged_conv_layers_need_cuda(kind):
     with pytest.raises(NotImplementedError, match="CUDA only"):
         _build_tiny_lfm2({"use_paged_attention": True}, "webgpu", ir.DataType.FLOAT16, kind=kind)
+
+
+def _causal_conv_nodes(model):
+    return [node for node in model.model.graph if node.op_type == "CausalConvWithState"]
+
+
+def test_lfm2_unwindowed_conv_omits_state_window_attribute():
+    """Default state_window=0 is the legacy unwindowed I/O and must not write the attribute."""
+    model, _ = _build_tiny_lfm2()
+    conv_nodes = _causal_conv_nodes(model)
+    assert conv_nodes
+    for node in conv_nodes:
+        assert "state_window" not in node.attributes
+
+
+def test_lfm2_windowed_conv_writes_state_window_attribute():
+    model, _ = _build_tiny_lfm2(extra_options={"state_window": 8})
+    conv_nodes = _causal_conv_nodes(model)
+    assert conv_nodes
+    for node in conv_nodes:
+        assert node.attributes["state_window"].value == 8
