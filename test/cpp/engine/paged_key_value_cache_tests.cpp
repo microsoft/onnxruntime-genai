@@ -1404,13 +1404,46 @@ TEST(PagedKeyValueCacheManifestTest, SingleBlockPoolKeepsPrefixCachingEnabled) {
 }
 
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsDsparkAuxiliaryState) {
-  auto model = LoadSyntheticPagedModel();
-  auto& batching = *model->config_->engine.dynamic_batching;
-  batching.prefix_caching = true;
-  model->config_->model.dflash2.filename = "dspark.onnx";
-  model->config_->model.dflash2.is_dspark = true;
+  for (int window : {0, 8}) {
+    for (bool explicit_policy : {false, true}) {
+      SCOPED_TRACE(window);
+      SCOPED_TRACE(explicit_policy);
+      auto model = LoadSyntheticPagedModel();
+      auto& batching = *model->config_->engine.dynamic_batching;
+      if (explicit_policy) batching.prefix_caching = true;
+      model->config_->model.dflash2.filename = "dspark.onnx";
+      model->config_->model.dflash2.is_dspark = true;
+      model->config_->model.dflash2.sliding_window = window;
 
-  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+      if (explicit_policy) {
+        EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+      } else {
+        EXPECT_FALSE(MakePagedCache(model)->PrefixCachingEnabled());
+      }
+    }
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, TargetMappedDrafterPreservesTargetStateConstraints) {
+  for (bool fixed_state : {false, true}) {
+    for (bool mtp : {false, true}) {
+      for (bool explicit_policy : {false, true}) {
+        SCOPED_TRACE(fixed_state);
+        SCOPED_TRACE(mtp);
+        SCOPED_TRACE(explicit_policy);
+        auto model = fixed_state ? LoadSyntheticCompositeModel() : LoadSyntheticPagedModel();
+        if (explicit_policy) model->config_->engine.dynamic_batching->prefix_caching = true;
+        model->config_->model.dflash2.filename = "drafter.onnx";
+        model->config_->model.dflash2.sliding_window = 0;
+        if (mtp) model->config_->model.mtp.filename = "head.onnx";
+        if (explicit_policy && (fixed_state || mtp)) {
+          EXPECT_THROW(ResolvePrefixCachingEnabled(model, 1), std::runtime_error);
+        } else {
+          EXPECT_EQ(ResolvePrefixCachingEnabled(model, 1), !fixed_state && !mtp);
+        }
+      }
+    }
+  }
 }
 
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingSupportsFixedAuxiliaryPool) {

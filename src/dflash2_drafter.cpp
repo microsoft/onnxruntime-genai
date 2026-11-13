@@ -527,6 +527,25 @@ std::unique_ptr<State> Dflash2Model::CreateState(DeviceSpan<int32_t>, const Gene
   throw std::logic_error("The DFlash 2 drafter is driven by the Engine and has no State.");
 }
 
+Dflash2Drafter::CacheDescription Dflash2Drafter::DescribeCache(const Config& config) {
+  const auto& drafter = config.model.dflash2;
+  if (drafter.filename.empty()) return {};
+  CacheDescription description;
+  description.layout = drafter.sliding_window > 0 ? CacheDescription::Layout::Ring
+                                                  : CacheDescription::Layout::TargetSized;
+  if (drafter.is_dspark) {
+    description.unsupported_prefix_reason =
+        "Prefix caching does not yet support an Engine-hosted DSpark drafter.";
+  } else if (drafter.sliding_window < 0) {
+    description.unsupported_prefix_reason = "Block-drafter prefix caching requires a non-negative sliding window.";
+  } else {
+    description.prefix_reuse = description.layout == CacheDescription::Layout::Ring
+                                   ? CacheDescription::PrefixReuse::Snapshot
+                                   : CacheDescription::PrefixReuse::TargetBlocks;
+  }
+  return description;
+}
+
 size_t Dflash2Drafter::BytesPerBlock(const Config& config, size_t paged_block_size,
                                      ONNXTensorElementDataType cache_type) {
   const auto& dflash2 = config.model.dflash2;
@@ -546,7 +565,7 @@ size_t Dflash2Drafter::BytesPerBlock(const Config& config, size_t paged_block_si
 size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
                                   size_t max_batch_size) {
   const auto& dflash2 = config.model.dflash2;
-  if (dflash2.filename.empty() || dflash2.sliding_window <= 0) {
+  if (DescribeCache(config).layout != CacheDescription::Layout::Ring) {
     // Full attention is sized against the target's block count through BytesPerBlock().
     return 0;
   }

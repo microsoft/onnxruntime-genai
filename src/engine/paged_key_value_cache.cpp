@@ -117,6 +117,12 @@ ONNXTensorElementDataType KeyValueCacheType(const std::shared_ptr<Model>& model,
   return *common;
 }
 
+bool SupportsTargetMappedPrefix(const Config& config, const Dflash2Drafter::CacheDescription& drafter) {
+  return drafter.prefix_reuse == Dflash2Drafter::CacheDescription::PrefixReuse::TargetBlocks &&
+         !config.model.mtp.IsEnabled() &&
+         !ModelStateManifest{config.model.decoder}.HasFixedStateGroups();
+}
+
 // Layers whose KV cache is a ring sized to the sliding window instead of to the context length.
 // A model qualifies only if it was built with a second block table for them; without it every
 // layer reads the same table and the ring would be indexed as if it were a linear cache.
@@ -145,14 +151,10 @@ std::set<int> WindowedLayers(const std::shared_ptr<Model>& model,
   if (!layers.empty() && decoder.sliding_window->window_size <= 0) {
     throw std::runtime_error("Sliding-window size must be greater than zero.");
   }
-  const auto& dflash2 = model->config_->model.dflash2;
-  const bool target_mapped_dflash =
-      !dflash2.filename.empty() && !dflash2.is_dspark && dflash2.sliding_window == 0 &&
-      !model->config_->model.mtp.IsEnabled() &&
-      !ModelStateManifest{decoder}.HasFixedStateGroups();
-  // Target-mapped DFlash checkpoints restore the rings; legacy prefix retention keeps every layer.
+  const auto drafter = Dflash2Drafter::DescribeCache(*model->config_);
+  // A mapped drafter checkpoint restores the rings; legacy prefix retention keeps every layer.
   if (model->config_->engine.dynamic_batching->prefix_caching.value_or(false) &&
-      !target_mapped_dflash) {
+      !SupportsTargetMappedPrefix(*model->config_, drafter)) {
     return {};
   }
   return layers;
@@ -534,19 +536,14 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
   const auto paged_group =
       ResolvePagedKeyValueGroup(model->config_->model.decoder);
   const auto windowed = WindowedLayers(model, paged_group);
-  const char* unsupported_layout = nullptr;
-  if (!model->config_->model.dflash2.filename.empty() &&
-      model->config_->model.dflash2.is_dspark) {
-    unsupported_layout =
-        "Prefix caching does not yet support an Engine-hosted DSpark drafter.";
-  } else if (auxiliary_bytes_per_block != 0 &&
-             !(!model->config_->model.dflash2.filename.empty() &&
-               model->config_->model.dflash2.sliding_window == 0 &&
-               !model->config_->model.mtp.IsEnabled() &&
-               !ModelStateManifest{model->config_->model.decoder}.HasFixedStateGroups())) {
+  const auto drafter = Dflash2Drafter::DescribeCache(*model->config_);
+  const char* unsupported_layout = drafter.unsupported_prefix_reason;
+  if (!unsupported_layout && auxiliary_bytes_per_block != 0 &&
+      !SupportsTargetMappedPrefix(*model->config_, drafter)) {
     unsupported_layout =
         "Prefix caching does not yet support an auxiliary cache that mirrors target blocks.";
-  } else if (!windowed.empty()) {
+  }
+  if (!unsupported_layout && !windowed.empty()) {
     if (auxiliary_bytes_per_block == 0) return false;
     if (!batching.snapshot_cache.Configured() || !batching.snapshot_cache.Enabled()) {
       throw std::runtime_error(

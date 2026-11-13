@@ -124,7 +124,10 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
   size_t dflash2_pool_blocks = 0;
   size_t dflash2_prefix_checkpoint_bytes = 0;
   bool dflash2_prefix_checkpoints_enabled = false;
-  if (!model->config_->model.dflash2.filename.empty()) {
+  const auto dflash2_cache = Dflash2Drafter::DescribeCache(*model->config_);
+  using DraftCacheLayout = Dflash2Drafter::CacheDescription::Layout;
+  using DraftPrefixReuse = Dflash2Drafter::CacheDescription::PrefixReuse;
+  if (dflash2_cache.layout != DraftCacheLayout::None) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
     }
@@ -155,7 +158,7 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
     model->config_->engine.aux_hidden_states_output_required = true;
     dflash2_pool_blocks = Dflash2Drafter::PoolBlocks(
         *model->config_, paged_block_size, dflash2_max_batch_size);
-    if (dflash2_pool_blocks != 0) {
+    if (dflash2_cache.layout == DraftCacheLayout::Ring) {
       if (batching.num_blocks.has_value()) {
         // Explicit num_blocks bypasses the free-memory probe. CacheManager validates and deducts
         // this fixed pool before either cache pool is allocated.
@@ -185,7 +188,7 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
       }
       dflash2_reserved_memory_bytes += embedding_bytes;
     }
-    if (dflash2_pool_blocks != 0 && mtp_bytes_per_block == 0 && !dflash2.is_dspark &&
+    if (dflash2_cache.prefix_reuse == DraftPrefixReuse::Snapshot && mtp_bytes_per_block == 0 &&
         ModelStateManifest{model->config_->model.decoder}.HasFixedStateGroups() &&
         ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0)) {
       dflash2_prefix_checkpoint_bytes = Dflash2Drafter::PrefixCheckpointBytes(
@@ -273,7 +276,7 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
   if (dflash2_model && !dflash2_drafter) {
     const size_t paged_block_size =
         static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
-    if (dflash2_pool_blocks != 0) {
+    if (dflash2_cache.layout == DraftCacheLayout::Ring) {
       dflash2_drafter = std::make_unique<Dflash2Drafter>(
           dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size);
     } else {
@@ -287,7 +290,8 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
     }
   }
   cache_manager->InitializeSnapshotCache(snapshot_cache);
-  if (dflash2_drafter && dflash2_bytes_per_block != 0 && cache_manager->PrefixCachingEnabled()) {
+  if (dflash2_drafter && dflash2_cache.prefix_reuse == DraftPrefixReuse::TargetBlocks &&
+      cache_manager->PrefixCachingEnabled()) {
     dflash2_drafter->UseTargetBlockTables(cache_manager->Snapshot().total_blocks);
     dflash2_prefix_checkpoints_enabled = true;
   }

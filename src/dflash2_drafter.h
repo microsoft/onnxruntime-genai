@@ -135,6 +135,21 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
  * discarded. That is also what fills the cache, so there is no separate cache-store op.
  */
 struct Dflash2Drafter {
+  struct CacheDescription {
+    enum class Layout { None,
+                        Ring,
+                        TargetSized };
+    enum class PrefixReuse { None,
+                             Snapshot,
+                             TargetBlocks };
+    Layout layout{Layout::None};
+    PrefixReuse prefix_reuse{PrefixReuse::None};
+    const char* unsupported_prefix_reason{};
+  };
+
+  // Available before allocating either pool; target-state compatibility is resolved separately.
+  static CacheDescription DescribeCache(const Config& config);
+
   /**
    * @brief One request's contribution to a step.
    *
