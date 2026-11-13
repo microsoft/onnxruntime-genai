@@ -384,7 +384,7 @@ def build_gguf_package(
 
     # Validate PLE specification, engram GGUF, and all model GGUF shards before modifying out_dir
     ple_spec = read_ple_table_spec(base_pkg / "ple_table.txt" if (base_pkg / "ple_table.txt").is_file() else None)
-    engram_dst_name, ple_format, ple_row_bytes, engram_doff = validate_engram_gguf(engram_gguf, ple_spec)
+    engram_dst_name, ple_format, ple_row_bytes, engram_tensor_offset = validate_engram_gguf(engram_gguf, ple_spec)
 
     parsed_shards: list[tuple[Path, list[dict]]] = []
     for shard_path in sorted(gguf_dir.glob("*.gguf")):
@@ -431,7 +431,7 @@ def build_gguf_package(
 
     # 3. Write ple_table.txt pointing directly to engram GGUF. GGUF blocks carry their own fp16 scales, so the table names
     #    its format and has no scale line (a scale of -8.0 or -20.0 alone would read as INT8).
-    ple_lines = format_gguf_ple_table_lines(engram_dst_name, ple_format, engram_doff, ple_row_bytes, ple_spec)
+    ple_lines = format_gguf_ple_table_lines(engram_dst_name, ple_format, engram_tensor_offset, ple_row_bytes, ple_spec)
     (out_dir / "ple_table.txt").write_text("\n".join(ple_lines) + "\n")
 
     # 4. Convert small weights from GGUF + copy RoPE/indexer caches into output-owned blobs

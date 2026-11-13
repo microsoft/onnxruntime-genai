@@ -87,8 +87,13 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   | `_32k` | 33032 |
   | `_64k` | 65800 |
   | `_128k` | 133128 |
+  | `_256k` | 262152 |
 
-  Other names, including `model_dynamic_ctx.onnx`, use the configured `model.qwen38_graph.kv_capacity` for the estimate.
+  Other names, including `model.onnx` and `model_dynamic_ctx.onnx`, are estimated from the target ONNX graph's declared
+  cache shapes, read from the protobuf before the session exists without loading any initializer. A graph that declares a
+  static KV length uses that length. A graph whose cache lengths are symbolic uses the tier named by an explicit
+  `ORT_QWEN38_CONTEXT_LENGTH` (a tier such as `2k` or its token count); without that variable, or when the graph cannot be
+  parsed (for example an ORT-format model), the estimate uses the configured `model.qwen38_graph.kv_capacity`.
   The loaded graph remains authoritative for execution capacity. With model logging enabled, adaptive offload reports
   a capacity mismatch, but cannot resize budgets on an already-created session. Different cache layouts/dtypes or padding
   require disabling adaptive budgets and configuring suitable explicit budgets; this estimate does not guarantee that a
