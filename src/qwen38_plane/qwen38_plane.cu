@@ -693,6 +693,8 @@ static inline void host_gather_ple_rows_batch(StagedPleWorkspace& ws, int rows, 
 
   if (num_misses > 0) {
 #ifdef _WIN32
+    // The gathered rows stay in the working set: they are clean file-backed pages that the memory manager trims under memory
+    // pressure, so aging them out with a VirtualUnlock call per row is not worth its cost on every step.
     if (num_misses > 1) {
       (void)PrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR)num_misses, ranges, 0);
     }
@@ -815,6 +817,7 @@ struct PleGatherPool {
       }
 
 #ifdef _WIN32
+      // The rows stay in the working set, as in host_gather_ple_rows_batch.
       if (!ranges.empty()) {
         (void)PrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR)ranges.size(), ranges.data(), 0);
       }

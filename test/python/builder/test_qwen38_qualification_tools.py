@@ -1160,7 +1160,10 @@ def test_windows_loading_clears_posix_only_plane_so_and_ignores_duplicate_ep_reg
     monkeypatch.setattr(util, "os", types.SimpleNamespace(name="nt", environ={}, add_dll_directory=lambda path: path))
     monkeypatch.setattr(util.og, "register_execution_provider_library", register_ep, raising=False)
     monkeypatch.setattr(
-        util.og, "Config", lambda path: types.SimpleNamespace(overlay=lambda raw: overlays.append(json.loads(raw))), raising=False
+        util.og,
+        "Config",
+        lambda path: types.SimpleNamespace(overlay=lambda raw: overlays.append(json.loads(raw))),
+        raising=False,
     )
     monkeypatch.setattr(util.og, "Model", lambda config: config, raising=False)
 

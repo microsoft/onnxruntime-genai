@@ -152,3 +152,69 @@ def prefill_chunk_problem(section):
     if enabled:
         return None if chunk <= section.get("kv_capacity", 0) else f"prefill.chunk {chunk} exceeds kv_capacity"
     return None if chunk % 2 == 0 else f"prefill.chunk {chunk} is odd while prefill.enabled is false"
+
+
+_NO_MEMORY_BOUND = 2**64 - 1
+
+
+def _eligibilities_intersect(a, b):
+    """``EligibilitiesIntersect`` of ``src/config.cpp``: whether one device could satisfy both eligibility objects."""
+
+    def lower(key):
+        return max(a.get(key, 0), b.get(key, 0))
+
+    def upper(key):
+        return min(a.get(key, _NO_MEMORY_BOUND), b.get(key, _NO_MEMORY_BOUND))
+
+    minimum_free = lower("minimum_free_device_memory_bytes")
+    maximum_total = upper("maximum_total_device_memory_bytes")
+    maximum_host = upper("maximum_effective_host_memory_bytes")
+    integrated = (a.get("is_integrated"), b.get("is_integrated"))
+    return (
+        lower("minimum_total_device_memory_bytes") <= maximum_total
+        and minimum_free <= upper("maximum_free_device_memory_bytes")
+        and minimum_free <= maximum_total
+        and lower("minimum_effective_host_memory_bytes") <= maximum_host
+        and lower("minimum_available_host_memory_bytes") <= maximum_host
+        and (None in integrated or integrated[0] == integrated[1])
+    )
+
+
+def runtime_profiles_problem(profiles):
+    """Returns why the engine's ``ValidateRuntimeProfiles`` (``src/config.cpp``) rejects ``runtime_profiles``, or None.
+
+    Every profile needs a unique id and ``minimum_total_device_memory_bytes``, no maximum may be below its minimum,
+    and no device may satisfy the eligibility of two profiles.
+    """
+    ids = set()
+    for profile in profiles:
+        profile_id = profile.get("id")
+        if not profile_id:
+            return "runtime profile id must not be empty"
+        if profile_id in ids:
+            return f"duplicate runtime profile id: {profile_id}"
+        ids.add(profile_id)
+        eligibility = profile.get("eligibility", {})
+        if "minimum_total_device_memory_bytes" not in eligibility:
+            return f"runtime profile '{profile_id}' is missing minimum_total_device_memory_bytes"
+        for kind in ("total_device", "free_device", "effective_host"):
+            if eligibility.get(f"maximum_{kind}_memory_bytes", _NO_MEMORY_BOUND) < eligibility.get(
+                f"minimum_{kind}_memory_bytes", 0
+            ):
+                return f"runtime profile '{profile_id}' has maximum_{kind}_memory_bytes below its minimum"
+        if eligibility.get("minimum_free_device_memory_bytes", 0) > eligibility.get(
+            "maximum_total_device_memory_bytes", _NO_MEMORY_BOUND
+        ):
+            return f"runtime profile '{profile_id}' requires more free device memory than its maximum total"
+        if eligibility.get("minimum_available_host_memory_bytes", 0) > eligibility.get(
+            "maximum_effective_host_memory_bytes", _NO_MEMORY_BOUND
+        ):
+            return (
+                f"runtime profile '{profile_id}' requires more available host memory "
+                "than its maximum effective host memory"
+            )
+    for index, first in enumerate(profiles):
+        for second in profiles[index + 1 :]:
+            if _eligibilities_intersect(first["eligibility"], second["eligibility"]):
+                return f"runtime profile eligibility ranges overlap: '{first['id']}' and '{second['id']}'"
+    return None

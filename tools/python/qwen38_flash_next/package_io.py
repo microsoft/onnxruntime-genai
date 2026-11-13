@@ -928,9 +928,11 @@ def default_gguf_runtime_profiles(
             "overlay": make_overlay(GGUF_NUM_BLOCKS_256K, prefill_chunk_long),
         },
         # Unified-memory GPUs report host RAM as total device memory, so their tiers are gated on free device memory.
+        # The engine requires minimum_total_device_memory_bytes on every profile; free memory never exceeds total memory.
         {
             "id": "integrated-gpu-32k",
             "eligibility": {
+                "minimum_total_device_memory_bytes": min_32k,
                 "minimum_free_device_memory_bytes": min_32k,
                 "maximum_free_device_memory_bytes": min_64k - 1,
                 "is_integrated": True,
@@ -940,6 +942,7 @@ def default_gguf_runtime_profiles(
         {
             "id": "integrated-gpu-64k",
             "eligibility": {
+                "minimum_total_device_memory_bytes": min_64k,
                 "minimum_free_device_memory_bytes": min_64k,
                 "maximum_free_device_memory_bytes": min_128k - 1,
                 "is_integrated": True,
@@ -949,6 +952,7 @@ def default_gguf_runtime_profiles(
         {
             "id": "integrated-gpu-128k",
             "eligibility": {
+                "minimum_total_device_memory_bytes": min_128k,
                 "minimum_free_device_memory_bytes": min_128k,
                 "maximum_free_device_memory_bytes": min_256k - 1,
                 "is_integrated": True,
@@ -958,6 +962,7 @@ def default_gguf_runtime_profiles(
         {
             "id": "integrated-gpu-256k",
             "eligibility": {
+                "minimum_total_device_memory_bytes": min_256k,
                 "minimum_free_device_memory_bytes": min_256k,
                 "is_integrated": True,
             },

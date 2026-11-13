@@ -205,11 +205,16 @@ def _link_package_asset(link_path: Path, target: Path) -> None:
             _winapi.CreateJunction(str(target), str(link_path))
         else:
             os.link(target, link_path)
-def _needs_windows_builtin_plane_overlay(
-    package: Path, package_config: dict, *overlays: dict | None, is_windows: bool | None = None
-) -> bool:
-    """Return True on Windows when `plane_library` names an existing `.so` with no `.dll` alias and no overlay overrides it."""
-    if not (os.name == "nt" if is_windows is None else is_windows):
+
+
+def _needs_windows_builtin_plane_overlay(package: Path, package_config: dict, *overlays: dict | None) -> bool:
+    """Return True on Windows when `plane_library` names an existing `.so` with no `.dll` alias and no overlay sets it.
+
+    The engine loads such a `.so` as configured, which fails on Windows (see ResolveWindowsSharedLibraryPath in
+    src/models/qwen38_graph_plane.cpp, whose `.dll` aliases this mirrors); an empty `plane_library` selects the
+    built-in plane instead.
+    """
+    if os.name != "nt":
         return False
     for doc in overlays:
         if isinstance(doc, dict) and "plane_library" in doc.get("model", {}).get("qwen38_graph", {}):
