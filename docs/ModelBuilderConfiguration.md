@@ -251,7 +251,7 @@ With a CUDA-enabled GenAI build and ORT built with INT4 KV-cache support, this i
 
 ```bash
 ORTGENAI_PAGED_CUDA_GRAPH_MODEL="$PWD/package" python -m pytest -q \
-  test/python/test_onnxruntime_genai_engine_cuda_graph.py -k runtime_profile_kv_variants
+  test/python/engine/test_onnxruntime_genai_engine_cuda_graph.py -k runtime_profile_kv_variants
 ```
 
 ### Component Options

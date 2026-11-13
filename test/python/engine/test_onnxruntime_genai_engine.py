@@ -23,10 +23,10 @@ from onnxruntime.capi import _pybind_state
 
 register_plugin_providers(logging.getLogger(__name__))
 
-_MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged"
-_DRAFT_MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged-per-token"
+_MODEL_DIR = Path(__file__).resolve().parents[2] / "models" / "engine" / "synthetic-paged"
+_DRAFT_MODEL_DIR = Path(__file__).resolve().parents[2] / "models" / "engine" / "synthetic-paged-per-token"
 _SELECTED_LOGITS_MODEL_DIR = (
-    Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged-selected-logits"
+    Path(__file__).resolve().parents[2] / "models" / "engine" / "synthetic-paged-selected-logits"
 )
 
 _VOCAB_SIZE = 64

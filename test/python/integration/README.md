@@ -1,6 +1,9 @@
 # ORT GenAI integration tests
 
-Real-model integration tests for ONNX Runtime GenAI. The same test code
+Non-Engine integration tests for ONNX Runtime GenAI, including runtime,
+example, benchmark-runner, packaging, and Foundry Local model checks.
+Engine tests and runners live in `test/python/engine/`, including the
+real-model tests described below. The same Foundry Local test code
 runs in the ADO `integration-tests` pipeline and on a contributor
 machine; only the model source differs.
 
@@ -18,10 +21,13 @@ test/python/integration/
   models.py                  # MODELS catalog + suite lists + PINNED_VERSIONS
   resolver.py                # get_path_for(model, device) -> Path
   suite_paths.py             # blob prefix for one (model, device) pair
-  conftest.py                # --model, --execution-provider, --model-root, --run-engine-tests
+  conftest.py                # Foundry Local model/device parametrization and fixtures
   test_integration_text.py   # text-generation test (text pipeline)
-  test_integration_engine.py # paged-attention Engine test (Engine stage)
 ```
+
+Shared command-line options, including `--model`, `--execution-provider`,
+`--model-root`, and `--run-engine-tests`, are registered in
+`test/python/conftest.py` so both integration and Engine tests can use them.
 
 ## Running locally
 
@@ -34,13 +40,13 @@ exact shape of the `foundrylocalmodels/models` blob container, minus the
 pip install -r test/python/requirements.txt
 pip install pytest
 
-# all models that support cpu
-python -m pytest test/python/integration -sv \
+# all Foundry Local models that support cpu
+python -m pytest test/python/integration/test_integration_text.py -sv \
     --model-root /path/to/models \
     --execution-provider cpu
 
 # a single model on cuda
-python -m pytest test/python/integration -sv \
+python -m pytest test/python/integration/test_integration_text.py -sv \
     --model-root /path/to/models \
     --execution-provider cuda \
     --model qwen3-0.6b
@@ -69,7 +75,7 @@ test.
 
 ## Paged-attention Engine test
 
-`test_integration_engine.py` drives the continuous-batching `og.Engine`
+`../engine/test_integration_engine.py` drives the continuous-batching `og.Engine`
 end to end against `qwen2.5-0.5b-instruct-paged`. It asserts bounded
 generation, simultaneous and staggered request isolation, stop conditions,
 request removal, and engine reuse. It does **not** measure performance,
@@ -85,10 +91,10 @@ build's paged KV cache sizes its block pool from free GPU memory.
 ### How it is selected
 
 The module is marked `engine` and is **skipped unless `--run-engine-tests`
-is passed** (registered in `conftest.py`). The text pipeline collects the
-whole directory but never passes that flag, so the Engine test stays inert
-there and does not require the paged artifact - existing tests are
-unaffected.
+is passed** (registered in `test/python/conftest.py`). The text pipeline selects
+`integration/test_integration_text.py` and does not require
+the paged artifact. Collecting `engine/` without the flag still skips this
+opt-in real-model module, but not the unmarked Engine tests.
 
 It runs as the separate `integration_engine_test_linux_x64` stage in the
 existing `.pipelines/integration-tests.yml` pipeline. The stage depends on
@@ -98,7 +104,7 @@ existing integration jobs, and reuses the shared pytest setup.
 Run it locally with the flag (CUDA required):
 
 ```bash
-python -m pytest test/python/integration/test_integration_engine.py -sv \
+python -m pytest test/python/engine/test_integration_engine.py -sv \
     --run-engine-tests \
     --model-root /path/to/models \
     --execution-provider cuda
@@ -156,7 +162,7 @@ accumulation at verification query widths. Explicit `0`/`1` provider options tak
 precedence. Compare eager with the same precision option; non-DFlash2 models
 retain the existing batching-based default.
 
-`run_qwen38_webgpu_engine.py --dflash2` keeps the single-request smoke runs and
+`../engine/run_qwen38_webgpu_engine.py --dflash2` keeps the single-request smoke runs and
 also runs two concurrent requests with `max_batch_size=2`, unequal prompt lengths,
 and unequal generation budgets. Its answer patterns, activity counters, and
 provider checks do not imply token-for-token eager/DFlash2 equivalence. Answer
@@ -164,7 +170,7 @@ patterns are not relaxed to accommodate numerical differences. The two-request
 case can use an existing export without rebuilding it:
 
 ```bash
-python -m pytest test/python/integration/test_dflash2_webgpu_precision.py -sv \
+python -m pytest test/python/engine/test_dflash2_webgpu_precision.py -sv \
     --dflash2-webgpu-model /path/to/qwen38-webgpu-dflash2 \
     -k two_request_partial_replay_activity_smoke
 ```
@@ -189,7 +195,7 @@ test.
 ### Same-shape target correctness
 
 ```bash
-python -m pytest test/python/integration/test_dflash2_webgpu_precision.py -sv \
+python -m pytest test/python/engine/test_dflash2_webgpu_precision.py -sv \
     --dflash2-webgpu-model /path/to/qwen38-webgpu-dflash2 \
     -k target_verification_matches_same_shape_eager
 ```
@@ -226,7 +232,7 @@ Engine restructuring is added here.
 ### Counting-query precision and full-token regressions
 
 ```bash
-python -m pytest test/python/integration/test_dflash2_webgpu_precision.py -sv \
+python -m pytest test/python/engine/test_dflash2_webgpu_precision.py -sv \
     --dflash2-webgpu-model /path/to/qwen38-webgpu-dflash2 \
     -k 'counting_target_query_widths or greedy_token_sequences'
 ```

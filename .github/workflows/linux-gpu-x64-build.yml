@@ -213,7 +213,7 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install --index-url ${{ env.ORT_EP_PYPI_SOURCE }} onnxruntime-ep-cuda12==${{ env.ORT_EP_PYPI_VERSION }} --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/Release/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ORT_CUDA_PLUGIN_EP_PATH=/ort_genai_src/ort/ep/libonnxruntime_providers_cuda.so \
-                ${{ env.PYTHON_EXECUTABLE }} -m pytest -sv test/python/test_onnxruntime_genai_engine.py && \
+                ${{ env.PYTHON_EXECUTABLE }} -m pytest -sv test/python/engine/test_onnxruntime_genai_engine.py && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"
 
       # Needs ORT #33817 (routing/per-key KDA) and #33954 (post-SiLU clipping), included in the pinned 1.32.0.dev20261110001 nightly.

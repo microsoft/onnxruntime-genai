@@ -66,6 +66,13 @@ ctest --build-config Release --output-on-failure
 
 ## Code Patterns & Conventions
 
+### ONNX Runtime API Wrappers
+
+Use the C++ wrapper methods defined in `src/models/onnxruntime_inline.h` rather
+than calling `Ort::api->method_name` directly at call sites. If a needed method
+has no wrapper, add one in `onnxruntime_inline.h` using the existing wrapper
+and error-propagation patterns, then call that wrapper.
+
 ### Device Interface Pattern
 
 Each hardware backend implements `DeviceInterface` (defined in `src/smartptrs.h`):
@@ -155,12 +162,50 @@ The repo supports specific model architectures - check `src/models/model_type.h`
 
 ## Testing Strategy
 
-Tests are organized by language binding:
-- **C++ tests**: `test/` directory, focused on core API validation
-- **Python tests**: `test/python/`, includes end-to-end model testing
-- **Platform tests**: Android/iOS tests run via emulator/simulator
+Store tests according to `test/README.md`; do not add uncategorized test files:
+- **C++ tests**: `test/cpp/` for core API/runtime validation; use its `engine/`,
+  CUDA, drafter, and `telemetry/` subfolders for the corresponding tests.
+- **C# tests**: `test/csharp/`.
+- **Build checks**: `test/cmake/`, with fixtures in the relevant subfolder.
+- **Python builder tests**: `test/python/builder/` for builder, export, and quantization behavior.
+- **Python Engine tests**: `test/python/engine/` for all Engine tests and runners,
+  including synthetic-model and real-model integration tests.
+- **Python integration tests**: `test/python/integration/` for non-Engine
+  cross-component, runtime, example, packaging, and Foundry Local integration tests.
+- **Python model tests**: `test/python/models/` for model-specific behavior and loaders.
+- **Model creation scripts**: `test/python/create/`, named `create_*.py`.
+- **Model assets and configurations**: `test/models/<model_name>/`; Engine
+  fixtures go in `test/models/engine/<model_name>/`. Do not create `test/configs/`.
+- **Media/tool fixtures**: `test/audios/`, `test/images/`, and `test/tool-definitions/`.
+- **Platform tests**: `test/platform/`, with platform-specific subfolders;
+  Android/iOS tests run via emulator/simulator.
+
+Only `README.md`, `_test_utils.py`, `conftest.py`, `requirements.txt`,
+`special_tokens.py`, `test_onnxruntime_genai.py`,
+`test_onnxruntime_genai_api.py`, and `test_onnxruntime_genai_e2e.py` may remain
+directly under `test/python/`. Place other Python files in the appropriate
+category, including category-specific helpers. Keep provider dependency
+requirements in the existing `cpu/`, `cuda/`, `directml/`, `macos/`, and
+`webgpu/` subfolders.
+
+When relocating tests, update imports, relative fixture paths, test runners,
+CI commands, and documentation so discovery and execution continue to work.
 
 Always test with actual model files from `test/models/` directory rather than mock data.
+
+## Test Placement Review Rules
+
+During automated pull-request reviews, check every added or relocated test,
+creation script, helper, and fixture against the Testing Strategy above and
+`test/README.md`. Flag files in the wrong category or outside the allowed
+top-level Python file list, and identify the correct destination explicitly.
+Engine-related Python tests must be in `test/python/engine/`, even when they
+are integration tests; creation scripts must be in `test/python/create/`.
+Model configurations belong with model assets under `test/models/`.
+
+Also flag stale imports, relative asset paths, test-runner selections, CI
+commands, or documentation caused by relocations. Apply these placement checks
+to test changes in every pull request, not only model-builder changes.
 
 ## Model Builder Review Rules
 

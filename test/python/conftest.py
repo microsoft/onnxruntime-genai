@@ -18,6 +18,56 @@ def pytest_addoption(parser):
         type=str,
         default=None,
     )
+    from integration import models  # noqa: PLC0415
+
+    group = parser.getgroup("integration")
+    group.addoption(
+        "--model-root",
+        action="store",
+        default=None,
+        help="Root directory containing the foundrylocalmodels layout (overrides ORTGENAI_MODEL_ROOT).",
+    )
+    group.addoption(
+        "--model",
+        action="append",
+        default=[],
+        choices=list(models.MODELS),
+        help="Logical model id to test (repeatable). Defaults to every entry in MODELS.",
+    )
+    group.addoption(
+        "--execution-provider",
+        action="append",
+        default=[],
+        choices=list(models.DEVICE_DIRNAMES),
+        help="Execution providers to test (repeatable). Defaults to cpu only.",
+    )
+    group.addoption(
+        "--dflash2-webgpu-model",
+        default=None,
+        help="Exported paged Qwen3.8 WebGPU DFlash2 model directory for opt-in precision, token and activity tests.",
+    )
+    group.addoption(
+        "--run-engine-tests",
+        action="store_true",
+        default=False,
+        help="Run the opt-in real-model Engine tests in engine/test_integration_engine.py.",
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "engine: paged-attention Engine integration test; opt in with --run-engine-tests.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-engine-tests"):
+        return
+    skip_engine = pytest.mark.skip(reason="Engine integration tests are opt-in; pass --run-engine-tests.")
+    for item in items:
+        if item.get_closest_marker("engine") is not None:
+            item.add_marker(skip_engine)
 
 
 def get_path_for_model(data_path, model_name, precision, device):

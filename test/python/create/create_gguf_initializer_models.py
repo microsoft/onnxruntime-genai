@@ -65,7 +65,7 @@ def create_large_model(output_path, count=64):
 
 
 if __name__ == "__main__":
-    output_dir = Path(__file__).parents[1] / "models" / "gguf-initializers"
+    output_dir = Path(__file__).parents[2] / "models" / "gguf-initializers"
     output_dir.mkdir(parents=True, exist_ok=True)
     create_model(output_dir / "model.onnx")
     create_model(output_dir / "scalar.onnx", scalar=True)

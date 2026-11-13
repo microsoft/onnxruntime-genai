@@ -96,5 +96,5 @@ def create_model(output_dir, declare_context=True):
 
 
 if __name__ == "__main__":
-    create_model(Path(__file__).parents[1] / "models" / "longrope-context")
-    create_model(Path(__file__).parents[1] / "models" / "longrope-context-without-metadata", declare_context=False)
+    create_model(Path(__file__).parents[2] / "models" / "longrope-context")
+    create_model(Path(__file__).parents[2] / "models" / "longrope-context-without-metadata", declare_context=False)

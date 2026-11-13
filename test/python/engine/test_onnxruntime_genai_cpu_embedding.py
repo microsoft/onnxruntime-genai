@@ -96,7 +96,7 @@ def test_cpu_embedding_matches_gpu_and_eager(batch_size, prompt_length):
 @pytest.mark.parametrize("device", _DEVICES)
 def test_cpu_embedding_engine_synthetic(tmp_path, device, monkeypatch):
     """Exercise the native lookup and embedding-only target binding on a tiny model."""
-    original = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged"
+    original = Path(__file__).resolve().parents[2] / "models" / "engine" / "synthetic-paged"
     exported = tmp_path / "exported"
     shutil.copytree(original, exported)
     graph = onnx.load(original / "decoder.onnx")
@@ -119,7 +119,7 @@ def test_cpu_embedding_engine_synthetic(tmp_path, device, monkeypatch):
         graph.graph.node.insert(0, node)
     onnx.save(graph, exported / "decoder.onnx")
 
-    builder_root = Path(__file__).resolve().parents[2] / "src" / "python" / "py" / "models"
+    builder_root = Path(__file__).resolve().parents[3] / "src" / "python" / "py" / "models"
     monkeypatch.syspath_prepend(str(builder_root))
     from builders.base import Model  # noqa: PLC0415
 

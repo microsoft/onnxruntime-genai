@@ -25,7 +25,7 @@ parameters:
   type: string
 - name: testPath
   type: string
-  default: 'test/python/integration'
+  default: 'test/python/integration/test_integration_text.py'
 - name: extraPytestArgs
   type: string
   default: ''

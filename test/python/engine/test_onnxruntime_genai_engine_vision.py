@@ -14,7 +14,7 @@ import onnxruntime_genai as og
 import pytest
 from PIL import Image
 
-IMAGE_DIR = Path(__file__).resolve().parents[1] / "images"
+IMAGE_DIR = Path(__file__).resolve().parents[2] / "images"
 IMAGE_MARKER = "<|vision_start|><|image_pad|><|vision_end|>\n"
 
 

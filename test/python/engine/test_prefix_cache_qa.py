@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "examples" / "python" / "engine" / "prefix-cache-qa.py"
+_SCRIPT = Path(__file__).resolve().parents[3] / "examples" / "python" / "engine" / "prefix-cache-qa.py"
 _SPEC = importlib.util.spec_from_file_location("prefix_cache_qa", _SCRIPT)
 qa = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = qa

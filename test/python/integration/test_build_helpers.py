@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.mark.parametrize("strip_install", [False, True])

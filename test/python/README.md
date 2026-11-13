@@ -8,7 +8,7 @@ python -m pytest -sv test_onnxruntime_genai_api.py -k "test_greedy_search" --tes
 
 For real Qwen38 Flash CUDA graph ownership tests, set `ORT_QWEN38_TEST_MODEL`
 to an exported package with CUDA graph capture enabled, then run
-`python -m pytest -sv test_qwen38_graph_lifecycle.py`. For a plugin CUDA
+`python -m pytest -sv engine/test_qwen38_graph_lifecycle.py`. For a plugin CUDA
 provider not registered by the test environment, also set
 `ORT_QWEN38_TEST_CUDA_PLUGIN` to its shared library path. These tests serialize
 Engine ownership across repeated main/worker/main handoffs and a loader thread
