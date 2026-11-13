@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -20,6 +21,15 @@ std::unique_ptr<T> AdoptOutput(T*& slot) {
   std::unique_ptr<T> owned{slot};
   slot = nullptr;
   return owned;
+}
+
+std::string ShapeString(std::span<const int64_t> shape) {
+  std::string result{"["};
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i > 0) result += ", ";
+    result += std::to_string(shape[i]);
+  }
+  return result + "]";
 }
 }  // namespace
 
@@ -47,6 +57,52 @@ void ValidateMoonshineInt64Input(const std::string& name, ONNXTensorElementDataT
   if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
     throw std::runtime_error(
         "Moonshine streaming: integer input '" + name + "' must be int64.");
+}
+
+int ValidateMoonshineSequenceOutputShape(std::string_view name,
+                                         const std::vector<int64_t>& shape,
+                                         size_t element_count,
+                                         int expected_width) {
+  if (shape.size() != 3 || expected_width <= 0 ||
+      shape[0] != 1 || shape[1] < 0 || shape[1] > std::numeric_limits<int>::max() ||
+      shape[2] != expected_width) {
+    throw std::runtime_error(std::string{name} + " must have shape [1, frames, " +
+                             std::to_string(expected_width) + "]");
+  }
+
+  const size_t frames = static_cast<size_t>(shape[1]);
+  const size_t width = static_cast<size_t>(expected_width);
+  if (frames > std::numeric_limits<size_t>::max() / width ||
+      element_count != frames * width) {
+    throw std::runtime_error(std::string{name} + " element count does not match its expected shape");
+  }
+
+  return static_cast<int>(shape[1]);
+}
+
+void ValidateMoonshineCrossKvOutputShape(std::string_view name,
+                                         const std::vector<int64_t>& shape,
+                                         size_t element_count,
+                                         int layers,
+                                         int heads,
+                                         int frames,
+                                         int head_size) {
+  const auto expected = std::array<int64_t, 5>{layers, 1, heads, frames, head_size};
+  if (layers <= 0 || heads <= 0 || frames <= 0 || head_size <= 0 ||
+      !std::equal(shape.begin(), shape.end(), expected.begin(), expected.end())) {
+    throw std::runtime_error(std::string{name} + " must have shape " + ShapeString(expected) +
+                             ", got " + ShapeString(shape));
+  }
+
+  size_t expected_count = 1;
+  for (const int64_t dimension : expected) {
+    const size_t value = static_cast<size_t>(dimension);
+    if (expected_count > std::numeric_limits<size_t>::max() / value)
+      throw std::runtime_error(std::string{name} + " element count overflows size_t");
+    expected_count *= value;
+  }
+  if (element_count != expected_count)
+    throw std::runtime_error(std::string{name} + " element count does not match its expected shape");
 }
 
 void MoonshineConfig::PopulateFromConfig(const Config& config) {
@@ -664,9 +720,13 @@ void MoonshineStreamingState::RunFrontendAndAccumulate(const float* audio, size_
     frontend_state_->frame_count_ = AdoptOutput(frontend_state_->outputs_[5]);
     frontend_state_->UpdateStateInputs();
 
-    auto fshape = features->GetTensorTypeAndShapeInfo()->GetShape();
-    if (fshape.size() >= 3 && fshape[1] > 0) {
-      const int new_features = static_cast<int>(fshape[1]);
+    auto feature_info = features->GetTensorTypeAndShapeInfo();
+    const int new_features = ValidateMoonshineSequenceOutputShape(
+        "Moonshine frontend output", feature_info->GetShape(),
+        feature_info->GetElementCount(), encoder_dim);
+    if (new_features > 0) {
+      if (new_features > std::numeric_limits<int>::max() - frontend_frames_produced_)
+        throw std::runtime_error("Moonshine frontend frame count overflows int");
       const float* fdata = features->GetTensorData<float>();
       accumulated_features_.insert(accumulated_features_.end(), fdata,
                                    fdata + static_cast<size_t>(new_features) * encoder_dim);
@@ -700,6 +760,14 @@ void MoonshineStreamingState::RunFrontendAndAccumulate(const float* audio, size_
   auto encoded = AdoptOutput(encoder_state_->outputs_[0]);
 
   // Slice [:, start_idx : start_idx + new_frames] from encoded - remove lookahead.
+  auto encoded_info = encoded->GetTensorTypeAndShapeInfo();
+  const int encoded_frames = ValidateMoonshineSequenceOutputShape(
+      "Moonshine encoder output", encoded_info->GetShape(),
+      encoded_info->GetElementCount(), encoder_dim);
+  if (start_idx < 0 || start_idx > encoded_frames ||
+      new_frames > encoded_frames - start_idx)
+    throw std::runtime_error("Moonshine encoder output does not contain the requested frame range");
+
   auto new_enc_shape = std::array<int64_t, 3>{1, new_frames, encoder_dim};
   auto new_enc_tensor =
       OrtValue::CreateTensor(alloc, new_enc_shape, moonshine_model_.float_type_);
@@ -715,9 +783,13 @@ void MoonshineStreamingState::RunFrontendAndAccumulate(const float* audio, size_
   auto memory_tensor = AdoptOutput(adapter_state_->outputs_[0]);
 
   // Append adapter output to the running buffer.
-  auto mshape = memory_tensor->GetTensorTypeAndShapeInfo()->GetShape();
-  const int produced_frames = (mshape.size() >= 3) ? static_cast<int>(mshape[1]) : 0;
+  auto memory_info = memory_tensor->GetTensorTypeAndShapeInfo();
+  const int produced_frames = ValidateMoonshineSequenceOutputShape(
+      "Moonshine adapter output", memory_info->GetShape(),
+      memory_info->GetElementCount(), decoder_dim);
   if (produced_frames > 0) {
+    if (produced_frames > std::numeric_limits<int>::max() - memory_frames_)
+      throw std::runtime_error("Moonshine adapter frame count overflows int");
     const float* mdata = memory_tensor->GetTensorData<float>();
     accumulated_adapter_output_.insert(
         accumulated_adapter_output_.end(), mdata,
@@ -751,6 +823,16 @@ void MoonshineStreamingState::RefreshCrossKv() {
   cross_kv_state_->Run(0, dummy_tokens);
   auto k_new = AdoptOutput(cross_kv_state_->outputs_[0]);
   auto v_new = AdoptOutput(cross_kv_state_->outputs_[1]);
+  const int L = config_.num_decoder_layers;
+  const int H = config_.num_decoder_heads;
+  const int D = config_.decoder_head_size;
+  const auto validate_cross_kv = [&](std::string_view name, const OrtValue& value, int frames) {
+    auto info = value.GetTensorTypeAndShapeInfo();
+    ValidateMoonshineCrossKvOutputShape(name, info->GetShape(), info->GetElementCount(),
+                                        L, H, frames, D);
+  };
+  validate_cross_kv("Moonshine cross-KV key output", *k_new, new_frames);
+  validate_cross_kv("Moonshine cross-KV value output", *v_new, new_frames);
 
   if (memory_in_cross_kv_ == 0) {
     // First chunk of the segment: nothing to concat with.
@@ -758,11 +840,10 @@ void MoonshineStreamingState::RefreshCrossKv() {
     cached_v_cross_ = std::make_shared<Tensor>(std::move(v_new));
   } else {
     // Concat cached [L,1,H,M_old,D] + new [L,1,H,new_frames,D] along dim 3.
-    const int L = config_.num_decoder_layers;
-    const int H = config_.num_decoder_heads;
-    const int D = config_.decoder_head_size;
     const int M_old = memory_in_cross_kv_;
     const int M_total = memory_frames_;
+    validate_cross_kv("Moonshine cached cross-KV key", *cached_k_cross_->ort_tensor_, M_old);
+    validate_cross_kv("Moonshine cached cross-KV value", *cached_v_cross_->ort_tensor_, M_old);
     auto concat_shape = std::array<int64_t, 5>{L, 1, H, M_total, D};
 
     auto concat_one = [&](const float* old_data, const float* new_data) {
