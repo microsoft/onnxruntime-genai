@@ -123,6 +123,7 @@ jobs:
           python build.py `
             --config Release `
             --build_dir $env:buildRoot `
+            --ort_home "$env:GITHUB_WORKSPACE\ort" `
             --parallel `
             --build_java `
             --use_cuda `

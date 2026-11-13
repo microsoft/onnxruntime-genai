@@ -110,7 +110,7 @@ Frequently used flags:
 | `--skip_examples` | Do not build the sample executables. |
 | `--build_dir <path>` | Override the build directory (default `build/<platform>`). |
 | `--use_guidance` | Enable constrained / grammar-based decoding (guidance). |
-| `--ort_home <path>` | Use a prebuilt ONNX Runtime at this path. Defaults to `<repo>/ort` when it contains `include/onnxruntime_c_api.h` (not for WinML, Android, iOS or macOS cross builds); otherwise ONNX Runtime is auto-downloaded. |
+| `--ort_home <path>` | Use a prebuilt ONNX Runtime at this path instead of auto-downloading. |
 | `--cmake_extra_defines K=V` | Pass extra `-DK=V` options to CMake. |
 
 Run `python build.py --help` for the complete list.
@@ -338,5 +338,5 @@ HF configuration field names are unchanged. Compact capture bindings for all thr
 - **Dependency fetch errors during CMake configure** — dependencies are downloaded via `FetchContent` (`cmake/deps.txt`); ensure network access to the declared URLs, then re-run with `--update`.
 - **Missing Python build dependency** — run `python -m pip install -r requirements-dev.txt`.
 - **Stale CMake cache after switching flags (e.g. adding `--arm64`)** — delete the build directory (or `CMakeCache.txt` inside it) and re-run with `--update`.
-- **`onnxruntime.lib` / ORT not found** — pass `--ort_home <path>` to point at a prebuilt ONNX Runtime, stage one in `<repo>/ort` (`include/` and `lib/`), or let `build.py` auto-download a matching build. An unexpected ORT version can come from a stale `<repo>/ort`; the build log names the directory it used.
+- **`onnxruntime.lib` / ORT not found** — pass `--ort_home <path>` to point at a prebuilt ONNX Runtime, or omit it to let `build.py` auto-download a matching build.
 - **Clean an existing build** — `python build.py --clean --skip_examples` runs the CMake `clean` target for the selected configuration; it does not rebuild. Run a normal `python build.py` command afterward, or delete the build directory for a completely fresh configure.

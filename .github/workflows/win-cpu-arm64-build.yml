@@ -13,10 +13,9 @@ concurrency:
 env:
   buildRoot: 'build/cpu/win-arm64'
   binaryDir: 'build/cpu/win-arm64/Release'
-  ORT_NUGET_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
-  # build.py builds against this staged SDK, so keep it no newer than test/python/cpu/ort/requirements.txt.
-  ORT_PACKAGE_VERSION: "1.31.0"
 
 jobs:
   windows-cpu-arm64-build:
@@ -51,10 +50,14 @@ jobs:
         with:
           gradle-version: '8.6'
 
-      - name: Download OnnxRuntime
+      - name: Download OnnxRuntime Nightly
         shell: powershell
         run: |
-          nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_PACKAGE_VERSION }} -Source ${{ env.ORT_NUGET_SOURCE }} -x -NonInteractive
+          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          Write-Host "$ORT_NIGHTLY_VERSION"
+          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -Source ${{ env.ORT_NIGHTLY_SOURCE }} -x -NonInteractive
 
       - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
         continue-on-error: true
@@ -101,8 +104,8 @@ jobs:
         run: |
           cmake -S examples\c -B examples\c\build `
             -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER= -DMODEL_ASR=ON `
-            "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\ort\include" `
-            "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\ort\lib" `
+            "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\build\native\include" `
+            "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\runtimes\win-arm64\native" `
             "-DOGA_INCLUDE_DIR=$env:GITHUB_WORKSPACE\src" `
             "-DOGA_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
           cmake --build examples\c\build --config Release

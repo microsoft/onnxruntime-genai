@@ -112,9 +112,6 @@ ADO pipelines obtain ORT lib/headers via three methods:
 2. **Auto-download via CMake** - `cmake/ortlib.cmake` fetches from ORT-Nightly feed when `ORT_HOME` unset
 3. **Python build driver** - `tools/python/util/dependency_resolver.py` downloads NuGet packages
 
-Without `--ort_home`, `build.py` uses an SDK staged in `<repo>/ort` (`include/onnxruntime_c_api.h`) before
-falling back to the CMake download; GitHub Windows workflows rely on this.
-
 ### Model Loading Pipeline
 
 1. **Config parsing** (`src/config.cpp`) - Reads `genai_config.json` model metadata
