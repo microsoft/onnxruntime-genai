@@ -1908,6 +1908,55 @@ def default_runtime_profiles(
                 },
             },
         },
+        {
+            "id": "integrated-gpu-128k",
+            "eligibility": {
+                "minimum_free_device_memory_bytes": min_128k,
+                "maximum_free_device_memory_bytes": min_256k - 1,
+                "is_integrated": True,
+            },
+            "overlay": {
+                "model": {
+                    "decoder": {
+                        "filename": decoder_filename,
+                        "session_options": {
+                            "session.moe.offload.mode": "disabled",
+                        },
+                    }
+                },
+                "engine": {
+                    "dynamic_batching": {
+                        "num_blocks": NUM_BLOCKS_128K,
+                        "max_batch_size": 1,
+                        "max_scheduled_tokens": 8192 if min_256k <= 68_000_000_000 else 4096,
+                    }
+                },
+            },
+        },
+        {
+            "id": "integrated-gpu-256k",
+            "eligibility": {
+                "minimum_free_device_memory_bytes": min_256k,
+                "is_integrated": True,
+            },
+            "overlay": {
+                "model": {
+                    "decoder": {
+                        "filename": decoder_filename,
+                        "session_options": {
+                            "session.moe.offload.mode": "disabled",
+                        },
+                    }
+                },
+                "engine": {
+                    "dynamic_batching": {
+                        "num_blocks": NUM_BLOCKS_256K,
+                        "max_batch_size": 1,
+                        "max_scheduled_tokens": 8192 if min_256k <= 68_000_000_000 else 4096,
+                    }
+                },
+            },
+        },
     ]
 
 

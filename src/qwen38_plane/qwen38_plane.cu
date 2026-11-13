@@ -710,13 +710,6 @@ static inline void host_gather_ple_rows_batch(StagedPleWorkspace& ws, int rows, 
       ws.ngram_cache_keys[cache_slot][2] = d_c1s[r];
       ws.ngram_cache_valid[cache_slot] = 1;
     }
-#ifdef _WIN32
-    if (ple_is_staged(HP.pad_)) {
-      for (int k = 0; k < num_misses; ++k) {
-        (void)VirtualUnlock(ranges[k].VirtualAddress, ranges[k].NumberOfBytes);
-      }
-    }
-#endif
   }
 }
 
@@ -829,13 +822,6 @@ struct PleGatherPool {
       for (size_t k = 0; k < miss_srcs.size(); ++k) {
         memcpy(miss_dsts[k], miss_srcs[k], (size_t)rb);
       }
-#ifdef _WIN32
-      if (ple_is_staged(HP.pad_)) {
-        for (const auto& r : ranges) {
-          (void)VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
-        }
-      }
-#endif
     }
   }
 

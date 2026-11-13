@@ -927,4 +927,40 @@ def default_gguf_runtime_profiles(
             },
             "overlay": make_overlay(GGUF_NUM_BLOCKS_256K, prefill_chunk_long),
         },
+        # Unified-memory GPUs report host RAM as total device memory, so their tiers are gated on free device memory.
+        {
+            "id": "integrated-gpu-32k",
+            "eligibility": {
+                "minimum_free_device_memory_bytes": min_32k,
+                "maximum_free_device_memory_bytes": min_64k - 1,
+                "is_integrated": True,
+            },
+            "overlay": make_overlay(GGUF_NUM_BLOCKS_32K, prefill_chunk_32k, chunk_size=prefill_chunk_32k),
+        },
+        {
+            "id": "integrated-gpu-64k",
+            "eligibility": {
+                "minimum_free_device_memory_bytes": min_64k,
+                "maximum_free_device_memory_bytes": min_128k - 1,
+                "is_integrated": True,
+            },
+            "overlay": make_overlay(GGUF_NUM_BLOCKS_64K, prefill_chunk_long),
+        },
+        {
+            "id": "integrated-gpu-128k",
+            "eligibility": {
+                "minimum_free_device_memory_bytes": min_128k,
+                "maximum_free_device_memory_bytes": min_256k - 1,
+                "is_integrated": True,
+            },
+            "overlay": make_overlay(GGUF_NUM_BLOCKS_128K, prefill_chunk_long),
+        },
+        {
+            "id": "integrated-gpu-256k",
+            "eligibility": {
+                "minimum_free_device_memory_bytes": min_256k,
+                "is_integrated": True,
+            },
+            "overlay": make_overlay(GGUF_NUM_BLOCKS_256K, prefill_chunk_long),
+        },
     ]

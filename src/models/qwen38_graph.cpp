@@ -957,10 +957,11 @@ void Qwen38GraphEngine::Initialize(bool is_session_recreation) {
         is_session_recreation);
     const size_t page_size = Qwen38DflashCachePageSize(dflash_model_->session_info_,
                                                        dflash_model_->config_->model.dflash2.inputs.past_key_names);
+    const bool fixed_single_request = (max_batch_ == 1);
     dflash_ = std::make_unique<Dflash2Drafter>(
         dflash_model_, page_size,
         Dflash2Drafter::PoolBlocks(*model_.config_, page_size, static_cast<size_t>(max_batch_)),
-        static_cast<size_t>(max_batch_));
+        static_cast<size_t>(max_batch_), fixed_single_request);
     dflash_->SetPinnedBlockTableWidth(true);
     ValidateQwen38DflashFeatureLayout(dflash_->AuxHiddenSize(), dflash_->AuxType());
     // The slots are drafted one after the other without draining the stream in between.
@@ -1031,6 +1032,7 @@ void Qwen38GraphEngine::Initialize(bool is_session_recreation) {
             Draft(d_dflash_prompt_.data(), r, pos, 1000, true);
             pos += r;
           }
+          if (max_batch_ == 1) break;  // fixed_single_request_ pads all 1..verify_rows_ decode steps into one fixed 8-row graph
         }
         SyncStream();
         Reset();

@@ -483,15 +483,18 @@ def test_config_migration_and_rc5_session_options(builders):
     assert cfg_int3["model"]["context_length"] == 262144
     assert cfg_int3["search"]["max_length"] == 262144
     assert cfg_int3["engine"] == {"dynamic_batching": {"max_batch_size": 1, "max_scheduled_tokens": 8192}}
-    assert len(cfg_int3["runtime_profiles"]) == 7
-    p_128k = cfg_int3["runtime_profiles"][-2]
-    p_256k = cfg_int3["runtime_profiles"][-1]
-    assert p_128k["id"] == "gpu-128k"
+    assert len(cfg_int3["runtime_profiles"]) == 9
+    by_id = {p["id"]: p for p in cfg_int3["runtime_profiles"]}
+    p_128k = by_id["gpu-128k"]
+    p_256k = by_id["gpu-256k"]
     assert p_128k["overlay"]["model"]["decoder"]["filename"] == "model.onnx"
     assert p_128k["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 525
-    assert p_256k["id"] == "gpu-256k"
     assert p_256k["overlay"]["model"]["decoder"]["filename"] == "model.onnx"
     assert p_256k["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 1037
+    assert by_id["integrated-gpu-128k"]["eligibility"]["is_integrated"] is True
+    assert by_id["integrated-gpu-128k"]["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 525
+    assert by_id["integrated-gpu-256k"]["eligibility"]["is_integrated"] is True
+    assert by_id["integrated-gpu-256k"]["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 1037
 
     # Per-model VRAM thresholds scale with QMoE size (2b375 < top08 < top16 < all_int4)
     v_2b375 = pkg.estimate_peak_vram_and_thresholds(2, 14, 32)

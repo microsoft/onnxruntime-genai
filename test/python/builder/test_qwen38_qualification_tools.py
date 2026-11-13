@@ -1128,6 +1128,53 @@ def test_windows_loading_resolves_relative_dll_directories(tools, tmp_path, monk
     assert registrations == [str(provider_path)]
 
 
+def test_windows_loading_clears_posix_only_plane_so_and_ignores_duplicate_ep_registration(tools, tmp_path, monkeypatch):
+    util = tools.util
+    package = tmp_path / "package"
+    (package / "provider").mkdir(parents=True)
+    (package / "provider/libqwen38_plane.so").write_bytes(b"\x7fELF")
+    provider_path = package / "provider/onnxruntime_providers_cuda.dll"
+    provider_path.touch()
+    (package / "genai_config.json").write_text(
+        json.dumps(
+            {
+                "model": {
+                    "qwen38_graph": {
+                        "fold": {"enabled": False},
+                        "mtp": {"enabled": False},
+                        "plane_library": "provider/libqwen38_plane.so",
+                    }
+                }
+            }
+        )
+    )
+    overlays = []
+    call_count = 0
+
+    def register_ep(name, path):
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            raise RuntimeError("EP library is already registered under CUDAExecutionProvider")
+
+    monkeypatch.setattr(util, "os", types.SimpleNamespace(name="nt", environ={}, add_dll_directory=lambda path: path))
+    monkeypatch.setattr(util.og, "register_execution_provider_library", register_ep, raising=False)
+    monkeypatch.setattr(
+        util.og, "Config", lambda path: types.SimpleNamespace(overlay=lambda raw: overlays.append(json.loads(raw))), raising=False
+    )
+    monkeypatch.setattr(util.og, "Model", lambda config: config, raising=False)
+
+    util.load_model(package)
+    assert overlays == [{"model": {"qwen38_graph": {"plane_library": ""}}}]
+
+    # A companion Windows .dll suppresses the built-in fallback, and duplicate EP registration is tolerated.
+    overlays.clear()
+    (package / "provider/qwen38_plane.dll").write_bytes(b"MZ")
+    util.load_model(package)
+    assert call_count == 2
+    assert overlays == []
+
+
 def test_host_budget_overrides_package_and_overlay_runtime_profiles(tools, tmp_path, monkeypatch):
     util = tools.util
     entry = util.HOST_EXPERT_BYTES_ENTRY
