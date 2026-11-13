@@ -390,6 +390,7 @@ TEST(NemotronBolt, RoundStatsTrackEmittedAcceptanceAndTerminalTokens) {
   EXPECT_EQ(eos_stats.evaluated, 1);
   EXPECT_FALSE(eos_stats.correction);
   EXPECT_FALSE(eos_stats.bonus);
+  EXPECT_FALSE(eos_stats.full);
 
   const std::vector<int64_t> matching_predictions{20, 21, 22, 23, 24, 25, 26, 99};
   const auto budget_tokens = NemotronBoltRoundTokens(drafts, matching_predictions, 7, {});
@@ -399,6 +400,7 @@ TEST(NemotronBolt, RoundStatsTrackEmittedAcceptanceAndTerminalTokens) {
   EXPECT_EQ(budget_stats.evaluated, 7);
   EXPECT_FALSE(budget_stats.correction);
   EXPECT_FALSE(budget_stats.bonus);
+  EXPECT_TRUE(budget_stats.full);
 
   auto correction_predictions = matching_predictions;
   correction_predictions[6] = 99;
@@ -408,6 +410,7 @@ TEST(NemotronBolt, RoundStatsTrackEmittedAcceptanceAndTerminalTokens) {
   EXPECT_EQ(correction_stats.evaluated, 7);
   EXPECT_TRUE(correction_stats.correction);
   EXPECT_FALSE(correction_stats.bonus);
+  EXPECT_FALSE(correction_stats.full);
 
   const auto bonus_tokens = NemotronBoltRoundTokens(drafts, matching_predictions, 8, {});
   const auto bonus_stats = GetNemotronBoltRoundStats(drafts, bonus_tokens);
@@ -415,6 +418,7 @@ TEST(NemotronBolt, RoundStatsTrackEmittedAcceptanceAndTerminalTokens) {
   EXPECT_EQ(bonus_stats.evaluated, 7);
   EXPECT_FALSE(bonus_stats.correction);
   EXPECT_TRUE(bonus_stats.bonus);
+  EXPECT_TRUE(bonus_stats.full);
 }
 
 TEST(NemotronBolt, EveryAcceptanceLengthAndBudget) {

@@ -24,6 +24,7 @@ struct NemotronBoltRoundStats {
   size_t evaluated{};
   bool correction{};
   bool bonus{};
+  bool full{};  // All seven proposed drafts matched.
 };
 NemotronBoltRoundStats GetNemotronBoltRoundStats(std::span<const int32_t> drafts,
                                                  std::span<const int32_t> emitted_tokens);

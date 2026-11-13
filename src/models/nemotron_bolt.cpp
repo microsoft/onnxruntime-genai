@@ -139,6 +139,7 @@ NemotronBoltRoundStats GetNemotronBoltRoundStats(std::span<const int32_t> drafts
   }
   stats.correction = stats.evaluated > stats.accepted;
   stats.bonus = stats.accepted == drafts.size() && emitted_tokens.size() > drafts.size();
+  stats.full = stats.accepted == drafts.size();
   return stats;
 }
 
@@ -699,7 +700,7 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
     if (round_stats.correction) ++stats_.correction_tokens;
     if (round_stats.accepted == 0)
       ++stats_.zero_accept_rounds;
-    else if (round_stats.accepted == round_stats.evaluated)
+    else if (round_stats.full)
       ++stats_.full_accept_rounds;
     else
       ++stats_.partial_accept_rounds;
