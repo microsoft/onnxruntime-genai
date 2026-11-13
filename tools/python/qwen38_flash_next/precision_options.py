@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 """Flexible component-level precision configuration and post-build ONNX/package transformer
-for Qwen3.8-Flash-Next RC5 packages built by `build_package.py`.
+for Qwen3.8-Flash-Next RC5 packages built by `build_package.py` and GGUF packages built by `build_package_gguf.py`.
 
 Supports independent control over:
   - `--precision-profile {default,fp32,fp32_fp16kv}`: preset combinations
@@ -40,11 +40,17 @@ from package_io import (
     HFCheckpointReader,
     append_file_range,
     build_context_tier_model,
+    compute_gguf_model_weight_stats,
+    default_gguf_runtime_profiles,
     ensure_unified_dynamic_cache_model,
+    estimate_gguf_peak_vram_and_thresholds,
+    format_gguf_ple_table_lines,
     make_ext_init,
     read_gguf_tensor_infos,
+    read_ple_table_spec,
     save_model_replacing,
     set_inline_f32,
+    validate_engram_gguf,
     write_all,
     write_text_replacing,
 )
@@ -100,6 +106,27 @@ class PrecisionConfig:
         if d["engram_gguf_path"] is not None:
             d["engram_gguf_path"] = str(d["engram_gguf_path"])
         return d
+
+
+def precision_config_needs_hf_checkpoint(pcfg: PrecisionConfig) -> bool:
+    """Return True when `apply_precision_config_to_package` reads BF16 tensors from `hf_dir`."""
+    return (
+        pcfg.gdn_gate_dtype == "fp32"
+        or pcfg.indexer_dtype == "fp32"
+        or pcfg.qsa_qkv_dtype != "default"
+        or pcfg.ple_norm_dtype == "fp32"
+    )
+
+
+def validate_gguf_precision_config(pcfg: PrecisionConfig) -> None:
+    """Reject precision overrides that are not supported on packed GGUF graphs/packages."""
+    pcfg.validate()
+    if pcfg.ple_engram == "int8":
+        raise ValueError("--ple-engram int8 is not supported for GGUF packages; use default, iq4_nl, or q8_0")
+    if pcfg.indexer_dtype == "int8":
+        raise ValueError("--indexer-dtype int8 is not supported for GGUF packages; use default, bf16, or fp32")
+    if pcfg.gdn_gate_dtype == "int8":
+        raise ValueError("--gdn-gate-dtype int8 is not supported for GGUF packages; use default, bf16, or fp32")
 
 
 def add_precision_cli_args(ap: argparse.ArgumentParser) -> None:
@@ -456,7 +483,13 @@ def compute_f32_rope_caches(
     return cos64.tobytes(), sin64.tobytes(), cos32.tobytes(), sin32.tobytes()
 
 
-def write_gguf_ple_table(out_dir: Path, engram_kind: str, engram_gguf: Path | None = None) -> str:
+def write_gguf_ple_table(
+    out_dir: Path,
+    engram_kind: str,
+    engram_gguf: Path | None = None,
+    *,
+    validate_engram: bool = False,
+) -> str:
     """Write `ple_table.txt` for a `q8_0` or `iq4_nl` engram GGUF.
 
     The table names its format with a `format` line and has no `scale` line: GGUF blocks carry their own fp16 scales, and a
@@ -464,24 +497,33 @@ def write_gguf_ple_table(out_dir: Path, engram_kind: str, engram_gguf: Path | No
     """
     if engram_gguf is None:
         engram_gguf = DEFAULT_ENGRAM_Q8_GGUF if engram_kind == "q8_0" else DEFAULT_ENGRAM_IQ4_GGUF
+    engram_gguf = Path(engram_gguf).expanduser()
     if not engram_gguf.is_file():
         raise FileNotFoundError(f"Missing engram GGUF: {engram_gguf}")
-    engram_ts, engram_doff = read_gguf_tensor_infos(engram_gguf)
-    if len(engram_ts) != 1 or engram_ts[0]["name"] != "per_layer_token_embd.weight":
-        raise ValueError(
-            f"{engram_gguf} must hold only per_layer_token_embd.weight, got {[t['name'] for t in engram_ts]}"
+    ple_table_path = out_dir / "ple_table.txt"
+    ple_spec = read_ple_table_spec(ple_table_path if ple_table_path.is_file() else None)
+    if validate_engram:
+        engram_dst_name, ple_format, ple_row_bytes, engram_doff = validate_engram_gguf(
+            engram_gguf, ple_spec, expected_kind=engram_kind
         )
-    ggml_type = engram_ts[0]["ggml_type"]
-    if ggml_type == 8:
-        engram_dst_name = "Qwen3.8-Flash-Next-engram-Q8_0.gguf"
-        ple_format = "q8_0"
-        ple_row_bytes = (160 // 32) * 34
-    elif ggml_type == 20:
-        engram_dst_name = "Qwen3.8-Flash-Next-engram-IQ4_NL.gguf"
-        ple_format = "iq4_nl"
-        ple_row_bytes = (160 // 32) * 18
     else:
-        raise ValueError(f"Unsupported engram ggml_type={ggml_type}")
+        engram_ts, engram_doff = read_gguf_tensor_infos(engram_gguf)
+        if len(engram_ts) != 1 or engram_ts[0]["name"] != "per_layer_token_embd.weight":
+            raise ValueError(
+                f"{engram_gguf} must hold only per_layer_token_embd.weight, got {[t['name'] for t in engram_ts]}"
+            )
+        ggml_type = engram_ts[0]["ggml_type"]
+        head_dim = int(ple_spec["head_dim"])
+        if ggml_type == 8:
+            engram_dst_name = "Qwen3.8-Flash-Next-engram-Q8_0.gguf"
+            ple_format = "q8_0"
+            ple_row_bytes = (head_dim // 32) * 34
+        elif ggml_type == 20:
+            engram_dst_name = "Qwen3.8-Flash-Next-engram-IQ4_NL.gguf"
+            ple_format = "iq4_nl"
+            ple_row_bytes = (head_dim // 32) * 18
+        else:
+            raise ValueError(f"Unsupported engram ggml_type={ggml_type}")
 
     dst = out_dir / engram_dst_name
     if dst.exists() or dst.is_symlink():
@@ -494,28 +536,8 @@ def write_gguf_ple_table(out_dir: Path, engram_kind: str, engram_gguf: Path | No
     if (out_dir / "ple").is_dir():
         shutil.rmtree(out_dir / "ple")
 
-    ple_lines = [
-        "qwen38_ple_table 1",
-        "n_heads 16",
-        "head_dim 160",
-        "heads_per_ngram 8",
-        "eos 248044",
-        f"format {ple_format}",
-        "mult 23703573157769 20109073645365 8052911324071 0",
-        "vocab 20000003 20000023 20000033 20000047 20000059 20000063 20000069 20000077 20000081 20000093 20000107 20000147 20000153 20000159 20000161 20000171",
-        "offset 0 20000003 40000026 60000059 80000106 100000165 120000228 140000297 160000374 180000455 200000548 220000655 240000802 260000955 280001114 300001275",
-    ]
-    rows_per_shard = 2500012
-    total_ple_rows = 300001275 + 20000171
-    cur_row = 0
-    for _s_idx in range(128):
-        r_cnt = min(rows_per_shard, total_ple_rows - cur_row)
-        if r_cnt <= 0:
-            break
-        byte_off = engram_doff + cur_row * ple_row_bytes
-        ple_lines.append(f"shard {engram_dst_name} {byte_off} {r_cnt}")
-        cur_row += r_cnt
-    write_text_replacing(out_dir / "ple_table.txt", "\n".join(ple_lines) + "\n")
+    ple_lines = format_gguf_ple_table_lines(engram_dst_name, ple_format, engram_doff, ple_row_bytes, ple_spec)
+    write_text_replacing(ple_table_path, "\n".join(ple_lines) + "\n")
     return engram_dst_name
 
 
@@ -530,17 +552,33 @@ def apply_precision_config_to_package(
     pcfg.validate()
 
     manifest_path = pkg_dir / "package_manifest.json"
-    if manifest_path.is_file() and json.loads(manifest_path.read_text()).get("position_config"):
+    manifest_init = json.loads(manifest_path.read_text()) if manifest_path.is_file() else None
+    if manifest_init is not None and manifest_init.get("position_config"):
         raise ValueError("Precision overrides are not qualified for configurable RoPE/context exports")
 
-    hf_reader = HFCheckpointReader(hf_dir)
     model_path = pkg_dir / "model.onnx"
     model = onnx.load(str(model_path), load_external_data=False)
+    is_gguf_pkg = bool(
+        (manifest_init is not None and "gguf_shards" in manifest_init)
+        or any(n.op_type in ("MoEPacked", "MatMulPacked", "GatherPacked") for n in model.graph.node)
+    )
+    if is_gguf_pkg:
+        validate_gguf_precision_config(pcfg)
+
+    hf_reader = HFCheckpointReader(
+        Path(hf_dir).expanduser(),
+        require_checkpoint=precision_config_needs_hf_checkpoint(pcfg),
+    )
     inits_by_name = {t.name: t for t in model.graph.initializer}
 
-    # 1. Optional PLE engram override (q8_0 or iq4_nl)
+    # 1. Optional PLE engram override (q8_0 or iq4_nl) — validated before modifying existing package files
     if pcfg.ple_engram in ("q8_0", "iq4_nl"):
-        write_gguf_ple_table(pkg_dir, pcfg.ple_engram, pcfg.engram_gguf_path)
+        write_gguf_ple_table(
+            pkg_dir,
+            pcfg.ple_engram,
+            pcfg.engram_gguf_path,
+            validate_engram=is_gguf_pkg or (pkg_dir / "ple_table.txt").is_file(),
+        )
 
     # 2. Optional RoPE / Indexer cache, FP32 GDN/Indexer projections, and FP16 QSA projections
     #    All precision-override tensors are packed into the single `attn_consts.data` file.
@@ -668,11 +706,14 @@ def apply_precision_config_to_package(
         for lid in range(3, 48, 4):
             lpfx = f"model.language_model.layers.{lid}"
             w_v_hf = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight")
-            w_f32 = w_v_hf.float().reshape(512, 2560 // 32, 32)
+            v_rows, v_cols = int(w_v_hf.shape[0]), int(w_v_hf.shape[1])
+            w_f32 = w_v_hf.float().reshape(v_rows, v_cols // 32, 32)
             scales_bf16 = (w_f32.abs().amax(dim=-1) / 127.0).to(torch.bfloat16)
             scales_f32 = scales_bf16.float().unsqueeze(-1)
-            q_signed = torch.round(w_f32 / scales_f32).clamp(-128.0, 127.0)
-            w_bf16_deq = (q_signed.to(torch.bfloat16) * scales_bf16.unsqueeze(-1)).float().reshape(512, 2560)
+            q_signed = torch.where(scales_f32 > 0, torch.round(w_f32 / scales_f32), torch.zeros_like(w_f32)).clamp(
+                -128.0, 127.0
+            )
+            w_bf16_deq = (q_signed.to(torch.bfloat16) * scales_bf16.unsqueeze(-1)).float().reshape(v_rows, v_cols)
             w_v_fp16_t = np.ascontiguousarray(w_bf16_deq.numpy().T, dtype=np.float16)
             add_ac_ext(
                 f"model.layers.{lid}.self_attn.v.rc5_deq.fp16",
@@ -681,23 +722,27 @@ def apply_precision_config_to_package(
                 list(w_v_fp16_t.shape),
             )
     elif pcfg.qsa_qkv_dtype == "kv_fp16":
+        kv_split_dims = [512, 512]
         for lid in range(3, 48, 4):
             lpfx = f"model.language_model.layers.{lid}"
             w_k = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.k_proj.weight").float().numpy().astype(np.float16).T
             w_v = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight").float().numpy().astype(np.float16).T
+            kv_split_dims = [int(w_k.shape[1]), int(w_v.shape[1])]
             w_kv = np.ascontiguousarray(np.concatenate([w_k, w_v], axis=1), dtype=np.float16)
             add_ac_ext(
                 f"model.layers.{lid}.self_attn.kv.weight_t.fp16", w_kv.tobytes(), TensorProto.FLOAT16, list(w_kv.shape)
             )
         inits_by_name["const_split_qsa_kv_512_512"] = numpy_helper.from_array(
-            np.array([512, 512], dtype=np.int64), name="const_split_qsa_kv_512_512"
+            np.array(kv_split_dims, dtype=np.int64), name="const_split_qsa_kv_512_512"
         )
     elif pcfg.qsa_qkv_dtype == "fp16":
+        qkv_split_dims = [12288, 512, 512]
         for lid in range(3, 48, 4):
             lpfx = f"model.language_model.layers.{lid}"
             w_q = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.q_proj.weight").float().numpy().astype(np.float16).T
             w_k = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.k_proj.weight").float().numpy().astype(np.float16).T
             w_v = hf_reader.read_bf16_tensor(f"{lpfx}.self_attn.v_proj.weight").float().numpy().astype(np.float16).T
+            qkv_split_dims = [int(w_q.shape[1]), int(w_k.shape[1]), int(w_v.shape[1])]
             w_qkv = np.ascontiguousarray(np.concatenate([w_q, w_k, w_v], axis=1), dtype=np.float16)
             add_ac_ext(
                 f"model.layers.{lid}.self_attn.qkv.weight_t.fp16",
@@ -716,7 +761,7 @@ def apply_precision_config_to_package(
                 list(w_o.shape),
             )
         inits_by_name["const_split_qsa_qkv_12288_512_512"] = numpy_helper.from_array(
-            np.array([12288, 512, 512], dtype=np.int64), name="const_split_qsa_qkv_12288_512_512"
+            np.array(qkv_split_dims, dtype=np.int64), name="const_split_qsa_qkv_12288_512_512"
         )
 
     # 4. Inline norms (indexer q/k layernorm and Layer 1 PLE norms)
@@ -767,12 +812,27 @@ def apply_precision_config_to_package(
     node_by_output = {o: n for n in model.graph.node for o in n.output}
     existing_node_names = {n.name for n in model.graph.node}
     removed_qsa_mm_names: set[str] = set()
+    packed_qsa_projs: dict[int, dict[str, onnx.NodeProto]] = {}
+    for n in model.graph.node:
+        if n.op_type == "MatMulPacked" and len(n.input) >= 2:
+            m_qsa_p = re.match(r"^model\.layers\.(\d+)\.self_attn\.(q|k|v)\.gguf_weight$", n.input[1])
+            if m_qsa_p:
+                packed_qsa_projs.setdefault(int(m_qsa_p.group(1)), {})[m_qsa_p.group(2)] = n
+
     if pcfg.qsa_qkv_dtype == "fp16" and pcfg.indexer_dtype == "fp32":
         for n in model.graph.node:
             if n.op_type == "Split" and n.name.endswith("/SplitQsa"):
                 mm_node = node_by_output.get(n.input[0])
                 if mm_node is not None and mm_node.op_type == "MatMulNBits":
                     removed_qsa_mm_names.add(mm_node.name)
+        for projs in packed_qsa_projs.values():
+            if {"q", "k", "v"} <= projs.keys():
+                removed_qsa_mm_names.add(projs["k"].name)
+                removed_qsa_mm_names.add(projs["v"].name)
+    elif pcfg.qsa_qkv_dtype == "kv_fp16" and pcfg.indexer_dtype == "fp32":
+        for projs in packed_qsa_projs.values():
+            if {"k", "v"} <= projs.keys():
+                removed_qsa_mm_names.add(projs["v"].name)
 
     new_nodes: list[onnx.NodeProto] = []
     for n in model.graph.node:
@@ -798,10 +858,15 @@ def apply_precision_config_to_package(
             pcfg.kv_cache_dtype in ("bf16", "fp16") or pcfg.qsa_qkv_dtype in ("v_rc5_fp16", "kv_fp16", "fp16")
         ):
             dsa_inputs = list(n.input[:18]) if pcfg.kv_cache_dtype in ("bf16", "fp16") else list(n.input)
+            dsa_attrs = {a.name: helper.get_attribute_value(a) for a in n.attribute}
+            dsa_attrs.setdefault("kv_num_heads", 2)
+            dsa_attrs.setdefault("num_heads", 24)
+            dsa_attrs.setdefault("scale", 0.0625)
             if pcfg.qsa_qkv_dtype == "fp16":
                 dsa_out_orig = n.output[0]
                 dsa_out_bf16 = f"{dsa_out_orig}.bf16"
                 dsa_outputs = [dsa_out_bf16, *n.output[1:]]
+                dsa_attrs["output_bf16"] = 1
                 new_nodes.extend(
                     [
                         helper.make_node(
@@ -810,10 +875,7 @@ def apply_precision_config_to_package(
                             dsa_outputs,
                             name=n.name,
                             domain=n.domain,
-                            kv_num_heads=2,
-                            num_heads=24,
-                            scale=0.0625,
-                            output_bf16=1,
+                            **dsa_attrs,
                         ),
                         helper.make_node(
                             "Cast",
@@ -825,6 +887,7 @@ def apply_precision_config_to_package(
                     ]
                 )
             elif pcfg.qsa_qkv_dtype in ("v_rc5_fp16", "kv_fp16"):
+                dsa_attrs["output_bf16"] = 1
                 new_nodes.append(
                     helper.make_node(
                         "DynamicSparseAttention",
@@ -832,10 +895,7 @@ def apply_precision_config_to_package(
                         list(n.output),
                         name=n.name,
                         domain=n.domain,
-                        kv_num_heads=2,
-                        num_heads=24,
-                        scale=0.0625,
-                        output_bf16=1,
+                        **dsa_attrs,
                     )
                 )
             else:
@@ -846,18 +906,24 @@ def apply_precision_config_to_package(
                         list(n.output),
                         name=n.name,
                         domain=n.domain,
-                        kv_num_heads=2,
-                        num_heads=24,
-                        scale=0.0625,
+                        **dsa_attrs,
                     )
                 )
         elif (
-            n.op_type == "MatMulNBits"
-            and pcfg.qsa_qkv_dtype == "fp16"
+            pcfg.qsa_qkv_dtype == "fp16"
             and len(n.input) >= 2
-            and re.match(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.weight_t\.qweight$", n.input[1])
+            and (
+                (
+                    n.op_type == "MatMulNBits"
+                    and re.match(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.weight_t\.qweight$", n.input[1])
+                )
+                or (
+                    n.op_type == "MatMulPacked"
+                    and re.match(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.gguf_weight$", n.input[1])
+                )
+            )
         ):
-            m_o = re.match(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.weight_t\.qweight$", n.input[1])
+            m_o = re.match(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.(?:weight_t\.qweight|gguf_weight)$", n.input[1])
             assert m_o is not None
             lid = int(m_o.group(1))
             o_out = n.output[0]
@@ -879,6 +945,106 @@ def apply_precision_config_to_package(
                     ),
                 ]
             )
+        elif (
+            n.op_type == "MatMulPacked"
+            and pcfg.qsa_qkv_dtype == "v_rc5_fp16"
+            and pcfg.indexer_dtype == "fp32"
+            and len(n.input) >= 2
+            and re.match(r"^model\.layers\.(\d+)\.self_attn\.v\.gguf_weight$", n.input[1])
+        ):
+            m_v = re.match(r"^model\.layers\.(\d+)\.self_attn\.v\.gguf_weight$", n.input[1])
+            assert m_v is not None
+            lid = int(m_v.group(1))
+            a_name = n.input[0]
+            a_fp16_name = f"{a_name}.v_cast_fp16"
+            new_nodes.extend(
+                [
+                    helper.make_node(
+                        "Cast", [a_name], [a_fp16_name], name=f"{n.name}/CastInputF16", to=TensorProto.FLOAT16
+                    ),
+                    helper.make_node(
+                        "MatMul",
+                        [a_fp16_name, f"model.layers.{lid}.self_attn.v.rc5_deq.fp16"],
+                        list(n.output),
+                        name=f"{n.name}/MatMulF16",
+                    ),
+                ]
+            )
+        elif (
+            n.op_type == "MatMulPacked"
+            and pcfg.qsa_qkv_dtype == "kv_fp16"
+            and pcfg.indexer_dtype == "fp32"
+            and len(n.input) >= 2
+            and re.match(r"^model\.layers\.(\d+)\.self_attn\.k\.gguf_weight$", n.input[1])
+        ):
+            m_k = re.match(r"^model\.layers\.(\d+)\.self_attn\.k\.gguf_weight$", n.input[1])
+            assert m_k is not None
+            lid = int(m_k.group(1))
+            v_node = packed_qsa_projs[lid]["v"]
+            a_name = n.input[0]
+            a_fp16_name = f"{a_name}.kv_cast_fp16"
+            k_out = n.output[0]
+            v_out = v_node.output[0]
+            kv_fp16_out = f"{k_out}.kv_fp16"
+            new_nodes.extend(
+                [
+                    helper.make_node(
+                        "Cast", [a_name], [a_fp16_name], name=f"{n.name}/CastInputF16", to=TensorProto.FLOAT16
+                    ),
+                    helper.make_node(
+                        "MatMul",
+                        [a_fp16_name, f"model.layers.{lid}.self_attn.kv.weight_t.fp16"],
+                        [kv_fp16_out],
+                        name=f"{n.name}/kv/MatMulF16",
+                    ),
+                    helper.make_node(
+                        "Split",
+                        [kv_fp16_out, "const_split_qsa_kv_512_512"],
+                        [k_out, v_out],
+                        name=f"{n.name}/kv/SplitKvF16",
+                        axis=-1,
+                    ),
+                ]
+            )
+        elif (
+            n.op_type == "MatMulPacked"
+            and pcfg.qsa_qkv_dtype == "fp16"
+            and pcfg.indexer_dtype == "fp32"
+            and len(n.input) >= 2
+            and re.match(r"^model\.layers\.(\d+)\.self_attn\.q\.gguf_weight$", n.input[1])
+        ):
+            m_q = re.match(r"^model\.layers\.(\d+)\.self_attn\.q\.gguf_weight$", n.input[1])
+            assert m_q is not None
+            lid = int(m_q.group(1))
+            k_node = packed_qsa_projs[lid]["k"]
+            v_node = packed_qsa_projs[lid]["v"]
+            a_name = n.input[0]
+            a_fp16_name = f"{a_name}.qkv_cast_fp16"
+            q_out = n.output[0]
+            k_out = k_node.output[0]
+            v_out = v_node.output[0]
+            qkv_fp16_out = f"{q_out}.qkv_fp16"
+            new_nodes.extend(
+                [
+                    helper.make_node(
+                        "Cast", [a_name], [a_fp16_name], name=f"{n.name}/CastInputF16", to=TensorProto.FLOAT16
+                    ),
+                    helper.make_node(
+                        "MatMul",
+                        [a_fp16_name, f"model.layers.{lid}.self_attn.qkv.weight_t.fp16"],
+                        [qkv_fp16_out],
+                        name=f"{n.name}/qkv/MatMulF16",
+                    ),
+                    helper.make_node(
+                        "Split",
+                        [qkv_fp16_out, "const_split_qsa_qkv_12288_512_512"],
+                        [q_gate_out := q_out, k_out, v_out],
+                        name=f"{n.name}/qkv/SplitQsaF16",
+                        axis=-1,
+                    ),
+                ]
+            )
+            _ = q_gate_out
         elif (
             n.op_type == "Split"
             and n.name.endswith("/SplitGdn")
@@ -1237,12 +1403,74 @@ def apply_precision_config_to_package(
         emitted_int8kv_onnx = "model_int8kv.onnx"
         save_model_replacing(model_int8kv, pkg_dir / emitted_int8kv_onnx)
 
-    # 7. Update genai_config.json session options and offload runtime_profiles
+    # 7. Optionally consolidate all target external .data files into model.onnx.data
+    consolidation_info = None
+    if pcfg.consolidate_data_files:
+        consolidation_info = consolidate_package_external_data(pkg_dir, "model.onnx.data")
+    elif (pkg_dir / "bank_metadata.json").is_file():
+        sync_bank_metadata_from_models(pkg_dir)
+
+    # Copy tactic cache TSV for model_int8kv.onnx if model.onnx tactic cache exists
+    if emitted_int8kv_onnx is not None:
+        src_tsv = pkg_dir / "model.onnx.matmulnbits_fpa_intb.tsv"
+        dst_tsv = pkg_dir / f"{emitted_int8kv_onnx}.matmulnbits_fpa_intb.tsv"
+        if src_tsv.exists() and not dst_tsv.exists():
+            shutil.copy2(src_tsv, dst_tsv)
+
+    # Recompute GGUF weight/cache VRAM estimates when transforming a GGUF package
+    updated_gguf_vram: dict[str, object] | None = None
+    final_model = onnx.load(str(model_path), load_external_data=False) if is_gguf_pkg else model
     cfg_path = pkg_dir / "genai_config.json"
-    if cfg_path.exists():
-        gcfg = json.loads(cfg_path.read_text())
+    gcfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else None
+
+    if is_gguf_pkg:
+        stats = compute_gguf_model_weight_stats(final_model)
+        prev_vram = (manifest_init or {}).get("vram_and_blocks", {})
+        base_small_file_bytes = int(prev_vram.get("baseline_small_file_bytes", stats["non_gguf_bytes"]))
+        base_non_gguf_bytes = int(prev_vram.get("baseline_non_gguf_tensor_bytes", stats["non_gguf_bytes"]))
+        eff_weight_bytes = stats["gguf_bytes"] + base_small_file_bytes + (stats["non_gguf_bytes"] - base_non_gguf_bytes)
+        prefill_chunk_long = 8192
+        prefill_chunk_32k = 4096
+        if isinstance(gcfg, dict):
+            qwen_sec = gcfg.get("model", {}).get("qwen38_graph", {})
+            if isinstance(qwen_sec, dict):
+                prefill_sec = qwen_sec.get("prefill", {})
+                if isinstance(prefill_sec, dict) and prefill_sec.get("chunk"):
+                    prefill_chunk_long = int(prefill_sec["chunk"])
+            for prof_entry in gcfg.get("runtime_profiles", []):
+                if isinstance(prof_entry, dict) and prof_entry.get("id") == "gpu-32k":
+                    s_ov = prof_entry.get("overlay", {}).get("search", {})
+                    if isinstance(s_ov, dict) and s_ov.get("chunk_size"):
+                        prefill_chunk_32k = int(s_ov["chunk_size"])
+        updated_gguf_vram = estimate_gguf_peak_vram_and_thresholds(
+            eff_weight_bytes,
+            moe_bytes=stats["moe_bytes"],
+            kv_cache_dtype=pcfg.kv_cache_dtype,
+            prefill_chunk_32k=prefill_chunk_32k,
+            prefill_chunk_long=prefill_chunk_long,
+        )
+        updated_gguf_vram["baseline_small_file_bytes"] = base_small_file_bytes
+        updated_gguf_vram["baseline_non_gguf_tensor_bytes"] = base_non_gguf_bytes
+
+    # 8. Update genai_config.json session options and runtime_profiles
+    if isinstance(gcfg, dict):
         gcfg["model"]["decoder"]["session_options"]["ep.cuda.gated_delta_net_bf16_precision"] = pcfg.gdn_precision
-        if emitted_int8kv_onnx is not None:
+        if is_gguf_pkg and updated_gguf_vram is not None and "runtime_profiles" in gcfg:
+            if emitted_int8kv_onnx is not None:
+                gcfg["model"]["decoder"]["filename"] = "model.onnx"
+            dec_fname = (
+                None
+                if emitted_int8kv_onnx is not None
+                else gcfg.get("model", {}).get("decoder", {}).get("filename", "model.onnx")
+            )
+            gcfg["runtime_profiles"] = default_gguf_runtime_profiles(
+                int(updated_gguf_vram["total_weight_bytes"]),  # type: ignore[arg-type]
+                dec_fname,
+                kv_cache_dtype=pcfg.kv_cache_dtype,
+                prefill_chunk_32k=int(updated_gguf_vram["prefill_chunk_32k"]),  # type: ignore[arg-type]
+                prefill_chunk_long=int(updated_gguf_vram["prefill_chunk_long"]),  # type: ignore[arg-type]
+            )
+        elif emitted_int8kv_onnx is not None:
             gcfg["model"]["decoder"]["filename"] = "model.onnx"
             for prof_entry in gcfg.get("runtime_profiles", []):
                 dec_ov = prof_entry.get("overlay", {}).get("model", {}).get("decoder", {})
@@ -1253,32 +1481,26 @@ def apply_precision_config_to_package(
                     del dec_ov["filename"]
         write_text_replacing(cfg_path, json.dumps(gcfg, indent=2) + "\n")
 
-    # Copy tactic cache TSV for model_int8kv.onnx if model.onnx tactic cache exists
-    if emitted_int8kv_onnx is not None:
-        src_tsv = pkg_dir / "model.onnx.matmulnbits_fpa_intb.tsv"
-        dst_tsv = pkg_dir / f"{emitted_int8kv_onnx}.matmulnbits_fpa_intb.tsv"
-        if src_tsv.exists() and not dst_tsv.exists():
-            shutil.copy2(src_tsv, dst_tsv)
-
-    # 8. Optionally consolidate all target external .data files into model.onnx.data
-    consolidation_info = None
-    if pcfg.consolidate_data_files:
-        consolidation_info = consolidate_package_external_data(pkg_dir, "model.onnx.data")
-    elif (pkg_dir / "bank_metadata.json").is_file():
-        sync_bank_metadata_from_models(pkg_dir)
-
     # 9. Update package_manifest.json
-    manifest_path = pkg_dir / "package_manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
         manifest["precision_config"] = pcfg.to_dict()
+        if is_gguf_pkg:
+            if isinstance(manifest.get("ops"), dict):
+                manifest["ops"]["MatMulPacked"] = sum(1 for n in final_model.graph.node if n.op_type == "MatMulPacked")
+            if updated_gguf_vram is not None:
+                manifest["vram_and_blocks"] = updated_gguf_vram
         if emitted_int8kv_onnx is not None:
             manifest["onnx_variants"] = {
                 f"{pcfg.kv_cache_dtype}_kv": "model.onnx",
                 "int8_kv": emitted_int8kv_onnx,
             }
         if consolidation_info is not None and consolidation_info.get("consolidated"):
-            manifest["external_data_files"] = ["model.onnx.data", "dflash2.onnx.data", "embedding.onnx.data"]
+            manifest["external_data_files"] = [
+                fname
+                for fname in ("model.onnx.data", "dflash2.onnx.data", "embedding.onnx.data")
+                if (pkg_dir / fname).exists()
+            ]
         write_text_replacing(manifest_path, json.dumps(manifest, indent=2) + "\n")
 
     return {
