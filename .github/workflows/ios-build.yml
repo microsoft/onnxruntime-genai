@@ -18,7 +18,7 @@ jobs:
         with:
           submodules: true
 
-      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@efa14f1fd8b27f52a47d9f0cacdbf642972c6090 # v0.0.14
+      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@f752b887c8e6e687f7fc0bca48918da42d1146a8 # v0.0.15
         with:
           vcpkg-version: '2025.06.13'
           vcpkg-hash: '735923258c5187966698f98ce0f1393b8adc6f84d44fd8829dda7db52828639331764ecf41f50c8e881e497b569f463dbd02dcb027ee9d9ede0711102de256cc'
