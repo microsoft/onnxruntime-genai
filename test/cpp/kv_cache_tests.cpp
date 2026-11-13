@@ -162,7 +162,7 @@ TEST(KvCacheTests, AllowsCompatibleMemoryFromDifferentAllocatorTypes) {
 }
 
 std::unique_ptr<Generators::Config> MakeK1Config(bool share_buffer = false) {
-  auto config = std::make_unique<Generators::Config>(MODEL_PATH "dense-k1", std::string_view{});
+  auto config = std::make_unique<Generators::Config>(fs::path{MODEL_PATH "dense-k1"}, std::string_view{});
   Generators::OverlayConfig(*config, R"({"model":{"decoder":{"declared_state":{"max_sequence_length":32}}}})");
   config->search.past_present_share_buffer = share_buffer;
   return config;
@@ -201,7 +201,8 @@ TEST(K1ConfigTests, ProducesEscapedLayerTemplatesAndEffectiveAlias) {
     config->model.decoder.inputs.past_key_names = "past\"\\.%d.key";
     config->model.decoder.declared_state->max_sequence_length = 24;
     const auto json = Generators::BuildDeclaredStateContract(*config);
-    EXPECT_NE(json.find(R"("input":"past\"\\.{layer}.key")"), std::string::npos);
+    const auto expected_input = R"("input":"past\"\\.{layer}.key")";
+    EXPECT_NE(json.find(expected_input), std::string::npos);
     EXPECT_NE(json.find(R"("output":"present.{layer}.value")"), std::string::npos);
     EXPECT_NE(json.find(R"("layers":[0,1],"capacity":24)"), std::string::npos);
     EXPECT_NE(json.find(share ? R"("alias":"past_present")" : R"("alias":"none")"), std::string::npos);

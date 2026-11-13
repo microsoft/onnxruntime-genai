@@ -531,7 +531,8 @@ TEST(PagedKeyValueCacheManifestTest, PerLayerTablesMirrorReservationsAndKeepPool
 TEST(PagedKeyValueCacheManifestTest, PerLayerTablesRunPrefillAndDecode) {
   std::vector<std::vector<int32_t>> results;
   for (const char* path : {"engine/synthetic-paged", "engine/synthetic-paged-layer-tables"}) {
-    auto model = CreateModel(GetOrtEnv(), std::string{MODEL_PATH} + path);
+    const auto model_path = std::string{MODEL_PATH} + path;
+    auto model = CreateModel(GetOrtEnv(), model_path.c_str());
     auto engine = std::make_shared<Engine>(model);
     auto request = CreateEngineRequest(engine);
     TurnOptions options;
