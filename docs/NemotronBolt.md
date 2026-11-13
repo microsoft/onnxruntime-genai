@@ -162,6 +162,24 @@ advances dense KV length by `accepted + 1`, and selects recurrent row `accepted`
 Only accepted context reaches the drafter. Its packed row maps preserve the real
 last-context `anchor_row_index`, even when padded to eight rows for graph replay.
 
+### Prompt chunk size
+
+A target whose `input_ids` row dimension is symbolic (`[1, target_rows]`) ingests prompts in
+larger uncaptured chunks; the R8 verification graph and its CUDA graph are unchanged. Set the
+rows per chunk with the standard `search.chunk_size` option, either in `genai_config.json`
+(`"search": {"chunk_size": 2048}`) or per generator with
+`params.set_search_options(chunk_size=2048)`.
+
+| `search.chunk_size` | Prompt ingestion |
+|---|---|
+| absent | 4,096 rows per chunk |
+| 1–8 | fixed R8 path |
+| > 8 | that many rows per chunk, capped at the KV capacity minus 8 |
+
+A valid positive `BOLT_PREFILL_CHUNK_ROWS` environment variable overrides `search.chunk_size`
+for every generator created while it is set; an empty, nonpositive or non-numeric value is
+ignored. Fixed `[1, 8]` targets accept only `search.chunk_size <= 8` and reject larger values.
+
 The pinned native H128 Flash attention route partitions split-K work in 128-key tiles using the
 padded endpoint of each R8 call. Crossing a tile boundary inside a speculative
 block can therefore change BF16 attention arithmetic relative to target-only
@@ -202,7 +220,7 @@ evidence is currently published with this PR.
 Only reset-to-zero rewind is supported: `generator.rewind_to(0)` clears target
 state, drafter context, and pending tokens. Continuing with a second
 `append_tokens()` requires this reset or a new generator. Sampling, beams,
-guidance, nontrivial penalties, external chunking/speculative strategies,
+guidance, nontrivial penalties, external speculative strategies,
 nonzero rewinds, extra inputs, and logits access/replacement are explicitly
 unsupported. In particular `get_logits()` fails rather than fabricating scores.
 

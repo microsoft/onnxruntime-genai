@@ -4,6 +4,7 @@
 #include "engine/request.h"
 #include "search.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <limits>
@@ -87,10 +88,20 @@ void ValidateNemotronBoltSearch(const GeneratorParams& params) {
               params.speculative.min_adaptive_k == 0 && !params.speculative.cooldown &&
               (params.speculative.max_draft_tokens == 0 || params.speculative.max_draft_tokens == 7),
           "speculative.max_draft_tokens must be 0 or 7; external/adaptive speculative strategies are unsupported");
-  Require(!s.chunk_size && !params.config.model.decoder.sliding_window,
-          "external prefill chunking and decoder sliding_window are unsupported");
+  Require(!params.config.model.decoder.sliding_window, "decoder sliding_window is unsupported");
   Require(params.speculative.max_draft_tokens == 0 || params.use_graph_capture,
           "CUDA graph capture must be enabled for speculative decoding");
+}
+
+size_t NemotronBoltPrefillChunkRows(std::optional<size_t> configured, const char* env_override, size_t capacity) {
+  size_t requested = configured.value_or(0) != 0 ? *configured : kBoltDefaultPrefillChunkRows;
+  if (env_override) {
+    char* end = nullptr;
+    const long long parsed = std::strtoll(env_override, &end, 10);
+    if (end != env_override && *end == '\0' && parsed > 0) requested = static_cast<size_t>(parsed);
+  }
+  const size_t limit = capacity > kBoltVerifyRows ? capacity - kBoltVerifyRows : 0;
+  return std::max(kBoltVerifyRows, std::min(requested, limit));
 }
 
 size_t NemotronBoltAcceptedPrefix(std::span<const int32_t> drafts,
@@ -289,17 +300,6 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
               capacity_ <= static_cast<size_t>(std::numeric_limits<int32_t>::max()) &&
               static_cast<size_t>(config_->model.context_length) <= capacity_ - kBoltVerifyRows,
           "context_length must leave eight scratch slots in the fixed KV capacity");
-  if (dynamic_prefill_) {
-    prefill_chunk_rows_ = std::min(kBoltDefaultPrefillChunkRows, capacity_ - kBoltVerifyRows);
-    if (const char* env_chunk = std::getenv("BOLT_PREFILL_CHUNK_ROWS")) {
-      const long parsed = std::strtol(env_chunk, nullptr, 10);
-      if (parsed > static_cast<long>(kBoltVerifyRows)) {
-        prefill_chunk_rows_ = std::min(static_cast<size_t>(parsed), capacity_ - kBoltVerifyRows);
-      } else if (parsed > 0) {
-        prefill_chunk_rows_ = kBoltVerifyRows;
-      }
-    }
-  }
   if (config_->speculative.max_draft_tokens == 0)
     return;
   const auto& d = config_->model.dflash2;
@@ -335,6 +335,8 @@ std::unique_ptr<State> NemotronBoltModel::CreateState(DeviceSpan<int32_t>, const
           "graph capture is disabled in the target session");
   Require(params.speculative.max_draft_tokens == 0 || drafter_model_,
           "speculative decoding requires a model configured with a drafter");
+  Require(dynamic_prefill_ || params.search.chunk_size.value_or(0) <= kBoltVerifyRows,
+          "search.chunk_size > 8 requires a dynamic-prefill target (input_ids [1, target_rows])");
   return std::make_unique<NemotronBoltState>(*this, params);
 }
 
@@ -356,6 +358,10 @@ Tensor& NemotronBoltState::AddTensor(const std::string& name, bool input, Device
 
 NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const GeneratorParams& params)
     : State{params, model}, bolt_{model}, request_{std::make_unique<Request>(model, params.search.max_length)} {
+  if (model.dynamic_prefill_) {
+    prefill_chunk_rows_ = NemotronBoltPrefillChunkRows(params.search.chunk_size,
+                                                       std::getenv("BOLT_PREFILL_CHUNK_ROWS"), model.capacity_);
+  }
   const auto& info = model.session_info_;
   verify_inputs_span_ = model.p_device_->Allocate<int32_t>(2 * kBoltVerifyRows + 8);
   verify_inputs_span_.CpuSpan();
@@ -463,8 +469,8 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     prefill_aux_ = std::make_unique<Tensor>(model.p_device_, aux.GetType());
     prefill_aux_->CreateTensor(prefill_shape, true);
   }
-  if (model.dynamic_prefill_ && model.prefill_chunk_rows_ > kBoltVerifyRows) {
-    prefill_ids_span_ = model.p_device_->Allocate<int64_t>(model.prefill_chunk_rows_);
+  if (model.dynamic_prefill_ && prefill_chunk_rows_ > kBoltVerifyRows) {
+    prefill_ids_span_ = model.p_device_->Allocate<int64_t>(prefill_chunk_rows_);
     prefill_ids_span_.CpuSpan();
     if (model.has_logit_rows_) {
       prefill_logit_rows_span_ = model.p_device_->Allocate<int64_t>(1);
@@ -812,14 +818,14 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
             : 0;
     const size_t draft_rows = tokens.size() - draft_start;
     const bool can_dynamic_prefill =
-        bolt_.dynamic_prefill_ && bolt_.prefill_chunk_rows_ > kBoltVerifyRows;
+        bolt_.dynamic_prefill_ && prefill_chunk_rows_ > kBoltVerifyRows;
     const bool single_chunk =
         draft_rows <= kBoltVerifyRows && (!can_dynamic_prefill || tokens.size() <= kBoltVerifyRows);
     const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
     for (size_t pos = 0; pos < tokens.size();) {
       const size_t remaining = tokens.size() - pos;
       if (can_dynamic_prefill && remaining > kBoltVerifyRows) {
-        const size_t valid = std::min(bolt_.prefill_chunk_rows_, remaining);
+        const size_t valid = std::min(prefill_chunk_rows_, remaining);
         const bool last_chunk = pos + valid >= tokens.size();
         const int64_t pred = PrefillChunk(tokens.subspan(pos, valid), pos, draft_start, last_chunk);
         if (last_chunk) {
