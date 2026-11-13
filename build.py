@@ -458,6 +458,17 @@ def _validate_args(args: argparse.Namespace):
     _validate_ios_args(args)
     _validate_cmake_args(args)
 
+    # CI and local setups stage a prebuilt ONNX Runtime SDK in <repo>/ort (git-ignored). Prefer it over
+    # CMake's default package download so GenAI builds against the same ORT it is tested with.
+    staged_ort = REPO_ROOT / "ort"
+    if (
+        not args.ort_home
+        and not (args.use_winml or args.android or args.ios or args.macos)
+        and (staged_ort / "include" / "onnxruntime_c_api.h").is_file()
+    ):
+        log.info(f"Using the ONNX Runtime staged in {staged_ort}. Pass --ort_home to use a different one.")
+        args.ort_home = staged_ort
+
     if args.ort_home:
         if not args.ort_home.exists() or not args.ort_home.is_dir():
             raise ValueError(f"{args.ort_home} does not exist or is not a directory.")
