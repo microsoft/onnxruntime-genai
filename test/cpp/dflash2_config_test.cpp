@@ -2491,11 +2491,12 @@ std::shared_ptr<PrefixSnapshotCache::Entry> MakeStorageEntry(PrefixSnapshotCache
                                                              DeviceInterface* device,
                                                              std::string_view component = {},
                                                              size_t component_limit =
-                                                                 std::numeric_limits<size_t>::max()) {
+                                                                 std::numeric_limits<size_t>::max(),
+                                                             bool preserve_existing = false) {
   auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
   entry->shapes = {{16}};
   entry->type = Ort::TypeToTensorType<uint8_t>;
-  if (!cache.Allocate(entry, device, component, component_limit)) return nullptr;
+  if (!cache.Allocate(entry, device, component, component_limit, preserve_existing)) return nullptr;
   Tensor source{GetDeviceInterface(DeviceType::CPU), entry->type};
   source.CreateTensor(std::array<int64_t, 1>{32});
   std::array<uint8_t, 32> values{};
@@ -3233,6 +3234,8 @@ TEST(PrefixSnapshotCacheTest, FailedDemotionDisablesDiskAndReclaimsUnleasedVicti
   EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 16, 0}));
   EXPECT_TRUE(fs_std::is_empty(parent));
   CheckStorageEntry(*third);
+  EXPECT_EQ(MakeStorageEntry(cache, cpu, {}, 8, true), nullptr);
+  EXPECT_TRUE(fs_std::is_empty(parent));
   first.reset();
   second.reset();
   third.reset();
@@ -3241,18 +3244,21 @@ TEST(PrefixSnapshotCacheTest, FailedDemotionDisablesDiskAndReclaimsUnleasedVicti
 
 TEST(PrefixSnapshotCacheTest, DiskAllocationFailureIsNotRetriedUntilRecreation) {
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  ScopedSnapshotDirectory test_directory{"oga-snapshot-allocation-failure"};
-  const auto& parent = test_directory.Path();
-  PrefixSnapshotCache cache{{0, 0, 16}, 1, parent};
-  ASSERT_TRUE(fs_std::remove(parent));
-  EXPECT_THROW(MakeStorageEntry(cache, cpu), std::system_error);
-  ASSERT_TRUE(fs_std::create_directory(parent));
-  EXPECT_EQ(MakeStorageEntry(cache, cpu), nullptr);
-  EXPECT_TRUE(fs_std::is_empty(parent));
-  PrefixSnapshotCache recreated{{0, 0, 16}, 1, parent};
-  auto entry = MakeStorageEntry(recreated, cpu);
-  ASSERT_NE(entry, nullptr);
-  CheckStorageEntry(*entry);
+  for (bool preserve_existing : {false, true}) {
+    SCOPED_TRACE(preserve_existing);
+    ScopedSnapshotDirectory test_directory{"oga-snapshot-allocation-failure"};
+    const auto& parent = test_directory.Path();
+    PrefixSnapshotCache cache{{0, 0, 16}, 1, parent};
+    ASSERT_TRUE(fs_std::remove(parent));
+    EXPECT_THROW(MakeStorageEntry(cache, cpu, {}, 1, preserve_existing), std::system_error);
+    ASSERT_TRUE(fs_std::create_directory(parent));
+    EXPECT_EQ(MakeStorageEntry(cache, cpu, {}, 1, preserve_existing), nullptr);
+    EXPECT_TRUE(fs_std::is_empty(parent));
+    PrefixSnapshotCache recreated{{0, 0, 16}, 1, parent};
+    auto entry = MakeStorageEntry(recreated, cpu, {}, 1, preserve_existing);
+    ASSERT_NE(entry, nullptr);
+    CheckStorageEntry(*entry);
+  }
 }
 
 #ifndef _WIN32

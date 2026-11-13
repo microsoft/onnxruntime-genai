@@ -661,6 +661,7 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     if (!EvictOldest()) return refuse("shared_count_leased");
   }
   for (size_t index = 0; index < limits_.size(); ++index) {
+    if (static_cast<Tier>(index) == Tier::Disk && disk_writes_disabled_) continue;
     if (!device_resident || device_memory_limit_) {
       const auto tier = static_cast<Tier>(index);
       if (preserve_existing) {

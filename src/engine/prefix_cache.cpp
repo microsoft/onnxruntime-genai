@@ -130,9 +130,16 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   metrics_.queried_tokens += adoptable;
 
   if (options_.requires_checkpoint || options_.requires_draft_checkpoint) {
-    // A checkpointed hit is an indivisible physical history plus its compatible snapshot. Scan only
-    // bounded checkpoint endpoints, longest first and then most-recently-used for deterministic
-    // ties. Rebuilding the exact parent path prevents logical variants from ever being spliced.
+    if (checkpoint_entries_.empty()) return match;
+    std::vector<uint64_t> prefix_hashes;
+    prefix_hashes.reserve(adoptable / block_size);
+    uint64_t parent_hash = RootHash();
+    for (size_t offset = 0; offset < adoptable; offset += block_size) {
+      parent_hash = Hash(parent_hash, tokens.subspan(offset, block_size));
+      prefix_hashes.push_back(parent_hash);
+    }
+    // Hashes filter endpoints before verifying tokens and physical ancestry. Keep the longest
+    // matching checkpoint, choosing the most recently used among equal-length histories.
     for (auto it = checkpoint_entries_.rbegin(); it != checkpoint_entries_.rend(); ++it) {
       Entry* endpoint = *it;
       if (!endpoint || (options_.requires_checkpoint && !endpoint->checkpoint)) {
@@ -148,6 +155,9 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
                                      ? endpoint->checkpoint->TokenCount()
                                      : draft->token_count;
       if (token_count > adoptable || token_count <= match.token_count) {
+        continue;
+      }
+      if (endpoint->identity->hash != prefix_hashes[token_count / block_size - 1]) {
         continue;
       }
       std::vector<std::shared_ptr<Block>> blocks;

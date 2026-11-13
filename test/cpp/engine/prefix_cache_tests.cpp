@@ -197,6 +197,49 @@ TEST(PrefixCacheTest, RequiredDraftMissCanPublishAnIndependentPhysicalHistory) {
   pool.Free(changed_blocks);
 }
 
+TEST(PrefixCacheTest, CheckpointLookupHashesEachQueryBlockOnceAndVerifiesCollisions) {
+  constexpr size_t block_count = 64;
+  for (bool collisions : {false, true}) {
+    SCOPED_TRACE(collisions);
+    BlockPool pool{kBlockSize, block_count};
+    auto options = MakeOptions(block_count);
+    options.requires_draft_checkpoint = true;
+    static thread_local size_t hash_calls = 0;
+    hash_calls = 0;
+    options.hash = [](uint64_t parent, std::span<const int32_t> tokens) {
+      ++hash_calls;
+      return PrefixCache::ChainHash(parent, tokens);
+    };
+    if (collisions)
+      options.hash = [](uint64_t parent, std::span<const int32_t>) {
+        ++hash_calls;
+        return parent == PrefixCache::RootHash() ? uint64_t{1} : parent + 1;
+      };
+    PrefixCache cache{pool, options};
+    std::vector<int32_t> prompt(block_count * kBlockSize, 7);
+    auto generation = std::make_shared<int>(0);
+    std::shared_ptr<const BlockIdentity> parent;
+    for (size_t offset = 0; offset < prompt.size(); offset += kBlockSize) {
+      auto block = SealBlock(pool, cache, std::span<const int32_t>{prompt}.subspan(offset, kBlockSize), parent);
+      auto checkpoint = std::make_shared<Dflash2PrefixCheckpoint>();
+      checkpoint->token_count = offset + kBlockSize;
+      checkpoint->target_mapped = true;
+      checkpoint->target_generation = generation;
+      ASSERT_TRUE(cache.AttachDraftCheckpoint(parent, nullptr, std::move(checkpoint)));
+      pool.Release(block);
+    }
+    ASSERT_EQ(cache.CheckpointCount(), block_count);
+    hash_calls = 0;
+    prompt.front() = 9;
+    EXPECT_TRUE(cache.Match(prompt, prompt.size()).Empty());
+    EXPECT_EQ(hash_calls, block_count);
+    hash_calls = 0;
+    prompt.front() = 7;
+    EXPECT_EQ(cache.Match(prompt, prompt.size()).token_count, prompt.size());
+    EXPECT_EQ(hash_calls, block_count);
+  }
+}
+
 TEST(PrefixCacheTest, DraftOnlyAdoptionLeasesProtectTheCompletePhysicalHistory) {
   BlockPool pool{kBlockSize, 4};
   auto options = MakeOptions(4);
