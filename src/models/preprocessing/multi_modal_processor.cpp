@@ -10,6 +10,7 @@
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/lfm2_audio_processor.h"
 #include "models/preprocessing/lfm2_vl_image_processor.h"
+#include "models/preprocessing/lfm3_vl_image_processor.h"
 #include "models/preprocessing/mistral3_image_processor.h"
 #include "models/preprocessing/nemotron_parse_processor.h"
 #include "models/preprocessing/parakeet_processor.h"
@@ -66,6 +67,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"lfm2_audio", Processor::Create<Lfm2AudioProcessor>},
           {"lfm2_vl", Processor::Create<Lfm2VlImageProcessor>},
+          {"lfm3_vl", Processor::Create<Lfm3VlImageProcessor>},
           {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
           {"gemma4_unified", Processor::Create<Gemma4MultiModalProcessor>},
           {"mistral3", Processor::Create<Mistral3ImageProcessor>},

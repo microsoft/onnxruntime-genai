@@ -330,10 +330,16 @@ class LFM3Model(LFM2Model):
             )
         if self.use_paged_attention:
             raise NotImplementedError("d1-2B needs causal=0, which PagedAttention does not have.")
+        if self.extra_options.get("exclude_embeds", False):
+            raise NotImplementedError(
+                "d1-2B with exclude_embeds=true is not supported: the builder does not write its vision and embedding "
+                "models yet."
+            )
 
     # VL, Audio, Omni and d1 checkpoints nest the decoder under model.language_model, and their remote code
     # registers the first auto class rather than AutoModelForCausalLM. With the embedding layer excluded the
-    # decoder is a stage of the second, a pipeline the runtime does not have yet.
+    # decoder is a stage of the second: LFM3VLModel builds lfm3_vl, and the runtime does not have the others yet.
+    # d1-2B refuses exclude_embeds for now (check_d1_export), so its entry here only names the loader.
     MULTIMODAL: ClassVar[dict[str, tuple[str, str]]] = {
         "Lfm3VlForConditionalGeneration": ("AutoModelForImageTextToText", "lfm3_vl"),
         "Lfm3AudioForConditionalGeneration": ("AutoModelForMultimodalLM", "lfm3_audio"),
