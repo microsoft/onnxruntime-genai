@@ -379,6 +379,10 @@ BackendCapabilities ResolveBackendCapabilities(
     }
   }
 
+  if (model.DeclaredStateIsPaged()) {
+    const auto bound = static_cast<uint64_t>(model.GetDeclaredState()->max_sequence_length);
+    resolved.max_request_length = resolved.max_request_length == 0 ? bound : std::min(resolved.max_request_length, bound);
+  }
   if (!declared) return resolved;
   const auto& explicit_capabilities = *declared;
   if (explicit_capabilities.UsesTransactions() != transactions ||
@@ -414,6 +418,7 @@ BackendCapabilities ResolveBackendCapabilities(
 
 EngineBackendBundle CreateEngineBackend(std::shared_ptr<Model> model) {
   if (!model) throw std::invalid_argument("Engine backend construction requires a model.");
+  model->ValidateDeclaredStateEngineConfig();
   auto& batching = model->config_->engine.dynamic_batching;
   if (batching && batching->device_memory_budget_bytes) {
     if (model->p_device_kvcache_->GetType() != DeviceType::CUDA ||

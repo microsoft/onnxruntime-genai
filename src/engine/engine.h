@@ -298,6 +298,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
                                           std::exception_ptr error);
 
   std::shared_ptr<Model> model_;  // The model used by the Engine.
+  // Collaborators must release their state before the model can admit another Engine.
+  std::shared_ptr<const void> declared_state_lease_;
   std::unique_ptr<MediaStore> media_store_;
   std::shared_ptr<CacheManager> cache_manager_;  // The cache manager for handling cached data.
   std::shared_ptr<PrefixSnapshotCache> snapshot_cache_;

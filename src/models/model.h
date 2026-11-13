@@ -206,9 +206,13 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                                    std::span<const std::string> output_names) const;
   static std::string DescribeCacheLocation(const OrtMemoryInfo& info);
   const Config::Model::Decoder::DeclaredState* GetDeclaredState() const;
+  bool DeclaredStateIsPaged() const;
   bool DeclaredStateSharesBuffer() const;
+  void ValidateDeclaredStateEngineConfig() const;
   void ValidateDeclaredStateParams(const GeneratorParams& params) const;
   std::shared_ptr<const void> AcquireDeclaredStateLease(const GeneratorParams& params) const;
+  std::shared_ptr<const void> AcquireDeclaredStateEngineLease() const;
+  std::shared_ptr<const void> AcquireDeclaredStatePoolLease() const;
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
@@ -263,10 +267,14 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   struct DeclaredStateEnvelope {
     explicit DeclaredStateEnvelope(const Config& config);
     Config::Model::Decoder::DeclaredState limits;
+    bool paged;
     bool share_buffer;
+    int kv_heads;
+    int head_size;
     std::string json;
     mutable std::mutex resident_mutex;
     mutable std::weak_ptr<const void> resident;
+    mutable std::weak_ptr<const void> engine;
   };
   std::unique_ptr<const DeclaredStateEnvelope> declared_state_;
 };

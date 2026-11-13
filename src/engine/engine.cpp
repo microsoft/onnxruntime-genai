@@ -194,6 +194,7 @@ Engine::Engine(std::shared_ptr<Model> model)
 
 Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     : model_{std::move(model)},
+      declared_state_lease_{model_ ? model_->AcquireDeclaredStateEngineLease() : nullptr},
       cache_manager_{std::move(dependencies.cache_manager)},
       snapshot_cache_{std::move(dependencies.snapshot_cache)},
       scheduler_{std::move(dependencies.scheduler)},
@@ -211,7 +212,10 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     throw std::runtime_error("Engine requires a non-null model.");
   }
   if (model_->GetDeclaredState()) {
-    throw std::runtime_error("K1 dense declared state does not support Engine execution.");
+    if (!std::dynamic_pointer_cast<PagedCacheManager>(cache_manager_) ||
+        !cache_manager_->IsForModel(*model_)) {
+      throw std::runtime_error("Paged K1 requires its model's production paged cache manager.");
+    }
   }
   if (auto packed = std::dynamic_pointer_cast<DecoderOnly_Model>(model_); packed && packed->vision_) {
     stop_tokenizer_ = packed->vision_->processor->tokenizer_;
@@ -340,7 +344,7 @@ void ValidateMtpModelCompatibility(const Config& config,
 }
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
-  if (model && model->GetDeclaredState()) {
+  if (model && model->GetDeclaredState() && !model->DeclaredStateIsPaged()) {
     throw std::runtime_error("K1 dense declared state does not support Engine execution.");
   }
   return CreateEngineBackend(std::move(model)).dependencies;
@@ -1500,6 +1504,7 @@ void Engine::ValidateOwnerThread() const {
     throw std::runtime_error(
         "Engine operations must be called from the Engine owner thread.");
   }
+  model_->ValidateDeclaredStateEngineConfig();
 }
 
 std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
@@ -1508,6 +1513,12 @@ std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
   ReclaimAbandonedRequests();
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
+  }
+  if (const auto* limits = model_->GetDeclaredState(); limits && model_->DeclaredStateIsPaged()) {
+    const auto live = std::count_if(tracked_requests_.begin(), tracked_requests_.end(),
+                                    [](const auto& request) { return request && !IsClosed(request->Status()); });
+    if (static_cast<size_t>(live) >= static_cast<size_t>(limits->max_batch_size))
+      throw std::runtime_error("Paged K1 live Requests, including idle and pending Requests, exceed max_batch_size.");
   }
   const auto& model_search = model_->config_->search;
   // These model-fixed checks stay at Request creation because tests and embedders can construct an
@@ -2946,6 +2957,8 @@ bool Engine::HasPendingRequests() {
 
 size_t Engine::MaxDraftTokensPerStep() const {
   ValidateOwnerThread();
+  if (model_->DeclaredStateIsPaged())
+    return 0;
   return backend_capabilities_.UsesTransactions() &&
                  model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()

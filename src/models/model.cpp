@@ -81,7 +81,7 @@ struct HasDeclaredStateApi<Api, std::void_t<decltype(&Api::GetDeclaredStateSuppo
                                             decltype(&Api::SessionOptionsSetDeclaredStateContract)>> : std::true_type {};
 
 template <typename Api>
-void SetDeclaredStateContract(const Api& api, OrtSessionOptions& options, const std::string& json) {
+void SetDeclaredStateContract(const Api& api, OrtSessionOptions& options, const std::string& json, uint32_t version) {
   if (Ort::api_version < 33) {
     throw std::runtime_error("K1 requires an ORT SDK and runtime with the declared-state APIs (API 33 or later).");
   }
@@ -89,8 +89,8 @@ void SetDeclaredStateContract(const Api& api, OrtSessionOptions& options, const 
   if constexpr (HasDeclaredStateApi<Api>::value) {
     uint32_t max_version = 0;
     Ort::ThrowOnError(api.GetDeclaredStateSupport(&max_version));
-    if (max_version < 1)
-      throw std::runtime_error("K1 requires positive support for dense declared-state schema version 1.");
+    if (max_version < version)
+      throw std::runtime_error("K1 requires positive support for declared-state schema version " + std::to_string(version) + ".");
     Ort::ThrowOnError(api.SessionOptionsSetDeclaredStateContract(&options, json.data(), json.size()));
   } else {
     throw std::runtime_error("K1 requires an ORT SDK and runtime with the declared-state APIs (API 33 or later).");
@@ -645,8 +645,10 @@ void State::ValidateDeclaredState(int64_t total_length) const {
   if (params_->search.max_length != declared_state_max_length_) {
     throw std::runtime_error("K1 generator max_length cannot change after construction.");
   }
-  if (total_length < 0 || total_length > declared_state_max_length_) {
-    throw std::runtime_error("K1 sequence length exceeds the generator's immutable cache envelope.");
+  const int bound = model_.DeclaredStateIsPaged() ? model_.GetDeclaredState()->max_sequence_length
+                                                  : declared_state_max_length_;
+  if (total_length < 0 || total_length > bound) {
+    throw std::runtime_error("K1 sequence length exceeds the immutable cache envelope.");
   }
 }
 
@@ -1153,24 +1155,43 @@ std::vector<CacheAllocation> Model::GetCacheAllocations(std::span<const std::str
 
 Model::DeclaredStateEnvelope::DeclaredStateEnvelope(const Config& config)
     : limits{*config.model.decoder.declared_state},
-      share_buffer{config.search.past_present_share_buffer},
+      paged{config.engine.dynamic_batching.has_value()},
+      share_buffer{paged || config.search.past_present_share_buffer},
+      kv_heads{config.model.decoder.num_key_value_heads},
+      head_size{config.model.decoder.head_size},
       json{BuildDeclaredStateContract(config)} {}
 
 const Config::Model::Decoder::DeclaredState* Model::GetDeclaredState() const {
   return declared_state_ ? &declared_state_->limits : nullptr;
 }
 
+bool Model::DeclaredStateIsPaged() const {
+  return declared_state_ && declared_state_->paged;
+}
+
 bool Model::DeclaredStateSharesBuffer() const {
   return declared_state_ && declared_state_->share_buffer;
+}
+
+void Model::ValidateDeclaredStateEngineConfig() const {
+  if (!DeclaredStateIsPaged())
+    return;
+  if (BuildDeclaredStateContract(*config_) != declared_state_->json ||
+      config_->model.decoder.num_key_value_heads != declared_state_->kv_heads ||
+      config_->model.decoder.head_size != declared_state_->head_size)
+    throw std::runtime_error("Paged K1 pool geometry, names, and workload limits cannot change after session creation.");
 }
 
 void Model::ValidateDeclaredStateParams(const GeneratorParams& params) const {
   if (!declared_state_)
     return;
-  if (params.model_.get() != this || params.search.batch_size != 1 || params.search.num_beams != 1 ||
+  ValidateDeclaredStateEngineConfig();
+  if (params.model_.get() != this || params.search.batch_size <= 0 ||
+      params.search.batch_size > declared_state_->limits.max_batch_size || params.search.num_beams != 1 ||
       params.search.num_return_sequences != 1 || params.search.max_length <= 0 ||
       params.search.max_length > declared_state_->limits.max_sequence_length ||
-      params.IsPastPresentShareBufferEnabled(config_->model.type) != declared_state_->share_buffer ||
+      (!DeclaredStateIsPaged() &&
+       params.IsPastPresentShareBufferEnabled(config_->model.type) != declared_state_->share_buffer) ||
       params.use_graph_capture || params.use_multi_profile || params.speculative.ngram_size != 0) {
     throw std::runtime_error(
         "K1 generator parameters must belong to this model and preserve its batch, beam, length, "
@@ -1181,11 +1202,41 @@ void Model::ValidateDeclaredStateParams(const GeneratorParams& params) const {
 std::shared_ptr<const void> Model::AcquireDeclaredStateLease(const GeneratorParams& params) const {
   if (!declared_state_)
     return {};
+  if (DeclaredStateIsPaged())
+    throw std::runtime_error("Paged K1 requires Engine execution, not a dense Generator.");
   ValidateDeclaredStateParams(params);
   std::lock_guard lock{declared_state_->resident_mutex};
   if (!declared_state_->resident.expired()) {
     throw std::runtime_error("K1 permits only one resident generator; destroy it before creating another.");
   }
+  auto lease = std::make_shared<const int>(0);
+  declared_state_->resident = lease;
+  return lease;
+}
+
+std::shared_ptr<const void> Model::AcquireDeclaredStateEngineLease() const {
+  if (!declared_state_)
+    return {};
+  if (!DeclaredStateIsPaged())
+    throw std::runtime_error("K1 dense declared state does not support Engine execution.");
+  ValidateDeclaredStateEngineConfig();
+  std::lock_guard lock{declared_state_->resident_mutex};
+  if (!declared_state_->engine.expired())
+    throw std::runtime_error("Paged K1 permits only one Engine per model.");
+  auto lease = std::make_shared<const int>(0);
+  declared_state_->engine = lease;
+  return lease;
+}
+
+std::shared_ptr<const void> Model::AcquireDeclaredStatePoolLease() const {
+  if (!declared_state_)
+    return {};
+  if (!DeclaredStateIsPaged())
+    throw std::runtime_error("Paged pools cannot use a dense K1 declaration.");
+  ValidateDeclaredStateEngineConfig();
+  std::lock_guard lock{declared_state_->resident_mutex};
+  if (!declared_state_->resident.expired())
+    throw std::runtime_error("Paged K1 permits only one resident pool set per model.");
   auto lease = std::make_shared<const int>(0);
   declared_state_->resident = lease;
   return lease;
@@ -1197,10 +1248,10 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
     ValidateDeclaredStateConfig(*config_);
     if ((p_device_->GetType() != DeviceType::CPU && p_device_->GetType() != DeviceType::CUDA) ||
         p_device_->GetKeyValueCacheQuantizationBits(config_->model.decoder.session_options) != 0) {
-      throw std::runtime_error("K1 currently supports only unquantized CPU/CUDA dense GQA caches.");
+      throw std::runtime_error("K1 currently supports only unquantized CPU/CUDA caches.");
     }
     declared_state_ = std::make_unique<DeclaredStateEnvelope>(*config_);
-    SetDeclaredStateContract(*Ort::api, *session_options_, declared_state_->json);
+    SetDeclaredStateContract(*Ort::api, *session_options_, declared_state_->json, declared_state_->paged ? 2 : 1);
   }
   EnsureDeviceOrtInit(*p_device_, *config_);
   if (config_->engine.dynamic_batching &&
