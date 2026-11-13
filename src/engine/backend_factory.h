@@ -12,9 +12,14 @@ struct EngineBackendBundle {
   BackendCapabilities capabilities;
 };
 
+void ValidateRecomputePreemptionModel(const Config& config);
+void ValidateRecomputePreemptionModel(const Config& config, const EnginePreemptionOptions& preemption);
+bool SupportsRecomputePreemptionModel(const Config& config);
+
 // Resources/profile selection belongs to Model initialization. This factory only assembles
 // collaborators for that already-selected model and leases its execution context.
-EngineBackendBundle CreateEngineBackend(std::shared_ptr<Model> model);
+EngineBackendBundle CreateEngineBackend(
+    std::shared_ptr<Model> model, const ExperimentalEngineOptions& options = ExperimentalEngineOptions{});
 
 // Compatibility for injected collaborators. Explicit descriptors are checked against the actual
 // execution interfaces; old test/custom bundles can omit one and retain their existing behavior.

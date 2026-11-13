@@ -417,6 +417,77 @@ TEST_F(SchedulerContractTest, QueuedImagePreparationRespectsPerRequestCapacityFa
   }
 }
 
+TEST_F(SchedulerContractTest, PreemptionReclaimsIdleResidentForDeferredQueuedImage) {
+  for (const bool preemption : {false, true}) {
+    auto& config = *model_->config_->engine.dynamic_batching;
+    config.block_size = 4;
+    config.num_blocks = 1;
+    config.max_batch_size = 4;
+    config.enable_recompute_preemption = preemption;
+    config.min_decode_steps_before_preemption = 1;
+    config.max_preemptions_per_step = 1;
+    auto cache = std::make_shared<PagedCacheManager>(model_);
+    DynamicBatchScheduler scheduler(model_, cache);
+    auto completed = Assigned(10);
+    scheduler.AddRequest(completed);
+    {
+      // Commit a real prefill so committed paged-KV ownership matches the processed length.
+      StepPlan prefill;
+      ASSERT_TRUE(scheduler.PlanStep(prefill).executable);
+      ASSERT_EQ(prefill.requests.size(), 1u);
+      auto reservation = cache->ReserveStep(prefill);
+      completed->Schedule();
+      auto& entry = prefill.requests[0];
+      auto logits = model_->p_device_inputs_->Allocate<float>(
+          static_cast<size_t>(model_->config_->model.vocab_size));
+      auto cpu_logits = logits.CpuSpan();
+      std::fill(cpu_logits.begin(), cpu_logits.end(), 0.0f);
+      cpu_logits[5] = 100.0f;
+      logits.CopyCpuToDevice();
+      PrepareRequestStep(model_, entry);
+      completed->SaveStateForTransaction();
+      const auto step = completed->ApplyLogitsForTransaction(logits);
+      completed->CommitStateForTransaction();
+      completed->CommitStep(entry, step);
+      reservation->Commit();
+    }
+    ASSERT_TRUE(cache->IsResident(completed));
+    ASSERT_GT(completed->ProcessedSequenceLength(), 0);
+    completed->status_ = RequestStatus::TurnComplete;
+
+    auto image_request = Assigned(20);
+    auto image = std::make_shared<MediaItem>();
+    image->rows = 2;
+    image_request->ReserveMedia(1);
+    image_request->AppendMedia(std::array<MediaSpan, 1>{{{0, image}}});
+    scheduler.AddRequest(image_request);
+
+    StepPlan plan;
+    const auto result = scheduler.PlanStep(plan);
+    EXPECT_TRUE(plan.Empty());
+    EXPECT_TRUE(result.capacity_deferred);
+    if (!preemption) {
+      EXPECT_EQ(result.outcome.kind, StepOutcomeKind::CapacityDeferred);
+      EXPECT_FALSE(result.preparation_item);
+      EXPECT_TRUE(cache->IsResident(completed));
+      continue;
+    }
+    ASSERT_EQ(result.outcome.kind, StepOutcomeKind::PreparationProgress);
+    EXPECT_EQ(result.preparation_request, image_request);
+    EXPECT_EQ(result.preparation_item, image);
+    EXPECT_FALSE(cache->IsResident(completed));
+    EXPECT_EQ(completed->PreemptionCount(), 1u);
+    EXPECT_EQ(completed->status_, RequestStatus::TurnComplete);
+    EXPECT_EQ(image_request->status_, RequestStatus::Assigned);
+
+    image->features = std::make_shared<Tensor>(GetDeviceInterface(DeviceType::CPU), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    const auto admitted = scheduler.PlanStep(plan);
+    ASSERT_TRUE(admitted.executable);
+    ASSERT_EQ(plan.requests.size(), 1u);
+    EXPECT_EQ(plan.requests[0].request, image_request);
+  }
+}
+
 TEST_F(SchedulerContractTest, QueuedImagePreparationProbesTheProspectivePrefixBoundary) {
   auto& config = *model_->config_->engine.dynamic_batching;
   config.block_size = 4;

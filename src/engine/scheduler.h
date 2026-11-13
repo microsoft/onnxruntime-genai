@@ -7,6 +7,7 @@
 #include "scheduled_requests.h"
 #include "cache_manager.h"
 #include "step_plan.h"
+#include "engine_options.h"
 
 /**
  * @file scheduler.h
@@ -40,6 +41,8 @@ struct Scheduler {
   explicit Scheduler(std::shared_ptr<Model> model);
 
   static std::unique_ptr<Scheduler> Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
+  static std::unique_ptr<Scheduler> Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager,
+                                           const EnginePreemptionOptions& preemption);
 
   /**
    * @brief Adds a request to the Scheduler for processing.
@@ -90,9 +93,13 @@ struct Scheduler {
     return {{StepOutcomeKind::Committed, 0, nullptr}, std::move(scheduled)};
   }
 
+  // Plans the next model transaction. Recompute preemption may first commit validated cache
+  // releases and mark victims for replay. Those suspensions are a separate commit boundary:
+  // a later reservation or execution rollback must not restore the victims' released KV.
   virtual StepPlanningResult PlanStep(StepPlan&) {
     throw std::logic_error("Scheduler does not support transactional step planning.");
   }
+  virtual void OnStepCommitted(const StepPlan&) noexcept {}
 
   ScheduledRequests CreateScheduledRequests(const StepPlan& plan);
 
@@ -101,6 +108,7 @@ struct Scheduler {
   }
 
   virtual bool SupportsIndependentSlotAdmission() const { return false; }
+  virtual bool SupportsRecomputePreemption() const { return false; }
 
   /**
    * @brief Checks if the Scheduler has any pending requests.
@@ -145,8 +153,24 @@ struct StaticBatchScheduler : Scheduler {
   std::vector<std::shared_ptr<Request>> requests_pool_;
 };
 
+// Builds repeated beneficiary-first preemption probes from one stable, bounded snapshot of the
+// resident candidates. Waiting admissions are filtered once rather than rescanned for every
+// omitted beneficiary.
+struct PreemptionProbeBuilder {
+  PreemptionProbeBuilder(std::span<const RequestStepPlan> candidates,
+                         size_t resident_capacity);
+
+  StepPlan Build(const StepPlan& source,
+                 const RequestStepPlan& beneficiary) const;
+
+ private:
+  std::vector<RequestStepPlan> resident_candidates_;
+};
+
 struct DynamicBatchScheduler : Scheduler {
   DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
+  DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager,
+                        const EnginePreemptionOptions& preemption);
 
   void AddRequest(std::shared_ptr<Request> request) override;
 
@@ -158,15 +182,27 @@ struct DynamicBatchScheduler : Scheduler {
   ScheduledRequests Schedule() override;
 
   StepPlanningResult PlanStep(StepPlan& plan) override;
+  void OnStepCommitted(const StepPlan& plan) noexcept override;
 
   bool HasPendingRequests() const override;
 
   bool SupportsIndependentSlotAdmission() const override { return true; }
+  bool SupportsRecomputePreemption() const override { return true; }
 
  private:
+  std::vector<std::shared_ptr<Request>> PlanPreemption(
+      StepPlan& plan, std::span<const RequestStepPlan> candidates,
+      StepPlanningResult& result);
+
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
+  bool preemption_enabled_{};
+  RecomputeLimits recompute_limits_;
+  AgeBasedRecoveryOptions age_based_recovery_;
+  uint64_t committed_step_index_{};
+  std::weak_ptr<Request> preemption_beneficiary_;
+  uint64_t preemption_beneficiary_turn_id_{};
 };
 
 std::unique_ptr<Scheduler> CreateScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);

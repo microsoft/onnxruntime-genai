@@ -3,6 +3,7 @@
 
 #include "backend_factory.h"
 #include "../logging.h"
+#include "../models/model_state_manifest.h"
 #include "../models/qwen38_graph.h"
 #include "qwen38_graph_executor.h"
 #include "decoders/varlen_decoder_io.h"
@@ -80,7 +81,7 @@ size_t IndexShareScratchBytes(const DecoderOnly_Model& model, size_t max_batch) 
   return CheckedMtpAdd(bytes, CheckedMtpMultiply(stages, state_bytes));
 }
 
-EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
+EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model, const EnginePreemptionOptions& preemption) {
   const auto* decoder = dynamic_cast<const DecoderOnly_Model*>(model.get());
   if (decoder && !decoder->rope_context_input_.empty()) {
     throw std::runtime_error(
@@ -243,9 +244,10 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
   }
   std::shared_ptr<CacheManager> cache_manager =
       CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
-                           dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes,
+                           dflash2_reserved_memory_bytes,
                            dflash2_prefix_checkpoint_bytes,
-                           &dflash2_prefix_checkpoints_enabled);
+                           &dflash2_prefix_checkpoints_enabled,
+                           graph_buffer_reserved_bytes, preemption.Enabled());
   std::shared_ptr<PrefixSnapshotCache> snapshot_cache;
   const auto& batching = model->config_->engine.dynamic_batching;
   const bool webgpu = model->p_device_kvcache_->GetType() == DeviceType::WEBGPU;
@@ -284,7 +286,7 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
           dflash2_max_batch_size);
     }
   }
-  auto scheduler = Scheduler::Create(model, cache_manager);
+  auto scheduler = Scheduler::Create(model, cache_manager, preemption);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
 
   std::shared_ptr<CacheManager> mtp_cache_manager;
@@ -307,6 +309,27 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
 }
 
 }  // namespace
+
+void ValidateRecomputePreemptionModel(const Config& config) {
+  ValidateRecomputePreemptionModel(config, ResolveEnginePreemptionOptions(config));
+}
+
+bool SupportsRecomputePreemptionModel(const Config& config) {
+  return config.engine.dynamic_batching &&
+         config.model.type != "qwen38_flash_graph" &&
+         !ModelStateManifest{config.model.decoder}.HasFixedStateGroups() &&
+         !config.model.decoder.sliding_window &&
+         !config.model.mtp.IsEnabled() && config.model.dflash2.filename.empty() &&
+         config.speculative.ngram_size == 0;
+}
+
+void ValidateRecomputePreemptionModel(const Config& config, const EnginePreemptionOptions& preemption) {
+  if (preemption.Enabled() && !SupportsRecomputePreemptionModel(config)) {
+    throw std::runtime_error(
+        "Recompute preemption currently supports only full-attention paged KV; "
+        "fixed, sliding-window, model-managed and speculative auxiliary state are unsupported.");
+  }
+}
 
 BackendCapabilities ResolveBackendCapabilities(
     const Model& model, const CacheManager& cache_manager, const Scheduler& scheduler,
@@ -412,8 +435,10 @@ BackendCapabilities ResolveBackendCapabilities(
   return explicit_capabilities;
 }
 
-EngineBackendBundle CreateEngineBackend(std::shared_ptr<Model> model) {
+EngineBackendBundle CreateEngineBackend(std::shared_ptr<Model> model, const ExperimentalEngineOptions& options) {
   if (!model) throw std::invalid_argument("Engine backend construction requires a model.");
+  const auto preemption = ResolveEnginePreemptionOptions(*model->config_, options);
+  ValidateRecomputePreemptionModel(*model->config_, preemption);
   auto& batching = model->config_->engine.dynamic_batching;
   if (batching && batching->device_memory_budget_bytes) {
     if (model->p_device_kvcache_->GetType() != DeviceType::CUDA ||
@@ -440,8 +465,9 @@ EngineBackendBundle CreateEngineBackend(std::shared_ptr<Model> model) {
     declared = graph_model->ResolvedBackendCapabilities();
     dependencies = CreateQwen38GraphDependencies(std::move(graph_model));
   } else {
-    dependencies = CreateDecoderDependencies(model);
+    dependencies = CreateDecoderDependencies(model, preemption);
   }
+  dependencies.preemption_options = preemption;
   auto capabilities = ResolveBackendCapabilities(
       *model, *dependencies.cache_manager, *dependencies.scheduler, *dependencies.model_executor,
       declared ? declared : dependencies.backend_capabilities);

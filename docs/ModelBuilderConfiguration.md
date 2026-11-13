@@ -193,6 +193,18 @@ Allow supported settings under:
 - `search`, including generation parameters and `chunk_size`.
 - `speculative`, including `max_draft_tokens` and supported adaptation policy.
 - `engine.dynamic_batching`, including batch/token limits and cache allocation.
+- `engine.dynamic_batching.enable_recompute_preemption`, a strict boolean (default `false`),
+  plus `max_preemptions_per_step` (default `1`) and `min_decode_steps_before_preemption`
+  (default `8`), positive integers bounded by `2147483647`. Base runtime fragments and profile
+  overlays share validation and preserve explicit `false`. These permanently select default-off,
+  construction-time age-based recovery, not foreground scheduling or exported graph properties.
+  Runtime Engine construction options use a separate explicitly versioned experimental boundary;
+  they do not add new export settings or weaken the permanence of these legacy keys. See the
+  [policy compatibility contract](paged_attention_engine.md#policy-selection-and-compatibility)
+  for runtime numeric precedence and explicit-selection conflicts.
+  Enabled preemption currently requires full-attention paged KV
+  without fixed, ring/model-managed, or auxiliary/speculative state; Engine construction rejects
+  unsupported layouts. See [Recompute preemption](paged_attention_engine.md#recompute-preemption).
 - `engine.dynamic_batching.dflash2_max_snapshots`, an integer from `0` through `2147483647` (default `1`). `0` disables windowed DFlash 2 prefix snapshots without disabling target prefix caching. The runtime caps the effective count by its cache memory budget and target checkpoint capacity (`max_batch_size`). This is runtime resource policy, not a graph property. The selected runtime profile overrides the base value before Engine construction.
 - `model.<existing-component>.session_options` and `run_options`, including supported provider, allocator, threading, and profiling options.
 - `runtime_profiles`, for typed CUDA memory-class overlays applied before model and Engine construction.

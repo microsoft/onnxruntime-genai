@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "cache_manager.h"
+#include "engine_options.h"
 
 #include <algorithm>
 #include <exception>
@@ -213,13 +214,15 @@ std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model,
                                                    size_t auxiliary_bytes_per_block,
                                                    size_t auxiliary_reserved_memory_bytes,
                                                    size_t optional_draft_checkpoint_bytes,
-                                                   bool* draft_checkpoint_enabled) {
+                                                   bool* draft_checkpoint_enabled,
+                                                   size_t non_auxiliary_reserved_memory_bytes,
+                                                   std::optional<bool> recompute_preemption_enabled) {
   const ModelStateManifest manifest{model->config_->model.decoder};
   if (model->config_->engine.dynamic_batching) {
     ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
     auto manager = std::make_unique<PagedCacheManager>(
         model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes,
-        optional_draft_checkpoint_bytes);
+        optional_draft_checkpoint_bytes, non_auxiliary_reserved_memory_bytes, recompute_preemption_enabled);
     if (draft_checkpoint_enabled) {
       *draft_checkpoint_enabled = manager->DraftCheckpointEnabled();
     }
@@ -374,9 +377,23 @@ bool StaticCacheManager::IsResident(const std::shared_ptr<Request>& request) con
 PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
                                      size_t auxiliary_bytes_per_block,
                                      size_t auxiliary_reserved_memory_bytes,
-                                     size_t optional_draft_checkpoint_bytes)
+                                     size_t optional_draft_checkpoint_bytes,
+                                     size_t non_auxiliary_reserved_memory_bytes,
+                                     std::optional<bool> recompute_preemption_enabled)
     : CacheManager(model),
-      params_(std::make_shared<GeneratorParams>(*model_)) {
+      params_(std::make_shared<GeneratorParams>(*model_)),
+      recompute_preemption_enabled_{recompute_preemption_enabled
+                                        ? *recompute_preemption_enabled
+                                        : ResolveEnginePreemptionOptions(*model_->config_).Enabled()} {
+  has_auxiliary_state_ = auxiliary_bytes_per_block != 0 ||
+                         auxiliary_reserved_memory_bytes != 0 ||
+                         optional_draft_checkpoint_bytes != 0;
+  if (non_auxiliary_reserved_memory_bytes >
+      std::numeric_limits<size_t>::max() - auxiliary_reserved_memory_bytes) {
+    throw std::overflow_error("Combined paged cache reserved memory overflows size_t.");
+  }
+  size_t reserved_memory_bytes =
+      auxiliary_reserved_memory_bytes + non_auxiliary_reserved_memory_bytes;
   // The paged cache resolves its own paged_kv group. The fixed pool is created only when the
   // decoder manifest declares fixed state groups, so a dense paged model owns no pool and
   // the composite path degrades to paged-only. Its capacity matches the paged batch limit so paged
@@ -431,7 +448,7 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
       }
     }
     size_t available = budget;
-    for (const size_t reserved : {auxiliary_reserved_memory_bytes,
+    for (const size_t reserved : {reserved_memory_bytes,
                                   PagedCacheCaptureBlockTableBytes(model_), target_block_bytes}) {
       available -= std::min(available, reserved);
     }
@@ -439,7 +456,7 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
     const size_t vram_count = device_resident ? device_count
                                               : std::min(device_count, limits.vram_bytes / optional_draft_checkpoint_bytes);
     draft_checkpoint_vram_bytes_ = vram_count * optional_draft_checkpoint_bytes;
-    auxiliary_reserved_memory_bytes += draft_checkpoint_vram_bytes_;
+    reserved_memory_bytes += draft_checkpoint_vram_bytes_;
     const size_t ram_count = limits.ram_bytes / optional_draft_checkpoint_bytes;
     const size_t disk_count = limits.disk_bytes / optional_draft_checkpoint_bytes;
     const size_t host_count =
@@ -455,7 +472,7 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.
   key_value_cache_ = std::make_unique<PagedKeyValueCache>(
-      model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes,
+      model, auxiliary_bytes_per_block, reserved_memory_bytes,
       hybrid_prefix_caching, prefix_checkpoint_capacity);
   if (optional_draft_checkpoint_bytes != 0 && g_log.enabled) {
     const auto& batching = *model_->config_->engine.dynamic_batching;
@@ -674,6 +691,11 @@ void PagedCacheManager::ValidateRewind(
 void PagedCacheManager::ReleaseForRewind(
     const std::shared_ptr<Request>& request) {
   ValidateRewind(request);
+  ReleaseForRewindValidated(request);
+}
+
+void PagedCacheManager::ReleaseForRewindValidated(
+    const std::shared_ptr<Request>& request) noexcept {
   if (!IsResident(request)) {
     return;
   }
@@ -686,6 +708,15 @@ void PagedCacheManager::ReleaseForRewind(
   cache_allocated_requests_.erase(
       std::remove(cache_allocated_requests_.begin(), cache_allocated_requests_.end(), request),
       cache_allocated_requests_.end());
+}
+
+void PagedCacheManager::CommitPreemption(
+    const std::shared_ptr<Request>& request) noexcept {
+  assert(SupportsRecomputePreemption());
+  assert(IsResident(request));
+  assert(request->CanSuspendForRecompute());
+  ReleaseForRewindValidated(request);
+  request->SuspendForRecompute();
 }
 
 void PagedCacheManager::DetachRequestForTeardown(
@@ -715,6 +746,9 @@ size_t PagedCacheManager::MaxQueryTokensPerRequest() const {
 }
 
 size_t PagedCacheManager::MaxDraftTokensPerStep() const {
+  if (recompute_preemption_enabled_) {
+    return 0;
+  }
   // Recurrent state can only be replayed through the compact transitions the operators captured.
   // Without fixed state the paged KV boundary alone decides, and any tail slot can be left
   // uncommitted.
@@ -825,6 +859,28 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
           plan.requests.size(), capture_state_updates),
   };
   return result;
+}
+
+StepPlanningResult PagedCacheManager::PlanStepAfterReleasing(
+    StepPlan& plan, std::span<const std::shared_ptr<Request>> requests) const {
+  if (!SupportsRecomputePreemption()) {
+    throw StepPlanningConsistencyError(
+        "Recompute preemption requires full-attention paged KV without fixed or auxiliary state.");
+  }
+  std::vector<const void*> request_ids;
+  request_ids.reserve(requests.size());
+  for (const auto& request : requests) {
+    if (!request || !IsResident(request) ||
+        key_value_cache_->CommittedSlots(request.get()) !=
+            static_cast<size_t>(request->ProcessedSequenceLength())) {
+      throw StepPlanningConsistencyError(
+          "Preemption request and committed cache ownership disagree.");
+    }
+    ValidateRewind(request);
+    request_ids.push_back(request.get());
+  }
+  plan.fixed_state = {};
+  return key_value_cache_->PlanStepResources(plan, request_ids);
 }
 
 void PagedCacheManager::OrderStepForExecution(StepPlan& plan) const {

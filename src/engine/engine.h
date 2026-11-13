@@ -39,6 +39,8 @@ struct EngineCapabilities {
   size_t configured_max_batch_size{};
   size_t max_scheduled_tokens{};
   uint64_t max_request_length{};
+  ExperimentalEnginePolicy experimental_policy{ExperimentalEnginePolicy::Default};
+  bool supports_age_based_recovery{};
 };
 
 enum class EngineErrorCode : uint32_t {
@@ -109,6 +111,7 @@ struct EngineDependencies {
   EngineStepErrorFactory make_step_error{};
   std::shared_ptr<PrefixSnapshotCache> snapshot_cache;
   std::optional<BackendCapabilities> backend_capabilities;
+  std::optional<EnginePreemptionOptions> preemption_options;
 };
 
 void ValidateMtpModelCompatibility(const Config& config,
@@ -147,6 +150,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
    * to constructing those collaborators inline.
    */
   Engine(std::shared_ptr<Model> model);
+  Engine(std::shared_ptr<Model> model, const ExperimentalEngineOptions& options);
   ~Engine();
 
   /**
@@ -164,6 +168,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
    *        model, in the order they depend on one another.
    */
   static EngineDependencies CreateDependencies(std::shared_ptr<Model> model);
+  static EngineDependencies CreateDependencies(std::shared_ptr<Model> model, const ExperimentalEngineOptions& options);
 
   std::shared_ptr<Request> CreateRequest(const RequestOptions& options);
   std::shared_ptr<Request> CreateRequest() {
@@ -210,6 +215,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   SpeculativeStats GetSpeculativeStats() const;
 
   EngineCapabilities GetCapabilities() const;
+  bool RecomputePreemptionEnabled() const noexcept { return preemption_options_.Enabled(); }
 
   /**
    * @brief Returns a snapshot of cumulative prefix-cache activity, when available.
@@ -304,6 +310,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
   BackendCapabilities backend_capabilities_;
+  EnginePreemptionOptions preemption_options_;
+  bool supports_age_based_recovery_{};
   // Lazily created on the first stop-enabled BeginTurn (the no-stop fast path never touches this).
   // Shared by every Request's StopStringController so the tokenizer's underlying vocabulary/config
   // is loaded once per Engine rather than once per Request.

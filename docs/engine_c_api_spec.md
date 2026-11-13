@@ -12,7 +12,7 @@ The public ownership and execution hierarchy is:
 
 ```text
 Model
-  `-- Engine                 one shared runtime configured by model.config.engine
+  `-- Engine                 runtime configured by model.config.engine and construction options
         `-- Request          one resident conversation/session
               `-- Turn       one queued, active, or completed generation invocation
 ```
@@ -37,6 +37,7 @@ The redesign must:
 
 ```c
 typedef struct OgaEngine OgaEngine;
+typedef struct OgaExperimentalEngineOptions OgaExperimentalEngineOptions;
 typedef struct OgaEngineEvent OgaEngineEvent;
 typedef struct OgaEngineEventBuffer OgaEngineEventBuffer;
 typedef struct OgaRequest OgaRequest;
@@ -53,6 +54,48 @@ through getters, so the API publishes no layout, size, alignment, version, or st
 Request creation takes no generation parameters. The Engine derives each Request's private search
 configuration from its own model, forcing a single sequence and a single beam, so no caller-supplied
 `GeneratorParams` field can reach the Engine and be silently ignored.
+
+### Experimental construction options, revision 1
+
+The existing `OgaCreateEngine(model, out)` and C++/Python no-options constructors retain their
+behavior. To opt into the separately versioned experimental policy surface:
+
+```c
+typedef uint32_t OgaExperimentalEnginePolicy;
+#define OgaExperimentalEnginePolicy_Default ((OgaExperimentalEnginePolicy)0)
+#define OgaExperimentalEnginePolicy_AgeBasedRecovery ((OgaExperimentalEnginePolicy)1)
+
+OgaResult* OgaCreateExperimentalEngineOptions(uint32_t version, OgaExperimentalEngineOptions** out);
+void OgaDestroyExperimentalEngineOptions(OgaExperimentalEngineOptions* options);
+OgaResult* OgaExperimentalEngineOptionsSetPolicy(
+    OgaExperimentalEngineOptions* options, OgaExperimentalEnginePolicy policy);
+OgaResult* OgaExperimentalEngineOptionsSetRecomputeLimits(
+    OgaExperimentalEngineOptions* options, size_t max_victims_per_step);
+OgaResult* OgaExperimentalEngineOptionsSetAgeBasedRecovery(
+    OgaExperimentalEngineOptions* options, size_t min_decode_steps_before_preemption);
+OgaResult* OgaCreateEngineWithExperimentalOptions(
+    OgaModel* model, const OgaExperimentalEngineOptions* options, OgaEngine** out);
+```
+
+Version `1` is required; unknown revisions and policies fail. `Default` is wait-only;
+`AgeBasedRecovery` adds committed-service aging and selective recompute recovery. No foreground
+policy is exposed. Policy selection, the shared recompute victim cap, and age-specific quantum
+are separate setters. Both numbers must be positive; their defaults are one victim and eight
+decode steps, respectively, unless supplied by legacy model/profile settings.
+
+Model/profile selection precedes runtime options. The selected profile's explicit false overrides
+base true. An omitted runtime policy inherits the effective legacy flag. An explicit runtime policy
+conflicting with an explicit effective legacy flag is an error; omitted/default false is not an
+explicit contradiction. Runtime numbers override legacy defaults, but setting either runtime tuning
+group with effective `Default` is an error, not an ignored option. Unsupported layouts fail without
+fallback. Creation copies options without modifying the Model; options may subsequently change or
+be destroyed without affecting the Engine.
+
+This opt-in runtime API has an explicit experimental revision boundary and may change or be retired
+in future releases. Unsupported revisions must not silently acquire a new meaning. No new
+`genai_config` keys are added and no permanent legacy configuration keys are deprecated, made
+removable, or reinterpreted by that boundary. See the complete
+[compatibility contract and wrapper examples](paged_attention_engine.md#policy-selection-and-compatibility).
 
 ### Request options
 
@@ -594,6 +637,11 @@ selection. For static batching, the maximum batch size is the configured value, 
 four when no `static_batching` entry exists; it does not account for any lower operational limit in
 the current static scheduler. The snapshot also reports the maximum Request length after
 runtime-profile selection and cache construction. The call follows the Engine owner-thread rule.
+`OgaEngineCapabilitiesGetExperimentalPolicy` reports the effective policy.
+`OgaEngineCapabilitiesSupportsExperimentalPolicy` reports support for a known policy on this
+Engine's actual model/backend/cache, even when not selected: `Default` always; `AgeBasedRecovery`
+only for compatible full-attention dynamic paged KV without auxiliary state. Unknown policies and
+null arguments return errors. Capability reporting is not production or performance qualification.
 
 `max_request_length` is the maximum logical token length one Request can reach when it has exclusive
 use of the target paged cache. It includes the final sampled token that has not yet been written to
@@ -613,6 +661,11 @@ size_t max_scheduled_tokens =
   OgaEngineCapabilitiesGetMaxScheduledTokens(capabilities);
 uint64_t max_request_length =
   OgaEngineCapabilitiesGetMaxRequestLength(capabilities);
+OgaExperimentalEnginePolicy policy;
+bool supports_age;
+OgaCheckResult(OgaEngineCapabilitiesGetExperimentalPolicy(capabilities, &policy));
+OgaCheckResult(OgaEngineCapabilitiesSupportsExperimentalPolicy(
+    capabilities, OgaExperimentalEnginePolicy_AgeBasedRecovery, &supports_age));
 OgaDestroyEngineCapabilities(capabilities);
 ```
 
@@ -645,11 +698,17 @@ not processed any model tokens may be restarted while nonresident; otherwise the
 and device-specific continuous-decoding rules apply. Static batching supports continuous decoding
 only when its resident batch contains one Request.
 
+An explicitly enabled recompute-preemption Engine can also mark a formerly resident Request for
+cache replay. Cancellation preserves this marker: after its terminal event is drained, the next
+Turn can re-admit and rebuild the full retained context even though earlier Turns processed model
+tokens. Automatic eviction of an idle Turn-complete Request has the same replay behavior.
+
 `CancelTurn` behavior:
 
 | Request/Turn state | Result |
 | --- | --- |
 | ID matches queued or active Turn | Cancel synchronously and set `out_cancelled = true` |
+| ID matches a suspended Turn | Cancel with the same logical-token and usage preservation |
 | ID identifies the completed Turn | Success with `false` |
 | ID is stale, unknown, or newer than the current Turn | Success with `false`; never cancel another Turn |
 | Request has never started or is closed | Error |
@@ -659,6 +718,11 @@ and publishes a `TurnFinished` event with reason `Cancelled`. If an undelivered 
 the same Turn already exists, cancellation merges the terminal fields into that event rather than
 creating a second event. Cancellation is idempotent by Turn ID: the first matching queued or active
 Turn returns true, and later calls return false.
+
+Hosts should cancel superseded or expired Turns rather than retain them for recompute replay.
+Cancellation of a suspended Turn queues its terminal event without waiting for another model
+token; the host must still drain events through `OgaEngineRun`. Scheduling importance, replacement
+identities, useful-output deadlines, and foreground/background handoff are not controls in this API.
 
 `OgaEngineRun` uses an opaque, caller-owned reusable Buffer:
 
@@ -680,13 +744,16 @@ still returns its stored fatal error.
 RequestCreated/Unassigned
    | BeginTurn -> turn_id
    v
-Assigned/Active -- Token event -------------------------------+
-   |                                                          |
-   +-- Token | TurnFinished(reason) --> TurnComplete           |
-   |                                      |                   |
-   +-- CancelTurn(same turn_id) -----------+                   |
-                                          | BeginTurn          |
-                                          +-------------------+
+Assigned -- admission --> Active -- Token event --> Active
+
+Active -- internal preemption --> Suspended
+Active <-- automatic re-admission/replay (same turn_id) -- Suspended
+
+Assigned/Active/Suspended -- CancelTurn(same turn_id) --> TurnComplete
+Active -- Token | TurnFinished(reason) --> TurnComplete
+
+TurnComplete -- internal idle eviction --> TurnComplete/CacheReplay
+TurnComplete[/CacheReplay] -- BeginTurn -> next turn_id --> Assigned
 
 TurnComplete -- RewindToStartOfTurn(turn_id) --> TurnComplete/Replaying
                                                        |
@@ -696,6 +763,13 @@ TurnComplete -- RewindToStartOfTurn(turn_id) --> TurnComplete/Replaying
 
 Any state -- Close --> Closed
 ```
+
+`Suspended` is an internal state of an unfinished Turn. Automatic re-admission and cache replay
+resume that same Turn without `BeginTurn`; `BeginTurn` remains invalid until the Turn completes
+or is canceled and its terminal event is drained. Cancellation completes the same suspended Turn
+and preserves its cache-replay marker. Idle eviction never reopens a completed Turn: the Request
+remains `TurnComplete` with a cache-replay marker, and a later `BeginTurn` starts a new Turn.
+`CacheReplay` in the diagram denotes that marker, not a separate Request status.
 
 There is no Request `Continue` operation. Initial input, tool results, and later user input all use
 `BeginTurn`.
@@ -707,7 +781,8 @@ There is no Request `Continue` operation. Initial input, tool results, and later
 - every event for that Request has been delivered by `OgaEngineRun`;
 - `turn_id` identifies a previously begun Turn that remains in the Request's active branch; and
 - the Request remains resident, is a canceled never-admitted Request with scheduler ownership,
-  or was already rewound and has not begun another Turn.
+  was already rewound and has not begun another Turn, or has an explicit recompute-preemption
+  replay marker after completing/canceling its Turn.
 
 Queued and active Turns are rejected; rewind never implicitly cancels a Turn. A closed Request,
 failed Request, unknown Turn ID, other nonresident Request, and a Request with an undelivered
@@ -746,6 +821,19 @@ rewinding.
 Classic `Generator::RewindToLength` remains a separate Generator API. Dynamic Engine transaction
 rollback also remains separate: rollback restores an in-flight step, whereas Request rewind acts
 only after a Turn and deliberately evicts committed model state for replay.
+
+Recompute preemption is separate from completed-Turn rewind. It never truncates token history,
+changes Turn identity, or resets Search/RNG state. Its supported layouts and default-off
+configuration are described in [Paged Attention Engine](paged_attention_engine.md#recompute-preemption).
+The existing manifest/profile controls permanently select construction-time age-based recovery,
+not foreground scheduling. A selected profile overrides the base settings before Engine creation;
+conflicting explicit legacy and experimental runtime policy selections are rejected, not silently
+reinterpreted. See the
+[policy compatibility contract](paged_attention_engine.md#policy-selection-and-compatibility).
+The implemented policy is age-based capacity recovery, not foreground priority: a fresh invocation
+does not automatically displace older work, and unfinished prefill/replay cannot be selected as a
+victim. See [policy scope and host integration](paged_attention_engine.md#policy-scope-and-host-integration)
+for the boundary between this mechanism and a foreground scheduling contract.
 
 ## Event production and delivery
 
@@ -892,6 +980,10 @@ Callers must never consume the token getter merely because an event was returned
 - Capacity, retryable, unserviceable, contract-failure, and first fatal-execution outcomes remain
   typed events. After all fatal events are delivered, later `Run` calls return the stored fatal
   error.
+
+On the recompute-preemption path, planning can first commit a separate suspension boundary.
+Model-step rollback restores the post-planning state, leaving those victims valid, cold, and
+marked for replay; it does not restore released KV or undo their suspension counters.
 
 The required mapping is:
 

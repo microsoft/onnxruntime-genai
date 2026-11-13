@@ -49,6 +49,75 @@ TEST(EngineBackendFactoryTest, DefaultDecoderBundleKeepsItsExecutionProtocol) {
             bundle.capabilities.configured_max_batch_size);
 }
 
+TEST(EngineBackendFactoryTest, RejectsPreemptionAuxiliaryStateBeforeDependencyMutation) {
+  for (const bool budgeted : {false, true}) {
+    SCOPED_TRACE(budgeted);
+    auto model = LoadDummyDecoderModel();
+    Config::Engine::DynamicBatching batching;
+    batching.num_blocks = 4;
+    batching.enable_recompute_preemption = true;
+    if (budgeted) {
+      batching.device_memory_budget_bytes = 1024;
+      batching.device_memory_headroom_bytes = 0;
+    }
+    model->config_->engine.dynamic_batching = batching;
+    model->config_->model.dflash2.filename = "not-loaded.onnx";
+    model->config_->model.dflash2.main_aux_hidden_states = "must-not-be-published";
+    const auto original_output = model->config_->model.decoder.outputs.aux_hidden_states;
+
+    try {
+      (void)CreateEngineBackend(model);
+      FAIL() << "Preemption must reject auxiliary state before dependency or budget mutation.";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("Recompute preemption"), std::string::npos);
+    }
+    EXPECT_EQ(model->config_->model.decoder.outputs.aux_hidden_states, original_output);
+    EXPECT_EQ(model->config_->engine.dynamic_batching->num_blocks, batching.num_blocks);
+    EXPECT_EQ(model->config_->engine.dynamic_batching->gpu_utilization_factor, batching.gpu_utilization_factor);
+  }
+}
+
+TEST(EngineBackendFactoryTest, RuntimeAgeRejectsUnsupportedLayoutsBeforeDependencyMutation) {
+  ExperimentalEngineOptions options;
+  options.SetPolicy(ExperimentalEnginePolicy::AgeBasedRecovery);
+  for (const auto* unsupported : {"auxiliary", "sliding_window", "qwen38_flash_graph", "ngram"}) {
+    auto model = LoadSyntheticPagedModel();
+    const auto blocks = model->config_->engine.dynamic_batching->num_blocks;
+    const auto output = model->config_->model.decoder.outputs.aux_hidden_states;
+    if (std::string_view{unsupported} == "auxiliary") {
+      model->config_->model.dflash2.filename = "not-loaded.onnx";
+      model->config_->model.dflash2.main_aux_hidden_states = "must-not-be-published";
+    } else if (std::string_view{unsupported} == "sliding_window") {
+      model->config_->model.decoder.sliding_window.emplace();
+    } else if (std::string_view{unsupported} == "qwen38_flash_graph") {
+      model->config_->model.type = unsupported;
+    } else {
+      model->config_->speculative.ngram_size = 3;
+    }
+    EXPECT_THROW(CreateEngineBackend(model, options), std::runtime_error) << unsupported;
+    EXPECT_EQ(model->config_->engine.dynamic_batching->num_blocks, blocks);
+    EXPECT_FALSE(model->config_->engine.dynamic_batching->enable_recompute_preemption);
+    EXPECT_EQ(model->config_->model.decoder.outputs.aux_hidden_states, output);
+  }
+}
+
+TEST(EngineBackendFactoryTest, RuntimeAgeSnapshotsCacheDraftCeilingBeforeDecoderConstruction) {
+  auto model = LoadSyntheticPagedModel();
+  ExperimentalEngineOptions options;
+  options.SetPolicy(ExperimentalEnginePolicy::AgeBasedRecovery);
+  auto age = CreateEngineBackend(model, options);
+  auto defaults = CreateEngineBackend(model);
+  EXPECT_EQ(age.dependencies.cache_manager->MaxDraftTokensPerStep(), 0u);
+  EXPECT_GT(defaults.dependencies.cache_manager->MaxDraftTokensPerStep(), 0u);
+  EXPECT_FALSE(model->config_->engine.dynamic_batching->enable_recompute_preemption);
+  options.SetPolicy(ExperimentalEnginePolicy::Default);
+  EXPECT_EQ(age.dependencies.cache_manager->MaxDraftTokensPerStep(), 0u);
+  model->config_->engine.dynamic_batching->enable_recompute_preemption = true;
+  auto legacy = CreateEngineBackend(model);
+  EXPECT_EQ(legacy.dependencies.cache_manager->MaxDraftTokensPerStep(), 0u);
+  EXPECT_GT(defaults.dependencies.cache_manager->MaxDraftTokensPerStep(), 0u);
+}
+
 TEST(EngineBackendFactoryTest, DeviceMemoryBudgetRejectsUnsupportedDeviceWithoutChangingSizing) {
   auto model = LoadSyntheticPagedModel();
   auto& batching = *model->config_->engine.dynamic_batching;

@@ -1563,6 +1563,143 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(idle_buffer->Get(0), nullptr);
 }
 
+TEST(CAPITests, ExperimentalEngineOptionsRejectInvalidInputs) {
+  const auto expect_error = [](OgaResult* result) {
+    std::unique_ptr<OgaResult> error{result};
+    EXPECT_NE(error, nullptr);
+  };
+  OgaExperimentalEngineOptions* unsupported{};
+  expect_error(OgaCreateExperimentalEngineOptions(0, &unsupported));
+  EXPECT_EQ(unsupported, nullptr);
+  expect_error(OgaCreateExperimentalEngineOptions(2, &unsupported));
+  EXPECT_EQ(unsupported, nullptr);
+  expect_error(OgaCreateExperimentalEngineOptions(1, nullptr));
+  auto options = OgaExperimentalEngineOptions::Create(1);
+  expect_error(OgaExperimentalEngineOptionsSetPolicy(nullptr, OgaExperimentalEnginePolicy_Default));
+  expect_error(OgaExperimentalEngineOptionsSetPolicy(options.get(), 2));
+  expect_error(OgaExperimentalEngineOptionsSetRecomputeLimits(nullptr, 1));
+  expect_error(OgaExperimentalEngineOptionsSetAgeBasedRecovery(nullptr, 8));
+  expect_error(OgaExperimentalEngineOptionsSetRecomputeLimits(options.get(), 0));
+  expect_error(OgaExperimentalEngineOptionsSetAgeBasedRecovery(options.get(), 0));
+  OgaEngine* engine{};
+  expect_error(OgaCreateEngineWithExperimentalOptions(nullptr, options.get(), &engine));
+  EXPECT_EQ(engine, nullptr);
+  expect_error(OgaCreateEngineWithExperimentalOptions(nullptr, options.get(), nullptr));
+
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  expect_error(OgaCreateEngineWithExperimentalOptions(model.get(), nullptr, &engine));
+  options->SetPolicy(OgaExperimentalEnginePolicy_Default);
+  options->SetRecomputeLimits(1);
+  EXPECT_THROW(OgaEngine::Create(*model, *options), std::runtime_error);
+  auto age_tuning = OgaExperimentalEngineOptions::Create(1);
+  age_tuning->SetAgeBasedRecovery(8);
+  EXPECT_THROW(OgaEngine::Create(*model, *age_tuning), std::runtime_error);
+}
+
+TEST(CAPITests, ExperimentalEnginePoliciesAreCopiedAndDoNotChangeSharedModelDefaults) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto options = OgaExperimentalEngineOptions::Create(1);
+  options->SetPolicy(OgaExperimentalEnginePolicy_AgeBasedRecovery);
+  auto age = OgaEngine::Create(*model, *options);
+  options->SetPolicy(OgaExperimentalEnginePolicy_Default);
+  auto wait = OgaEngine::Create(*model, *options);
+  options.reset();
+  auto original = OgaEngine::Create(*model);
+  EXPECT_EQ(age->GetCapabilities()->ExperimentalPolicy(), OgaExperimentalEnginePolicy_AgeBasedRecovery);
+  EXPECT_EQ(wait->GetCapabilities()->ExperimentalPolicy(), OgaExperimentalEnginePolicy_Default);
+  EXPECT_EQ(original->GetCapabilities()->ExperimentalPolicy(), OgaExperimentalEnginePolicy_Default);
+
+  auto capabilities = age->GetCapabilities();
+  EXPECT_TRUE(capabilities->SupportsExperimentalPolicy(OgaExperimentalEnginePolicy_Default));
+  EXPECT_TRUE(capabilities->SupportsExperimentalPolicy(OgaExperimentalEnginePolicy_AgeBasedRecovery));
+  EXPECT_THROW(capabilities->SupportsExperimentalPolicy(2), std::runtime_error);
+  OgaExperimentalEnginePolicy policy{};
+  bool supported{};
+  std::unique_ptr<OgaResult> null_snapshot{OgaEngineCapabilitiesGetExperimentalPolicy(nullptr, &policy)};
+  std::unique_ptr<OgaResult> null_policy{OgaEngineCapabilitiesGetExperimentalPolicy(capabilities.get(), nullptr)};
+  std::unique_ptr<OgaResult> null_support{
+      OgaEngineCapabilitiesSupportsExperimentalPolicy(
+          capabilities.get(), OgaExperimentalEnginePolicy_Default, nullptr)};
+  std::unique_ptr<OgaResult> null_capabilities{
+      OgaEngineCapabilitiesSupportsExperimentalPolicy(nullptr, OgaExperimentalEnginePolicy_Default, &supported)};
+  EXPECT_NE(null_snapshot, nullptr);
+  EXPECT_NE(null_policy, nullptr);
+  EXPECT_NE(null_support, nullptr);
+  EXPECT_NE(null_capabilities, nullptr);
+  auto request = age->CreateRequest();
+  EXPECT_EQ(request->BeginTurn(std::array<int32_t, 3>{2, 3, 4}), 1u);
+  EXPECT_NE(RunOne(*age).flags & OgaEngineEventFlag_Token, 0u);
+  request->Close();
+}
+
+TEST(CAPITests, ExperimentalEnginePolicyPreservesLegacySelectionAndRejectsConflicts) {
+  for (const auto* selection : {"omitted", "false", "true"}) {
+    auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+    if (std::string_view{selection} != "omitted") {
+      config->Overlay((std::string{R"({"engine":{"dynamic_batching":{"enable_recompute_preemption":)"} +
+                       selection + "}}}")
+                          .c_str());
+    }
+    auto model = OgaModel::Create(*config);
+    auto legacy = OgaEngine::Create(*model);
+    const bool enabled = std::string_view{selection} == "true";
+    EXPECT_EQ(legacy->GetCapabilities()->ExperimentalPolicy(),
+              enabled ? OgaExperimentalEnginePolicy_AgeBasedRecovery : OgaExperimentalEnginePolicy_Default);
+    auto options = OgaExperimentalEngineOptions::Create(1);
+    options->SetPolicy(OgaExperimentalEnginePolicy_AgeBasedRecovery);
+    if (std::string_view{selection} == "false") {
+      EXPECT_THROW(OgaEngine::Create(*model, *options), std::runtime_error);
+    } else {
+      EXPECT_NO_THROW(OgaEngine::Create(*model, *options));
+    }
+    options->SetPolicy(OgaExperimentalEnginePolicy_Default);
+    if (enabled) {
+      EXPECT_THROW(OgaEngine::Create(*model, *options), std::runtime_error);
+    } else {
+      EXPECT_NO_THROW(OgaEngine::Create(*model, *options));
+    }
+  }
+}
+
+TEST(CAPITests, ExperimentalEngineCapabilitiesRejectUnsupportedBackendSelection) {
+  for (const auto* path : {MODEL_PATH "engine/dummy-decoder", MODEL_PATH "engine/synthetic-composite"}) {
+    SCOPED_TRACE(path);
+    auto config = OgaConfig::Create(path);
+    config->Overlay(R"({"model":{"type":"decoder"}})");
+    auto model = OgaModel::Create(*config);
+    auto engine = OgaEngine::Create(*model);
+    auto capabilities = engine->GetCapabilities();
+    EXPECT_TRUE(capabilities->SupportsExperimentalPolicy(OgaExperimentalEnginePolicy_Default));
+    EXPECT_FALSE(capabilities->SupportsExperimentalPolicy(OgaExperimentalEnginePolicy_AgeBasedRecovery));
+    auto options = OgaExperimentalEngineOptions::Create(1);
+    options->SetPolicy(OgaExperimentalEnginePolicy_AgeBasedRecovery);
+    EXPECT_THROW(OgaEngine::Create(*model, *options), std::runtime_error);
+  }
+}
+
+TEST(CAPITests, ExperimentalRuntimeAgeRejectsDraftsWithoutLegacyEnableFlag) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged-per-token");
+  auto defaults = OgaEngine::Create(*model);
+  EXPECT_GT(defaults->MaxDraftTokensPerProposal(), 0u);
+  auto options = OgaExperimentalEngineOptions::Create(1);
+  options->SetPolicy(OgaExperimentalEnginePolicy_AgeBasedRecovery);
+  auto engine = OgaEngine::Create(*model, *options);
+  EXPECT_EQ(engine->MaxDraftTokensPerProposal(), 0u);
+  auto request = engine->CreateRequest();
+  request->BeginTurn(std::array<int32_t, 3>{2, 3, 4});
+  EXPECT_NE(RunOne(*engine).flags & OgaEngineEventFlag_Token, 0u);
+  const std::array<int32_t, 1> draft_tokens{5};
+  auto proposal = OgaSequences::Create();
+  proposal->Append(draft_tokens.data(), draft_tokens.size());
+  try {
+    request->SetDraftTokens(*proposal);
+    FAIL() << "Runtime-selected recompute preemption must reject manual drafts.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("recompute preemption"), std::string::npos);
+  }
+  request->Close();
+}
+
 TEST(CAPITests, EngineFormattedPromptAdmissionContracts) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
   auto engine = OgaEngine::Create(*model);

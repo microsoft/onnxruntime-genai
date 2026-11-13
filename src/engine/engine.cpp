@@ -192,6 +192,9 @@ bool TryGreedyTokensToDevice(
 Engine::Engine(std::shared_ptr<Model> model)
     : Engine(model, CreateDependencies(model)) {}
 
+Engine::Engine(std::shared_ptr<Model> model, const ExperimentalEngineOptions& options)
+    : Engine(model, CreateDependencies(model, options)) {}
+
 Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     : model_{std::move(model)},
       cache_manager_{std::move(dependencies.cache_manager)},
@@ -223,6 +226,20 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   }
   if (!model_executor_) {
     throw std::runtime_error("Engine requires a non-null model executor.");
+  }
+  preemption_options_ = dependencies.preemption_options
+                            ? *dependencies.preemption_options
+                            : ResolveEnginePreemptionOptions(*model_->config_);
+  ValidateExperimentalEnginePolicy(preemption_options_.policy);
+  ValidateRecomputePreemptionModel(*model_->config_, preemption_options_);
+  supports_age_based_recovery_ =
+      SupportsRecomputePreemptionModel(*model_->config_) &&
+      cache_manager_->SupportsDynamicBatching() && cache_manager_->SupportsRecomputePreemption() &&
+      scheduler_->SupportsRecomputePreemption() &&
+      !mtp_model_ && !mtp_cache_manager_ && !mtp_model_executor_ && !dflash2_drafter_;
+  if (preemption_options_.Enabled() && !supports_age_based_recovery_) {
+    throw std::runtime_error(
+        "Recompute preemption requires a compatible dynamic paged cache without auxiliary state.");
   }
   if (dflash2_prefix_checkpoints_enabled_ && (!dflash2_drafter_ || !snapshot_cache_)) {
     throw std::runtime_error("DFlash prefix snapshots require a drafter and an Engine snapshot cache.");
@@ -338,6 +355,10 @@ void ValidateMtpModelCompatibility(const Config& config,
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   return CreateEngineBackend(std::move(model)).dependencies;
+}
+
+EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model, const ExperimentalEngineOptions& options) {
+  return CreateEngineBackend(std::move(model), options).dependencies;
 }
 
 void Engine::PrepareDflash2Feeds(const StepPlan& plan,
@@ -1695,7 +1716,7 @@ uint64_t Engine::AdmitTurn(const std::shared_ptr<Request>& request, std::span<co
         request->IsRestartableCanceledTurn() &&
         !cache_manager_->IsResident(request);
     const bool replay_rewound_request =
-        request->NeedsReplayAfterRewind() &&
+        request->NeedsCacheReplay() &&
         !cache_manager_->IsResident(request);
     allow_nonresident =
         restartable_canceled_turn || replay_rewound_request;
@@ -1847,7 +1868,7 @@ void Engine::RewindRequestToStartOfTurn(
   }
   const bool resident = cache_manager_->IsResident(request);
   if (!resident && !request->IsRestartableCanceledTurn() &&
-      !request->NeedsReplayAfterRewind()) {
+      !request->NeedsCacheReplay()) {
     throw std::runtime_error(
         "Cannot rewind a request whose model state is no longer resident.");
   }
@@ -2219,16 +2240,16 @@ void Engine::RunStatic() {
 
 void Engine::RunDynamic() {
   if (scheduler_->HasPendingRequests()) {
-    // A dynamic step is a transaction with six phases:
-    // plan -> reserve state -> checkpoint request state -> execute -> stage sampled tokens -> commit.
-    // Nothing becomes externally visible until the final commit succeeds.
+    // Planning may publish validated KV suspensions as a separate committed boundary.
+    // The following model transaction is reserve -> checkpoint -> execute -> stage tokens -> commit.
+    // Generated-token progress becomes externally visible only after that final commit.
     step_plan_.transaction_id = next_transaction_id_++;
     StepPlanningResult planning_result;
     try {
       // Planning must report ordinary non-executable outcomes through its result. A composite
       // cache consistency failure proves that paged and fixed committed ownership disagree and is
-      // fatal. Incidental failures such as allocation errors have not mutated Engine state and may
-      // propagate without poisoning the Engine.
+      // fatal. Incidental preflight allocation failures publish no suspensions and need not poison
+      // the Engine. Successful planning may already have committed a suspension boundary.
       planning_result = scheduler_->PlanStep(step_plan_);
     } catch (const StepPlanningConsistencyError&) {
       MarkUnhealthyAndThrow(
@@ -2376,10 +2397,10 @@ void Engine::RunDynamic() {
     bool request_transaction_active = false;
     std::unique_ptr<MtpStep> mtp_step;
     const auto rollback_transaction = [&]() {
-      // Request/search state and composite cache state are checkpointed separately. Both must be
-      // restored so a retry observes exactly the state that existed before this Run() call. The
-      // reservation's Release() discards fixed provisional slots and staged banks as well as the
-      // reserved paged blocks.
+      // Request/search state and composite cache state are checkpointed separately. Restore the
+      // post-planning boundary, not the state before Run(): preempted victims remain valid, cold,
+      // and marked for replay. Release() discards the model transaction's fixed provisional slots,
+      // staged banks, and reserved paged blocks without undoing those committed suspensions.
       std::exception_ptr rollback_error;
       if (mtp_step) {
         try {
@@ -2667,6 +2688,7 @@ void Engine::RunDynamic() {
     pending_events_.swap(staged_events_);
     pending_event_index_ = 0;
     ++transaction_metrics_.committed_steps;
+    scheduler_->OnStepCommitted(step_plan_);
   }
 }
 
@@ -2940,7 +2962,7 @@ bool Engine::HasPendingRequests() {
 
 size_t Engine::MaxDraftTokensPerStep() const {
   ValidateOwnerThread();
-  return backend_capabilities_.UsesTransactions() &&
+  return !preemption_options_.Enabled() && backend_capabilities_.UsesTransactions() &&
                  model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()
              : 0;
@@ -3005,7 +3027,8 @@ EngineCapabilities Engine::GetCapabilities() const {
   ValidateOwnerThread();
   return {backend_capabilities_.configured_max_batch_size,
           backend_capabilities_.max_scheduled_tokens,
-          backend_capabilities_.max_request_length};
+          backend_capabilities_.max_request_length,
+          preemption_options_.policy, supports_age_based_recovery_};
 }
 
 std::optional<PrefixCacheMetrics> Engine::PrefixCacheStats() const {

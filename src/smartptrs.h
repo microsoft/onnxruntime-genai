@@ -249,7 +249,10 @@ struct StateUpdateReplayDesc {
 // Version 20: Config gained memory budget/headroom settings; DeviceInterface gained sampler startup-byte sizing.
 // Version 21: Config::Engine::DynamicBatching gained host/device media budgets, changing Config's layout.
 // Version 22: Config's decoder/drafter layouts gained GGUF initializer mappings.
-inline constexpr uint32_t kDeviceInterfaceVersion = 22;
+// A parallel preemption branch used version 22 for different batching and runtime-profile layouts.
+// Version 23: Combines the GGUF mappings and recompute-preemption Config layouts.
+// Version 24: Config records explicit legacy preemption selection for experimental Engine options.
+inline constexpr uint32_t kDeviceInterfaceVersion = 24;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

@@ -1064,6 +1064,30 @@ struct OgaTurnUsage : OgaAbstract {
   }
 };
 
+struct OgaExperimentalEngineOptions : OgaAbstract {
+  static std::unique_ptr<OgaExperimentalEngineOptions> Create(uint32_t version) {
+    OgaExperimentalEngineOptions* options{};
+    OgaCheckResult(OgaCreateExperimentalEngineOptions(version, &options));
+    return std::unique_ptr<OgaExperimentalEngineOptions>(options);
+  }
+
+  void SetPolicy(OgaExperimentalEnginePolicy policy) {
+    OgaCheckResult(OgaExperimentalEngineOptionsSetPolicy(this, policy));
+  }
+
+  void SetRecomputeLimits(size_t max_victims_per_step) {
+    OgaCheckResult(OgaExperimentalEngineOptionsSetRecomputeLimits(this, max_victims_per_step));
+  }
+
+  void SetAgeBasedRecovery(size_t min_decode_steps_before_preemption) {
+    OgaCheckResult(OgaExperimentalEngineOptionsSetAgeBasedRecovery(this, min_decode_steps_before_preemption));
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyExperimentalEngineOptions(reinterpret_cast<OgaExperimentalEngineOptions*>(p));
+  }
+};
+
 struct OgaEngineCapabilities : OgaAbstract {
   size_t ConfiguredMaxBatchSize() const {
     return OgaEngineCapabilitiesGetConfiguredMaxBatchSize(this);
@@ -1075,6 +1099,18 @@ struct OgaEngineCapabilities : OgaAbstract {
 
   uint64_t MaxRequestLength() const {
     return OgaEngineCapabilitiesGetMaxRequestLength(this);
+  }
+
+  OgaExperimentalEnginePolicy ExperimentalPolicy() const {
+    OgaExperimentalEnginePolicy policy{};
+    OgaCheckResult(OgaEngineCapabilitiesGetExperimentalPolicy(this, &policy));
+    return policy;
+  }
+
+  bool SupportsExperimentalPolicy(OgaExperimentalEnginePolicy policy) const {
+    bool supported{};
+    OgaCheckResult(OgaEngineCapabilitiesSupportsExperimentalPolicy(this, policy, &supported));
+    return supported;
   }
 
   static void operator delete(void* p) {
@@ -1327,6 +1363,12 @@ struct OgaEngine : OgaAbstract {
     OgaEngine* p;
     OgaCheckResult(OgaCreateEngine(&model, &p));
     return std::unique_ptr<OgaEngine>(p);
+  }
+
+  static std::unique_ptr<OgaEngine> Create(OgaModel& model, const OgaExperimentalEngineOptions& options) {
+    OgaEngine* engine{};
+    OgaCheckResult(OgaCreateEngineWithExperimentalOptions(&model, &options, &engine));
+    return std::unique_ptr<OgaEngine>(engine);
   }
 
   bool HasPendingRequests() {
