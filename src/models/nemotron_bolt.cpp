@@ -113,6 +113,34 @@ std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
   return result;
 }
 
+std::unique_ptr<Config> CreateNemotronBoltDrafterConfig(const Config& config) {
+  auto drafter = CreateDflash2Config(config);
+  // Supported external runtimes do not all retain Split's captured host buffers.
+  // Exclude only this fusion until the minimum runtime guarantees that fix;
+  // preserve caller exclusions without lowering the graph optimization level.
+  auto& entries = drafter->model.decoder.session_options.config_entries;
+  const auto entry = std::find_if(entries.rbegin(), entries.rend(), [](const auto& option) {
+    return option.first == "optimization.disable_specified_optimizers";
+  });
+  if (entry == entries.rend()) {
+    entries.emplace_back("optimization.disable_specified_optimizers", "GatherSliceToSplitFusion");
+  } else if ((";" + entry->second + ";").find(";GatherSliceToSplitFusion;") == std::string::npos) {
+    if (!entry->second.empty() && entry->second.back() != ';') entry->second += ';';
+    entry->second += "GatherSliceToSplitFusion";
+  }
+  if (Ort::runtime_api_version >= 32) {
+    // The native drafter validates its own paged metadata. Preserve logical row counts so
+    // partially accepted blocks can use padded, fixed-shape CUDA graphs without changing KV state.
+    constexpr auto length_policy = "session.paged_attention.skip_input_sanitizer";
+    if (std::none_of(entries.begin(), entries.end(), [](const auto& option) {
+          return option.first == length_policy;
+        })) {
+      entries.emplace_back(length_policy, "1");
+    }
+  }
+  return drafter;
+}
+
 NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env)
     : Model{std::move(config)} {
 #if ORT_API_VERSION < 27
@@ -186,9 +214,7 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
               !d.independent_sampling && !d.inputs.anchor_row_index.empty() &&
               d.main_aux_hidden_states == "aux_hidden_states",
           "a greedy LiLiCorr DFlash2 block8 drafter with anchor_row_index is required");
-  auto drafter_config = CreateDflash2Config(*config_);
-  drafter_config->model.decoder.session_options.config_entries.emplace_back(
-      "optimization.disable_specified_optimizers", "GatherSliceToSplitFusion");
+  auto drafter_config = CreateNemotronBoltDrafterConfig(*config_);
   drafter_model_ = std::make_shared<Dflash2Model>(std::move(drafter_config), env);
   // The shared validator expects the Engine's packed 2-D auxiliary output. Present an equivalent
   // metadata view without changing the actual fixed-R8 target graph or its buffers.

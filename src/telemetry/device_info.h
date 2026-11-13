@@ -17,6 +17,7 @@ struct DeviceInfo {
   int processor_count;           // CPU core count
   int64_t total_memory_mb;       // System RAM in MB
   std::string cpu_model;         // Processor model string
+  std::string process_name;      // Host executable basename, never a path or command line.
   std::string device_id_status;  // Provenance of device_id: "New"/"Existing"/"Corrupted"/"Failed"/"Platform"
   bool is_container{};
   bool is_virtual_machine{};

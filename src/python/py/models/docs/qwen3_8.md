@@ -52,6 +52,22 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
 `CreateEngineBackend` (`src/engine/backend_factory.h`) and `CreateQwen38GraphDependencies`
 (`src/engine/qwen38_graph_executor.h`) assemble it:
 
+- Single-slot native prefix reuse is opt-in: set `engine.dynamic_batching.prefix_caching` to `true` and
+  `engine.dynamic_batching.max_batch_size` to `1` (the dynamic-batching default is 16).
+  Within one Engine, it restores committed prompt checkpoints across turns and separate Requests, including after `Close()`;
+  it does not restore speculative decode state. Exact hits reuse the saved next-token prediction without an empty
+  prefill. Partial hits ingest only the remaining suffix. `cached_prompt_tokens` counts reused tokens from the current
+  turn's input, not retained earlier-turn history.
+  The existing `max_snapshots` and `snapshot_cache` VRAM/RAM/disk limits bound checkpoint storage; without explicit
+  tier budgets or a count, at most one device-resident checkpoint is retained. `max_snapshots: 0` disables publication.
+  Native checkpoint allocations, including default device-resident checkpoints, are not charged to
+  `device_memory_budget_bytes`; leave additional device headroom or configure RAM/disk snapshot tiers.
+  With warning logging enabled, an explicit opt-in that is inactive because of multiple slots, zero snapshot count,
+  or all-zero tier budgets emits a warning.
+  DFlash checkpoints must retain enough target features to reconstruct its complete context window (or start at
+  position zero). A short final prefill chunk can therefore reuse an earlier eligible checkpoint instead of the
+  entire prompt. Intermediate captures are skipped except for the last eligible DFlash checkpoint when the final
+  chunk cannot reconstruct the drafter. Several-slot configurations retain replay-only behavior.
 - MoE offload requires an explicit `session.moe.offload.mode` of `required`, `auto`, `1` or `on` (case-insensitive).
   A budget alone does not enable offload, matching ORT's disabled default; `disabled`, `0` and `off` preserve that behavior.
   Only enabled offload changes target-graph selection, synthetic warmup options or session budgets.
@@ -128,9 +144,9 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
   `ResidentRequestCount`). `FixedSlotScheduler` queues further Requests and replaces a slot as soon as its turn is over, so a
   short prompt or answer does not wait for a long one, and `CacheManager::SupportsContinuousMultiSlotDecoding()` lets a
   resident Request continue its turn while others are resident. `RewindToStartOfTurn` releases the slot; a continued turn
-  (`BeginTurn` on the resident Request) and the replay after a rewind re-ingest the whole retained history (through the same
-  chunked prefill as a new prompt), because the look-ahead cycle and the bank ring cannot be rolled back. There is no prefix
-  cache.
+  (`BeginTurn` on the resident Request) and the replay after a rewind re-ingest retained history (through the same
+  chunked prefill as a new prompt), because the look-ahead cycle and the bank ring cannot be rolled back.
+  With single-slot native prefix reuse enabled, a matching committed prompt checkpoint can skip the cached prefix.
 - `Qwen38GraphExecutor::SelectsOwnTokens()` is true. One Engine step is one prompt chunk (the size the device asks for,
   `Qwen38DecodeDevice::PrefillChunkTokens()`: `model.qwen38_graph.prefill.chunk` when set, otherwise 8192 tokens with the
   dense prefill (`prefill.enabled`) and 2048 per step through the decode graphs, see `EffectiveQwen38PrefillChunkTokens`; the

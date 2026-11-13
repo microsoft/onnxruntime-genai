@@ -122,8 +122,9 @@ OGA_EXPORT const OgaASRPostProcessorTimestampRecord* OGA_API_CALL OgaASRPostProc
 OGA_EXPORT const char* OGA_API_CALL OgaASRPostProcessorTimestampRecordGetText(const OgaASRPostProcessorTimestampRecord* record);
 OGA_EXPORT int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartFrame(const OgaASRPostProcessorTimestampRecord* record);
 OGA_EXPORT int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopFrame(const OgaASRPostProcessorTimestampRecord* record);
-OGA_EXPORT double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartTime(const OgaASRPostProcessorTimestampRecord* record);
-OGA_EXPORT double OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopTime(const OgaASRPostProcessorTimestampRecord* record);
+/** Time bounds are signed 64-bit milliseconds, with an exclusive stop. */
+OGA_EXPORT int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStartTime(const OgaASRPostProcessorTimestampRecord* record);
+OGA_EXPORT int64_t OGA_API_CALL OgaASRPostProcessorTimestampRecordGetStopTime(const OgaASRPostProcessorTimestampRecord* record);
 
 typedef struct OgaNonGenerativeSession OgaNonGenerativeSession;
 

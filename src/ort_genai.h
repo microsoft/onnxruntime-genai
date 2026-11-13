@@ -736,7 +736,7 @@ struct OgaASRPostProcessorTimestampRecord : OgaAbstract {
   std::pair<int64_t, int64_t> GetFrameInterval() const {
     return {OgaASRPostProcessorTimestampRecordGetStartFrame(this), OgaASRPostProcessorTimestampRecordGetStopFrame(this)};
   }
-  std::pair<double, double> GetTimestampInterval() const {
+  std::pair<int64_t, int64_t> GetTimestampInterval() const {
     return {OgaASRPostProcessorTimestampRecordGetStartTime(this), OgaASRPostProcessorTimestampRecordGetStopTime(this)};
   }
 };

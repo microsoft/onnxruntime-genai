@@ -642,6 +642,16 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
             paged_block_size_ +
         1;
   }
+  if (fixed_single_request_ && context_window_ == 0) {
+    throw std::runtime_error("Fixed DFlash2 requests require a windowed drafter.");
+  }
+  if (Ort::runtime_api_version >= 32) {
+    for (const auto& entry : model_->config_->model.decoder.session_options.config_entries) {
+      if (entry.first == "session.paged_attention.skip_input_sanitizer") {
+        fixed_padding_enabled_ = entry.second == "1";
+      }
+    }
+  }
 
   const auto& inputs = config_.inputs;
   has_q_row_map_ = model_->session_info_.HasInput(inputs.q_row_map);
@@ -1246,14 +1256,17 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   const size_t max_ctx_rows =
       ((std::max(context_window_, block_size) + block_size - 1) / block_size + 1) * block_size;
-  const bool fixed_graph_step = fixed_single_request_ && num_ctx_rows <= block_size;
+  const bool fixed_graph_step =
+      fixed_single_request_ &&
+      (num_ctx_rows == block_size || (fixed_padding_enabled_ && num_ctx_rows < block_size));
   if (fixed_single_request_) {
     if (served.size() != 1 || block_feed_indices.size() != 1 || num_ctx_rows == 0 ||
         num_ctx_rows > max_ctx_rows) {
       throw std::runtime_error("Fixed DFlash2 proposals require one request with 1..context_window context rows.");
     }
     if (fixed_graph_step) {
-      // Padded rows are outside cumulative_sequence_lengths and therefore never update the cache.
+      // The default PagedAttention sanitizer extends the final length to the physical row count.
+      // Padding is safe only when the session explicitly preserves our logical lengths.
       // Keep the real block-row and anchor-row maps: the last context row need not be row seven.
       layout.q_row_map.resize(2 * block_size, 0);
       layout.qkv_row_map.resize(2 * block_size, static_cast<int32_t>(block_size));

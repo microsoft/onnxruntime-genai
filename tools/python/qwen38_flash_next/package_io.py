@@ -13,6 +13,7 @@ import os
 import struct
 import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,24 @@ SRC_STATE_CAPS = {8257, 8259, 32771, 33283, 65539}
 
 def align_up(val: int, align: int = ALIGN) -> int:
     return (val + align - 1) // align * align
+
+
+FINGERPRINT_THREADS = 16
+
+
+def file_sha256(path: Path) -> str:
+    """Return the SHA-256 of the complete contents of `path`.
+
+    Always read the file: writes through an already-dirty writable mmap can change its contents without changing its stat
+    metadata, so a stat-based digest cache cannot safely validate mutable checkpoints.
+    """
+    h = hashlib.sha256()
+    buf = bytearray(4 << 20)
+    view = memoryview(buf)
+    with open(path, "rb", buffering=0) as f:
+        while n := f.readinto(buf):
+            h.update(view[:n])
+    return h.hexdigest()
 
 
 class HFCheckpointReader:
@@ -165,31 +184,19 @@ class HFCheckpointReader:
         return t
 
     def checkpoint_fingerprint(self) -> str:
-        """Compute a deterministic fingerprint of the checkpoint's shards, headers, and weight payloads."""
+        """Return a SHA-256 of the weight map and the complete contents of every shard.
+
+        Weight banks are reused only while their recorded fingerprint matches, so every byte is hashed: a change anywhere
+        in a shard must produce a new fingerprint. The shards are hashed in parallel.
+        """
         h = hashlib.sha256()
-        shards = sorted(set(self.weight_map.values()))
         for item_k, item_v in sorted(self.weight_map.items()):
             h.update(f"{item_k}:{item_v}\n".encode())
-        window = 4 * 1024 * 1024
-        for shard in shards:
-            p = self.hf_dir / shard
-            if not p.is_file():
-                continue
-            st = p.stat()
-            h.update(f"{shard}:{st.st_size}:".encode())
-            with open(p, "rb") as f:
-                if st.st_size <= 16 * window:
-                    while True:
-                        chunk = f.read(window)
-                        if not chunk:
-                            break
-                        h.update(chunk)
-                else:
-                    h.update(f.read(window))
-                    f.seek(st.st_size // 2)
-                    h.update(f.read(window))
-                    f.seek(max(0, st.st_size - window))
-                    h.update(f.read(window))
+        shards = [shard for shard in sorted(set(self.weight_map.values())) if (self.hf_dir / shard).is_file()]
+        with ThreadPoolExecutor(max_workers=max(1, min(FINGERPRINT_THREADS, len(shards)))) as ex:
+            digests = list(ex.map(file_sha256, [self.hf_dir / shard for shard in shards]))
+        for shard, digest in zip(shards, digests, strict=True):
+            h.update(f"{shard}:{digest}\n".encode())
         return h.hexdigest()
 
 

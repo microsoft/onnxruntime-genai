@@ -64,6 +64,7 @@ struct SelectedTokenBlock {
 struct PrefillProgress {
   size_t prompt_tokens_processed_this_step{};
   bool prompt_complete{};
+  size_t cached_prefix_tokens{};
 };
 
 struct BackendRowResult {
