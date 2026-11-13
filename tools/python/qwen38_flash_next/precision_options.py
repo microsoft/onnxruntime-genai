@@ -503,15 +503,16 @@ def write_gguf_ple_table(
     ple_table_path = out_dir / "ple_table.txt"
     ple_spec = read_ple_table_spec(ple_table_path if ple_table_path.is_file() else None)
     if validate_engram:
-        engram_dst_name, ple_format, ple_row_bytes, engram_doff = validate_engram_gguf(
+        engram_dst_name, ple_format, ple_row_bytes, engram_tensor_offset = validate_engram_gguf(
             engram_gguf, ple_spec, expected_kind=engram_kind
         )
     else:
-        engram_ts, engram_doff = read_gguf_tensor_infos(engram_gguf)
+        engram_ts, _data_offset = read_gguf_tensor_infos(engram_gguf)
         if len(engram_ts) != 1 or engram_ts[0]["name"] != "per_layer_token_embd.weight":
             raise ValueError(
                 f"{engram_gguf} must hold only per_layer_token_embd.weight, got {[t['name'] for t in engram_ts]}"
             )
+        engram_tensor_offset = int(engram_ts[0]["data_offset"])
         ggml_type = engram_ts[0]["ggml_type"]
         head_dim = int(ple_spec["head_dim"])
         if ggml_type == 8:
@@ -536,7 +537,7 @@ def write_gguf_ple_table(
     if (out_dir / "ple").is_dir():
         shutil.rmtree(out_dir / "ple")
 
-    ple_lines = format_gguf_ple_table_lines(engram_dst_name, ple_format, engram_doff, ple_row_bytes, ple_spec)
+    ple_lines = format_gguf_ple_table_lines(engram_dst_name, ple_format, engram_tensor_offset, ple_row_bytes, ple_spec)
     write_text_replacing(ple_table_path, "\n".join(ple_lines) + "\n")
     return engram_dst_name
 

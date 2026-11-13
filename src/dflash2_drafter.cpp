@@ -6,15 +6,20 @@
 #include "engine/request.h"
 #include "engine/decoders/varlen_decoder_io.h"
 #include "engine/paged_key_value_cache.h"
+#include "models/env_utils.h"
 #include "models/io/kv_cache.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <new>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -290,8 +295,8 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
                                  ? "model.dspark.num_draft_tokens must be block_size."
                                  : "model.dflash2.num_draft_tokens must be block_size - 1.");
   }
-  if (!dflash2.is_dspark && dflash2.sliding_window <= 0) {
-    throw std::runtime_error("model.dflash2.sliding_window must be greater than zero.");
+  if (!dflash2.is_dspark && dflash2.sliding_window < 0) {
+    throw std::runtime_error("model.dflash2.sliding_window must be non-negative.");
   }
   // Every non-anchor query row feeds this id straight into the drafter's embedding lookup, so an
   // out-of-range value is either a crash or silently meaningless drafts.
@@ -1563,7 +1568,9 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         feed.first_position, feed.aux_row_count, "DFlash 2 cached positions");
   }
 
-  if (!drafts_wanted || device_selection) {
+  const auto trace = GetEnv("ORT_GENAI_TRACE_SPECULATIVE");
+  const bool trace_greedy = !trace.empty() && trace.front() == '1';
+  if (!drafts_wanted || (device_selection && !trace_greedy)) {
     return true;
   }
 
@@ -1585,6 +1592,41 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     candidate_cpu = candidate_span.CopyDeviceToCpu();
     scores_cpu = scores_span.CopyDeviceToCpu();
   }
+  if (trace_greedy) {
+    for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
+      const auto& feed = feeds[block_feed_indices[slot]];
+      if (feed.wants_independent_sampling || feed.wants_lattice) continue;
+      std::ostringstream record;
+      record << std::setprecision(9)
+             << "{\"event\":\"draft\",\"request\":" << reinterpret_cast<uintptr_t>(feed.request)
+             << ",\"base\":" << feed.first_position + feed.aux_row_count + 1
+             << ",\"context_first\":" << feed.first_position << ",\"context_rows\":" << feed.aux_row_count
+             << ",\"anchor\":" << feed.anchor_token << ",\"device_selection\":" << (device_selection ? 1 : 0)
+             << ",\"top_k\":" << top_k << ",\"steps\":[";
+      size_t previous = 0;
+      for (size_t step = 0; step < num_spec; ++step) {
+        const size_t candidate_offset = (slot * num_spec + step) * top_k;
+        const float* values = scores_cpu.data() + (candidate_offset + previous) * top_k;
+        const size_t best = static_cast<size_t>(std::max_element(values, values + top_k) - values);
+        record << (step == 0 ? "" : ",") << "{\"offset\":" << step << ",\"previous_index\":" << previous
+               << ",\"chosen_index\":" << best << ",\"chosen\":" << candidate_cpu[candidate_offset + best]
+               << ",\"candidates\":[";
+        for (size_t candidate = 0; candidate < top_k; ++candidate) {
+          record << (candidate == 0 ? "" : ",") << "[" << candidate_cpu[candidate_offset + candidate] << ",";
+          if (std::isfinite(values[candidate]))
+            record << values[candidate];
+          else
+            record << "null";
+          record << "]";
+        }
+        record << "]}";
+        previous = best;
+      }
+      record << "]}";
+      std::cout << "SpeculativeTrace " << record.str() << std::endl;
+    }
+  }
+  if (device_selection) return true;
   for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
     const size_t feed_index = block_feed_indices[slot];
     if (feeds[feed_index].wants_independent_sampling && draft_distributions) {

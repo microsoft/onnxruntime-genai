@@ -744,6 +744,20 @@ TEST(Qwen38PleTableTest, Q8_0ShardsUsePackedRowSizesAndRequireCapabilityBeforeMa
   }
   EXPECT_EQ(StubPlaneState::unregistered_ptrs, StubPlaneState::registered_ptrs);
 
+  {
+    ScopedEnvironmentVariable unpin_ple{"ORT_QWEN38_PIN_PLE", "0"};
+    InitCurrentStubPlane(current);
+    {
+      Qwen38PleTable table{current, table_path, dir, 64};
+      EXPECT_EQ(table.params.pad_,
+                QWEN38_PLANE_PLE_PAD_OF_FORMAT(QWEN38_PLANE_PLE_FORMAT_Q8_0) | QWEN38_PLANE_PLE_STAGED);
+      EXPECT_TRUE(StubPlaneState::registered_ptrs.empty());
+      EXPECT_NE(table.params.shard_ptr[0], nullptr);
+      EXPECT_NE(table.params.shard_ptr[1], nullptr);
+    }
+    EXPECT_TRUE(StubPlaneState::unregistered_ptrs.empty());
+  }
+
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
 }

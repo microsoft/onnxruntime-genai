@@ -11,9 +11,12 @@ metadata before IR conversion. ONNX IR also has no public schema checker.
 
 from __future__ import annotations
 
+import importlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
+from typing import ClassVar
 
 import onnx
 import onnx_ir as ir
@@ -23,10 +26,11 @@ import onnx_ir as ir
 class ComponentModelLoader:
     """Validate a pre-existing component source and expose its IR model."""
 
+    schema_validation_lock: ClassVar[RLock] = RLock()
     model_path: Path
     component_name: str
 
-    def load(self) -> ir.Model:
+    def load(self, *, reject_sparse_initializers: bool = False) -> ir.Model:
         """Parse source metadata without materializing external tensor data."""
         try:
             proto = onnx.load(self.model_path, load_external_data=False)
@@ -35,21 +39,67 @@ class ComponentModelLoader:
                 f"component {self.component_name!r} source is not a readable ONNX model: "
                 f"{self.model_path}"
             ) from error
+        if reject_sparse_initializers and proto.graph.sparse_initializer:
+            raise ValueError(f"component {self.component_name!r} source uses unsupported sparse initializers.")
         external_tensors = list(self.iter_external_tensors(proto))
         self.external_data_files(external_tensors)
         model = ir.serde.deserialize_model(proto)
         model.meta["builder_config.external_tensors"] = external_tensors
         return model
 
-    def validate(self) -> None:
+    def validate(self, *, allow_ort_extensions: bool = False) -> None:
         """Check source structure/schema using the format's public checker."""
-        try:
-            onnx.checker.check_model(self.model_path)
-        except Exception as error:
-            raise ValueError(
-                f"component {self.component_name!r} source is not a valid ONNX model: "
-                f"{self.model_path}"
-            ) from error
+        with self.schema_validation_lock:
+            registered = []
+            try:
+                if allow_ort_extensions:
+                    ort_schema = importlib.import_module("onnxruntime.capi._pybind_state")
+
+                    source = onnx.load(self.model_path, load_external_data=False)
+                    opset = next((entry.version for entry in source.opset_import if entry.domain == ""), 1)
+                    missing = {
+                        node.op_type for node in source.graph.node
+                        if node.domain == "" and not onnx.defs.has(node.op_type, opset, "")
+                    }
+                    schemas = ort_schema.get_all_operator_schema() if missing else []
+                    for name in sorted(missing):
+                        candidates = [schema for schema in schemas if schema.name == name and schema.domain == "" and schema.since_version <= opset]
+                        if candidates:
+                            schema = self.make_onnx_operator_schema(max(candidates, key=lambda item: item.since_version))
+                            onnx.defs.register_schema(schema)
+                            registered.append(schema)
+                onnx.checker.check_model(self.model_path)
+            except Exception as error:
+                raise ValueError(
+                    f"component {self.component_name!r} source is not a valid ONNX model: "
+                    f"{self.model_path}"
+                ) from error
+            finally:
+                for schema in reversed(registered):
+                    onnx.defs.deregister_schema(schema.name, schema.since_version, schema.domain)
+
+    def make_onnx_operator_schema(self, source):
+        schema_type = onnx.defs.OpSchema
+
+        def formal_parameter(parameter):
+            return schema_type.FormalParameter(
+                parameter.name, parameter.typeStr, parameter.description,
+                param_option=schema_type.FormalParameterOption(parameter.option.value),
+            )
+
+        return schema_type(
+            source.name, source.domain, source.since_version,
+            inputs=[formal_parameter(parameter) for parameter in source.inputs],
+            outputs=[formal_parameter(parameter) for parameter in source.outputs],
+            type_constraints=[
+                (constraint.type_param_str, constraint.allowed_type_strs, constraint.description)
+                for constraint in source.type_constraints
+            ],
+            attributes=[
+                schema_type.Attribute(name, schema_type.AttrType(attribute.type.value), attribute.description, required=attribute.required)
+                for name, attribute in source.attributes.items()
+            ],
+        )
 
     def external_data_files(
         self, tensors: list[ir.ExternalTensor]

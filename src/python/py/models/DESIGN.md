@@ -91,6 +91,8 @@ The `make_slice_range` and `make_split_equal` convenience helpers delegate to
 the inherited `Model` operators without changing their call signatures.
 LiLiCorr uses `Model.make_topk` directly, including its value/index output names.
 
+`OnnxSourceModel` handles validated flat ONNX sources through the component loader rather than a new checkpoint architecture. It emits source operations and encoded tensors through the shared `Model` infrastructure and applies static INT8 per-channel KV scales during construction. It does not mutate or patch a serialized source graph. Unsupported graph structures and cache policies fail explicitly. Imported tiny shape initializers remain inline through an explicit shared serialization option; other builders retain their existing serialization default. Companion graphs are imported separately and each owns its complete weight file.
+
 ### `Attrs` Dictionaries
 
 Attributes specific to operators and their scenario-specific variables are created and defined in the `Model` class under the operator's dictionary of variables. They should not be created and defined within functions. With this approach, information is globally accessible at all times and across all layers. This is particularly useful when creating an ONNX model where components are added or removed within it to support the user's requested scenario.
