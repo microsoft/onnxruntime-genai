@@ -114,7 +114,7 @@ def _make_hf_reference_cos_sin(config_dict: dict, cache_length: int) -> tuple[np
     """Compute YaRN cos/sin caches using HuggingFace transformers reference."""
     rs = config_dict["rope_scaling"]
     base = rs.get("rope_theta", config_dict.get("rope_theta", 10000.0))
-    dim = config_dict["head_dim"]
+    dim = int(config_dict["head_dim"] * config_dict.get("partial_rotary_factor", 1.0))
     factor = rs["factor"]
     original_max_position_embeddings = rs["original_max_position_embeddings"]
     beta_fast = rs.get("beta_fast") or 32
@@ -210,7 +210,7 @@ def _make_builder_cos_sin(config_dict: dict, cache_length: int) -> tuple[np.ndar
         "save_caches": False,
         "cache_length": cache_length,
         "theta": rope_theta,
-        "partial_rotary_factor": 1.0,
+        "partial_rotary_factor": config_dict.get("partial_rotary_factor", 1.0),
         "interleaved": 0,
         "rotary_embedding_dim": 0,
         "rescale_factors": 1,
@@ -279,7 +279,7 @@ def _make_builder_cos_sin_rope_field(
         "save_caches": False,
         "cache_length": cache_length,
         "theta": rope_theta,
-        "partial_rotary_factor": 1.0,
+        "partial_rotary_factor": config_dict.get("partial_rotary_factor", 1.0),
         "interleaved": 0,
         "rotary_embedding_dim": 0,
         "rescale_factors": 1,
@@ -322,6 +322,18 @@ class TestYarnRopeCacheParity:
         hf_cos, hf_sin = _make_hf_reference_cos_sin(config, CACHE_LENGTH)
         builder_cos, builder_sin = _make_builder_cos_sin_rope_field(config, CACHE_LENGTH, "rope_parameters")
 
+        np.testing.assert_allclose(builder_cos, hf_cos, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(builder_sin, hf_sin, rtol=1e-5, atol=1e-5)
+
+    def test_partial_rotary_factor_matches_hf(self):
+        """Only head_dim * partial_rotary_factor dimensions are rotated, and the YaRN ramp uses that dimension."""
+        config = {**YARN_NO_MSCALE_CONFIG, "partial_rotary_factor": 0.5}
+        hf_cos, hf_sin = _make_hf_reference_cos_sin(config, CACHE_LENGTH)
+        builder_cos, builder_sin = _make_builder_cos_sin_rope_field(config, CACHE_LENGTH, "rope_parameters")
+
+        rotary_dim = int(config["head_dim"] * config["partial_rotary_factor"])
+        assert hf_cos.shape == (CACHE_LENGTH, rotary_dim)
+        assert builder_cos.shape == hf_cos.shape
         np.testing.assert_allclose(builder_cos, hf_cos, rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(builder_sin, hf_sin, rtol=1e-5, atol=1e-5)
 
