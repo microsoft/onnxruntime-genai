@@ -202,6 +202,13 @@ jobs:
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Align the Python ONNX Runtime DLL with the native build
+        run: |
+          # GenAI preloads ORT from the Python package, not from PATH.
+          $ortPythonDirectory = python -c "import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec('onnxruntime').origin).parent / 'capi')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$env:GITHUB_WORKSPACE\ort\lib\onnxruntime.dll" "$ortPythonDirectory\onnxruntime.dll" -Force -ErrorAction Stop
+
       - name: Run the synthetic Engine Python tests
         run: |
           python -m pytest -sv test/python/test_onnxruntime_genai_engine.py
