@@ -1082,14 +1082,10 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
   return type_info->second.type_info->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
 }
 
-namespace {
-
-std::string DescribeCacheLocation(const OrtMemoryInfo& info) {
+std::string Model::DescribeCacheLocation(const OrtMemoryInfo& info) {
   return info.GetAllocatorName() + ":" + std::to_string(info.GetDeviceId()) +
          " (memory type " + std::to_string(info.GetMemoryType()) + ")";
 }
-
-}  // namespace
 
 void Model::ValidateCacheLocations(const std::string& input_name, const std::string& output_name,
                                    const OrtMemoryInfo& input, const OrtMemoryInfo& output) {

@@ -204,6 +204,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   DeviceInterface& GetCacheDevice(const OrtMemoryInfo& location, const std::string& name) const;
   std::vector<CacheAllocation> GetCacheAllocations(std::span<const std::string> input_names,
                                                    std::span<const std::string> output_names) const;
+  static std::string DescribeCacheLocation(const OrtMemoryInfo& info);
   const Config::Model::Decoder::DeclaredState* GetDeclaredState() const;
   bool DeclaredStateSharesBuffer() const;
   void ValidateDeclaredStateParams(const GeneratorParams& params) const;

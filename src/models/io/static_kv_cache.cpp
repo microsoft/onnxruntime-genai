@@ -450,9 +450,9 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
       if (g_log.enabled && !cache_allocations_.empty()) {
         const auto& allocation = cache_allocations_[i];
         Log("info", "Dense KV cache '" + input_name_strings_[i] + "' / '" + output_name_strings_[i] +
-                        "': past=" + DescribeMemoryLocation(*allocation.input_location) +
-                        ", present=" + DescribeMemoryLocation(*allocation.output_location) +
-                        ", buffer=" + DescribeMemoryLocation(presents_.back()->GetTensorMemoryInfo()) +
+                        "': past=" + Model::DescribeCacheLocation(*allocation.input_location) +
+                        ", present=" + Model::DescribeCacheLocation(*allocation.output_location) +
+                        ", buffer=" + Model::DescribeCacheLocation(presents_.back()->GetTensorMemoryInfo()) +
                         ", capacity=" + std::to_string(tensor_shape[2]) +
                         ", bytes=" + std::to_string(presents_.back()->GetTensorTypeAndShapeInfo()->GetElementCount() * Ort::SizeOf(type_)) +
                         ", shared=" + std::to_string(past_present_share_buffer_));
