@@ -624,6 +624,12 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
         std::iota(top.begin(), top.end(), 0);
         const size_t top_count = std::min<size_t>(8, top.size());
         std::partial_sort(top.begin(), top.begin() + top_count, top.end(), [&scores](size_t left, size_t right) {
+          const bool left_nan = std::isnan(scores[left]);
+          const bool right_nan = std::isnan(scores[right]);
+          if (left_nan != right_nan)
+            return !left_nan;
+          if (left_nan)
+            return left < right;
           return scores[left] > scores[right] || (scores[left] == scores[right] && left < right);
         });
         const auto write_score = [&record](float value) {

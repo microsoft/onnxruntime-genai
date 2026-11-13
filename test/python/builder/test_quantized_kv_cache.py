@@ -304,6 +304,48 @@ def test_onnx_source_keeps_shape_initializers_loadable(tmp_path):
     np.testing.assert_array_equal(session.run(None, {"input": np.asarray([1, 2], dtype=np.float32)})[0], [[1, 2]])
 
 
+@pytest.mark.parametrize(
+    "node_names",
+    [
+        ("source/1/Add", None, "source/1/Add/1"),
+        (None, "source/0/Add", "source/0/Add/1"),
+        (None, None, None),
+    ],
+)
+def test_onnx_source_preserves_colliding_named_and_unnamed_nodes(tmp_path, node_names):
+    onnx = importlib.import_module("onnx")
+    ort = importlib.import_module("onnxruntime")
+    source = Model(graph_name="node_name_source")
+    previous = source.make_value("input", ir.DataType.FLOAT, [2])
+    source.graph.inputs.append(previous)
+    source.make_initializer(np.ones(2, dtype=np.float32), "increment")
+    for index, name in enumerate(node_names):
+        output = source.make_value(f"sum_{index}", ir.DataType.FLOAT, [2])
+        source.graph.append(
+            ir.node("Add", inputs=[previous, source.graph.initializers["increment"]], outputs=[output], name=name)
+        )
+        previous = output
+    source.graph.outputs.append(previous)
+    source_path = tmp_path / "node_names.onnx"
+    source.save_onnx_model(source.model, source_path)
+    proto = onnx.load(source_path, load_external_data=False)
+    for node, original_name in zip(proto.graph.node, node_names, strict=True):
+        if original_name is None:
+            node.ClearField("name")
+    source_path.write_bytes(proto.SerializeToString())
+    onnx.checker.check_model(source_path)
+
+    exported_path = OnnxSourceModel.from_pretrained(source_path).save_model(tmp_path / "exported")
+    exported = ir.load(exported_path)
+    names = [node.name for node in exported.graph]
+    assert len(names) == len(set(names)) == len(node_names)
+    assert all(name in names for name in node_names if name)
+    session_options = ort.SessionOptions()
+    session_options.intra_op_num_threads = 4
+    session = ort.InferenceSession(str(exported_path), sess_options=session_options, providers=["CPUExecutionProvider"])
+    np.testing.assert_array_equal(session.run(None, {"input": np.asarray([1, 2], dtype=np.float32)})[0], [4, 5])
+
+
 def test_onnx_source_preserves_folded_constant_initializer(tmp_path):
     ort = importlib.import_module("onnxruntime")
     source = Model(graph_name="folded_constant_source")

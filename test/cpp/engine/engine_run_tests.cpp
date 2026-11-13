@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -32,6 +33,7 @@
 
 #include <gtest/gtest.h>
 
+#include "scoped-environment-variable.h"
 #include "engine_test_helpers.h"
 #include "engine/decoders/simple_decoder.h"
 #include "engine_test_doubles.h"
@@ -2960,6 +2962,40 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
   EXPECT_EQ(RunOne(*engine.engine).request, decode);
   EXPECT_EQ(prefill->ProcessedSequenceLength(), 2);
   EXPECT_EQ(engine.cache->AllocatedCount(), 2u);
+}
+
+TEST_F(EngineRunTest, SpeculativeTraceOrdersNonFiniteScores) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, 8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(1);
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+
+  const size_t vocab_size = static_cast<size_t>(model_->config_->model.vocab_size);
+  ASSERT_GT(vocab_size, 11u);
+  const float infinity = std::numeric_limits<float>::infinity();
+  std::vector<float> scores(vocab_size, std::numeric_limits<float>::quiet_NaN());
+  scores[2] = scores[4] = infinity;
+  scores[1] = scores[3] = 3.0f;
+  scores[6] = -5.0f;
+  scores[7] = scores[8] = -infinity;
+  std::vector<float> bonus(vocab_size, -infinity);
+  bonus[filler] = 1.0f;
+  request->SetDraftTokens(std::vector<int32_t>{11});
+  engine.executor->SetVerifyRowLogits({scores, bonus});
+
+  ScopedEnvironmentVariable trace_enabled{"ORT_GENAI_TRACE_SPECULATIVE", "1"};
+  ::testing::internal::CaptureStdout();
+  std::array<EngineEvent, 2> events;
+  EXPECT_NO_THROW(static_cast<void>(engine.engine->Run(events)));
+  const auto trace_output = ::testing::internal::GetCapturedStdout();
+  EXPECT_NE(trace_output.find("SpeculativeTrace {\"event\":\"verify\""), std::string::npos);
+  EXPECT_NE(trace_output.find("\"draft_logit\":null"), std::string::npos);
+  EXPECT_NE(trace_output.find("\"target_logit\":null"), std::string::npos);
+  EXPECT_NE(trace_output.find(
+                "\"top\":[[2,null],[4,null],[1,3],[3,3],[6,-5],[7,null],[8,null],[0,null]]"),
+            std::string::npos);
 }
 
 TEST_F(EngineRunTest, SpeculativeRunKeepsAcceptedPrefixAndEmitsAllTokens) {

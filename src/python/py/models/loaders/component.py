@@ -15,6 +15,8 @@ import importlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
+from typing import ClassVar
 
 import onnx
 import onnx_ir as ir
@@ -24,6 +26,7 @@ import onnx_ir as ir
 class ComponentModelLoader:
     """Validate a pre-existing component source and expose its IR model."""
 
+    schema_validation_lock: ClassVar[RLock] = RLock()
     model_path: Path
     component_name: str
 
@@ -46,33 +49,34 @@ class ComponentModelLoader:
 
     def validate(self, *, allow_ort_extensions: bool = False) -> None:
         """Check source structure/schema using the format's public checker."""
-        registered = []
-        try:
-            if allow_ort_extensions:
-                ort_schema = importlib.import_module("onnxruntime.capi._pybind_state")
+        with self.schema_validation_lock:
+            registered = []
+            try:
+                if allow_ort_extensions:
+                    ort_schema = importlib.import_module("onnxruntime.capi._pybind_state")
 
-                source = onnx.load(self.model_path, load_external_data=False)
-                opset = next((entry.version for entry in source.opset_import if entry.domain == ""), 1)
-                missing = {
-                    node.op_type for node in source.graph.node
-                    if node.domain == "" and not onnx.defs.has(node.op_type, opset, "")
-                }
-                schemas = ort_schema.get_all_operator_schema() if missing else []
-                for name in sorted(missing):
-                    candidates = [schema for schema in schemas if schema.name == name and schema.domain == "" and schema.since_version <= opset]
-                    if candidates:
-                        schema = self.make_onnx_operator_schema(max(candidates, key=lambda item: item.since_version))
-                        onnx.defs.register_schema(schema)
-                        registered.append(schema)
-            onnx.checker.check_model(self.model_path)
-        except Exception as error:
-            raise ValueError(
-                f"component {self.component_name!r} source is not a valid ONNX model: "
-                f"{self.model_path}"
-            ) from error
-        finally:
-            for schema in reversed(registered):
-                onnx.defs.deregister_schema(schema.name, schema.since_version, schema.domain)
+                    source = onnx.load(self.model_path, load_external_data=False)
+                    opset = next((entry.version for entry in source.opset_import if entry.domain == ""), 1)
+                    missing = {
+                        node.op_type for node in source.graph.node
+                        if node.domain == "" and not onnx.defs.has(node.op_type, opset, "")
+                    }
+                    schemas = ort_schema.get_all_operator_schema() if missing else []
+                    for name in sorted(missing):
+                        candidates = [schema for schema in schemas if schema.name == name and schema.domain == "" and schema.since_version <= opset]
+                        if candidates:
+                            schema = self.make_onnx_operator_schema(max(candidates, key=lambda item: item.since_version))
+                            onnx.defs.register_schema(schema)
+                            registered.append(schema)
+                onnx.checker.check_model(self.model_path)
+            except Exception as error:
+                raise ValueError(
+                    f"component {self.component_name!r} source is not a valid ONNX model: "
+                    f"{self.model_path}"
+                ) from error
+            finally:
+                for schema in reversed(registered):
+                    onnx.defs.deregister_schema(schema.name, schema.since_version, schema.domain)
 
     def make_onnx_operator_schema(self, source):
         schema_type = onnx.defs.OpSchema

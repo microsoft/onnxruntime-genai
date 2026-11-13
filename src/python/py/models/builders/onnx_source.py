@@ -28,6 +28,7 @@ class OnnxSourceModel(Model):
         node_names = [node.name for node in source.graph if node.name]
         if len(node_names) != len(set(node_names)):
             raise ValueError("ONNX source node names must be unique.")
+        reserved_node_names = set(node_names)
         super().__init__(
             graph_name=source.graph.name or "main_graph", graph_opset=source.graph.opset_imports.get("", 20)
         )
@@ -87,11 +88,20 @@ class OnnxSourceModel(Model):
                 inputs[14], inputs[15] = self.get_kv_cache_scale_inputs(layer_id=layer_id)
                 attributes.update(k_quant_type="PER_CHANNEL", v_quant_type="PER_CHANNEL")
                 quantized_layers.add(layer_id)
+            node_name = node.name
+            if not node_name:
+                generated_name = f"source/{index}/{node.op_type}"
+                node_name = generated_name
+                suffix = 1
+                while node_name in reserved_node_names:
+                    node_name = f"{generated_name}/{suffix}"
+                    suffix += 1
+                reserved_node_names.add(node_name)
             self.make_node(
                 node.op_type,
                 inputs=inputs,
                 outputs=[value.name for value in node.outputs],
-                name=node.name or f"source/{index}/{node.op_type}",
+                name=node_name,
                 domain=node.domain,
                 metadata_props=dict(node.metadata_props),
                 **attributes,
