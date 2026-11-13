@@ -124,6 +124,24 @@ size_t NemotronBoltVerifyUsableRows(size_t position, size_t capacity, int max_le
   return prefix;
 }
 
+NemotronBoltRoundStats GetNemotronBoltRoundStats(std::span<const int32_t> drafts,
+                                                 std::span<const int32_t> emitted_tokens) {
+  Require(drafts.size() == kBoltVerifyRows - 1 && !emitted_tokens.empty() &&
+              emitted_tokens.size() <= kBoltVerifyRows,
+          "round statistics require seven drafts and one to eight emitted tokens");
+  NemotronBoltRoundStats stats;
+  const size_t proposal_count = std::min(drafts.size(), emitted_tokens.size());
+  for (size_t i = 0; i < proposal_count; ++i) {
+    ++stats.evaluated;
+    if (drafts[i] != emitted_tokens[i])
+      break;
+    ++stats.accepted;
+  }
+  stats.correction = stats.evaluated > stats.accepted;
+  stats.bonus = stats.accepted == drafts.size() && emitted_tokens.size() > drafts.size();
+  return stats;
+}
+
 std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
                                              std::span<const int64_t> predictions,
                                              size_t remaining, std::span<const int> eos,
@@ -656,12 +674,13 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
     const auto tokens = NemotronBoltRoundTokens(
         drafts_, predictions, static_cast<size_t>(params_->search.max_length) - public_length,
         model_.config_->model.eos_token_id, verified_rows_);
+    const NemotronBoltRoundStats round_stats = GetNemotronBoltRoundStats(drafts_, tokens);
     // The final queued token is the new anchor; state includes only its preceding input rows.
-    const size_t accepted = tokens.size() - 1;
+    const size_t committed_rows = tokens.size() - 1;
     if (g_log.enabled && g_log.model_logits) {
       auto& log = Log("model_logits");
       log << "Bolt verify length=" << length_ << " state_row=" << state_row_ << " anchor=" << anchor_
-          << " accepted=" << accepted << " drafts=";
+          << " accepted=" << round_stats.accepted << " committed_rows=" << committed_rows << " drafts=";
       for (auto token : drafts_) log << token << ',';
       log << " predictions=";
       for (auto token : predictions) log << token << ',';
@@ -672,26 +691,27 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
     ++stats_.completed_rounds;
     stats_.target_verify_forward_passes += stats_.target_forward_passes - target_passes;
     stats_.draft_tokens_proposed += 7;
-    stats_.draft_tokens_evaluated += std::min(drafts_.size(), verified_rows_);
-    stats_.draft_tokens_accepted += accepted;
-    ++stats_.acceptance_length_histogram[accepted];
+    stats_.draft_tokens_evaluated += round_stats.evaluated;
+    stats_.draft_tokens_accepted += round_stats.accepted;
+    ++stats_.acceptance_length_histogram[round_stats.accepted];
     stats_.tokens_queued += tokens.size();
-    accepted == 7 ? ++stats_.bonus_tokens : ++stats_.correction_tokens;
-    if (accepted == 0)
+    if (round_stats.bonus) ++stats_.bonus_tokens;
+    if (round_stats.correction) ++stats_.correction_tokens;
+    if (round_stats.accepted == 0)
       ++stats_.zero_accept_rounds;
-    else if (accepted == 7)
+    else if (round_stats.accepted == round_stats.evaluated)
       ++stats_.full_accept_rounds;
     else
       ++stats_.partial_accept_rounds;
-    anchor_ = static_cast<int32_t>(predictions[accepted]);
+    anchor_ = static_cast<int32_t>(predictions[committed_rows]);
     const size_t first_position = length_;
-    length_ += accepted + 1;
-    state_row_ = static_cast<int32_t>(accepted);
+    length_ += committed_rows + 1;
+    state_row_ = static_cast<int32_t>(committed_rows);
     const bool finishes = public_length + tokens.size() >= static_cast<size_t>(params_->search.max_length) ||
                           (!tokens.empty() && std::find(model_.config_->model.eos_token_id.begin(),
                                                         model_.config_->model.eos_token_id.end(), tokens.back()) !=
                                                   model_.config_->model.eos_token_id.end());
-    if (!finishes) Propose(accepted + 1, first_position, anchor_);
+    if (!finishes) Propose(committed_rows + 1, first_position, anchor_);
   }
   Require(!pending_.empty(), "no token available");
   const int32_t token = pending_.front();
