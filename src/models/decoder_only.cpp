@@ -426,7 +426,12 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
 
     // KV cache is clamped when slide_key_value_cache is true
     if (sliding_window->slide_key_value_cache) {
-      kv_cache_length = std::min(total_length, window_size);
+      if (UsesNonRewindableWindowedKeyValueCache(model_, model_.config_->model.decoder)) {
+        kv_cache_length = position_tokens.empty() ? static_cast<int>(new_length)
+                                                  : static_cast<int>(position_tokens.size());
+      } else {
+        kv_cache_length = std::min(total_length, window_size);
+      }
     }
   }
 

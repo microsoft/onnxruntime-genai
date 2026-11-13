@@ -430,45 +430,34 @@ void WindowedKeyValueCache::TransitionLayerToPrefill(size_t layer_idx) {
   state_.outputs_[output_index_ + 2 * layer_idx + 1] = value_caches_out_[layer_idx].get();
 }
 
-void WindowedKeyValueCache::UpdateLayer(DeviceSpan<int32_t> /*beam_indices*/, int total_length,
-                                        size_t step_width, size_t layer_idx) {
+void WindowedKeyValueCache::UpdateLayer(DeviceSpan<int32_t> /*beam_indices*/, int total_length, size_t layer_idx) {
   assert(layer_idx < layer_count_);
+  if (total_length <= 0) {
+    throw std::runtime_error("WindowedKeyValueCache requires a positive total_length");
+  }
 
   auto& layer_state = per_layer_states_[layer_idx];
 
   if (layer_state.is_first_update) {
-    layer_state.num_windows = (total_length + layer_state.window_size - 1) / layer_state.window_size;
+    layer_state.num_windows = (static_cast<size_t>(total_length) + layer_state.window_size - 1) / layer_state.window_size;
     layer_state.is_first_update = false;
     ++layer_state.window_index;
-    if (step_width == 1) {
-      TransitionLayerToTokenGeneration(layer_idx);
-    }
     return;
   }
 
-  if (step_width > 0) {
-    if (step_width == configured_window_size_) {
-      if (layer_state.window_size == configured_window_size_) {
-        SlideLayer(layer_idx);
-      } else {
-        TransitionLayerToPrefill(layer_idx);
-      }
-      ++layer_state.window_index;
+  if (layer_state.window_size == 1) {
+    if (static_cast<size_t>(total_length) >= configured_window_size_) {
+      TransitionLayerToPrefill(layer_idx);
+      layer_state.num_windows = (static_cast<size_t>(total_length) + configured_window_size_ - 1) / configured_window_size_;
+      layer_state.window_index = 1;
       return;
     }
-    if (step_width == 1) {
-      if (layer_state.window_size == 1) {
-        SlideLayer(layer_idx);
-        ++layer_state.window_index;
-      } else {
-        TransitionLayerToTokenGeneration(layer_idx);
-      }
-      return;
-    }
-    throw std::runtime_error("WindowedKeyValueCache expects input_ids width to equal 1 or sliding_window.window_size");
+    SlideLayer(layer_idx);
+    ++layer_state.window_index;
+    return;
   }
 
-  if (layer_state.window_size == 1 || layer_state.window_index < layer_state.num_windows) {
+  if (layer_state.window_index < layer_state.num_windows) {
     SlideLayer(layer_idx);
     ++layer_state.window_index;
     return;
@@ -483,16 +472,9 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current
 
 void WindowedKeyValueCache::PartialUpdate(DeviceSpan<int32_t> beam_indices, int total_length,
                                           std::span<const size_t> layer_indices) {
-  size_t step_width = 0;
-  if (auto* input_ids = state_.GetInput(model_.config_->model.decoder.inputs.input_ids.c_str())) {
-    const auto shape = input_ids->GetTensorTypeAndShapeInfo()->GetShape();
-    if (shape.size() >= 2 && shape[1] > 0) {
-      step_width = static_cast<size_t>(shape[1]);
-    }
-  }
   ThreadPool thread_pool{layer_indices.size()};
   thread_pool.Compute([&](size_t i) {
-    UpdateLayer(beam_indices, total_length, step_width, layer_indices[i]);
+    UpdateLayer(beam_indices, total_length, layer_indices[i]);
   });
 }
 
