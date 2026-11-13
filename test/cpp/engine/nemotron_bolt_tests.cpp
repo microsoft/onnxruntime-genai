@@ -159,6 +159,96 @@ TEST(NemotronBolt, RejectsUnsupportedSearchInsteadOfIgnoringIt) {
   EXPECT_THROW(CreateSearch(*invalid_sliding), std::runtime_error);
 }
 
+TEST(NemotronBolt, PreservesDrafterOptimizerExclusions) {
+  const std::string fusion = "GatherSliceToSplitFusion";
+  for (const auto& [existing, expected] :
+       std::vector<std::pair<std::optional<std::string>, std::string>>{
+           {std::nullopt, fusion},
+           {"", fusion},
+           {"OtherFusion", "OtherFusion;" + fusion},
+           {"OtherFusion;", "OtherFusion;" + fusion},
+           {fusion, fusion},
+           {fusion + ";OtherFusion", fusion + ";OtherFusion"},
+           {"OtherFusion;" + fusion + ";", "OtherFusion;" + fusion + ";"},
+           {"GatherSliceToSplitFusionSuffix", "GatherSliceToSplitFusionSuffix;" + fusion}}) {
+    Config config;
+    config.model.vocab_size = 128;
+    auto& drafter = config.model.dflash2;
+    drafter.filename = "drafter.onnx";
+    drafter.num_hidden_layers = drafter.num_key_value_heads = drafter.head_size = 1;
+    drafter.block_size = 8;
+    drafter.num_draft_tokens = 7;
+    drafter.selector_top_k = 1;
+    drafter.sliding_window = 8;
+    drafter.session_options.emplace();
+    auto& entries = drafter.session_options->config_entries;
+    if (existing) {
+      entries.emplace_back("optimization.disable_specified_optimizers", "SupersededFusion");
+      entries.emplace_back("optimization.disable_specified_optimizers", *existing);
+    }
+    const auto projected = CreateNemotronBoltDrafterConfig(config);
+    const auto& merged = projected->model.decoder.session_options.config_entries;
+    if (existing) EXPECT_EQ(merged.front(), entries.front());
+    const auto exclusion = std::find_if(merged.rbegin(), merged.rend(), [](const auto& option) {
+      return option.first == "optimization.disable_specified_optimizers";
+    });
+    ASSERT_NE(exclusion, merged.rend());
+    EXPECT_EQ(exclusion->second, expected);
+  }
+}
+
+class NemotronBoltRuntimePolicyTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    Ort::InitApi();
+    saved_version_ = Ort::runtime_api_version;
+  }
+  void TearDown() override { Ort::runtime_api_version = saved_version_; }
+
+ private:
+  uint32_t saved_version_{};
+};
+
+TEST_F(NemotronBoltRuntimePolicyTest, PreservesLogicalDrafterLengthsAndExplicitSanitizerPolicy) {
+  for (uint32_t version : {0u, 31u, 32u, 33u}) {
+    SCOPED_TRACE(version);
+    Ort::runtime_api_version = version;
+    for (const std::string policy : {"", "0", "1"}) {
+      SCOPED_TRACE(policy);
+      Config config;
+      config.model.vocab_size = 128;
+      auto& drafter = config.model.dflash2;
+      drafter.filename = "drafter.onnx";
+      drafter.num_hidden_layers = drafter.num_key_value_heads = drafter.head_size = 1;
+      drafter.block_size = 8;
+      drafter.num_draft_tokens = 7;
+      drafter.selector_top_k = 1;
+      drafter.sliding_window = 8;
+      drafter.session_options.emplace();
+      constexpr auto key = "session.paged_attention.skip_input_sanitizer";
+      if (!policy.empty()) {
+        drafter.session_options->config_entries.emplace_back(key, policy);
+      }
+      const auto projected = CreateNemotronBoltDrafterConfig(config);
+      const auto& entries = projected->model.decoder.session_options.config_entries;
+      const auto length_policy = std::find_if(entries.begin(), entries.end(), [](const auto& option) {
+        return option.first == key;
+      });
+      if (version < 32 && policy.empty()) {
+        EXPECT_EQ(length_policy, entries.end());
+      } else {
+        ASSERT_NE(length_policy, entries.end());
+        EXPECT_EQ(length_policy->second, policy.empty() ? "1" : policy);
+        EXPECT_EQ(std::count_if(entries.begin(), entries.end(), [](const auto& option) {
+                    return option.first == key;
+                  }),
+                  1);
+      }
+      EXPECT_EQ(drafter.session_options->config_entries.size(), policy.empty() ? 0u : 1u);
+    }
+  }
+}
+
 TEST(NemotronBolt, PublicTokenCommitAndResetHaveNoLookaheadLeak) {
   Config config;
   config.model.type = "nemotron_bolt";
