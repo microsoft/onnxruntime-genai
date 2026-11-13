@@ -13,6 +13,9 @@ import pytest
 from _builder_test_utils import load_builder_module
 
 transformers = pytest.importorskip("transformers")
+if getattr(transformers, "__spec__", None) is None:
+    # _builder_test_utils installs a placeholder module when Transformers is missing; it has no GenerationConfig.
+    pytest.skip("transformers is not installed", allow_module_level=True)
 
 base_module = load_builder_module("base")
 Model = base_module.Model
