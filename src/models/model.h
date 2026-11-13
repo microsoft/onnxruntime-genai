@@ -152,6 +152,7 @@ struct SessionInfo : ModelStateMetadata {
   ONNXTensorElementDataType GetOutputDataType(const std::string& name) const override;
 
   std::vector<std::string> GetInputNames() const;
+  const OrtSession& GetInputSession(const std::string& name) const;
 
   std::vector<int64_t> GetInputShape(const std::string& name) const override;
   std::vector<int64_t> GetOutputShape(const std::string& name) const override;
@@ -160,7 +161,11 @@ struct SessionInfo : ModelStateMetadata {
   std::vector<const char*> GetOutputSymbolicShape(const std::string& name) const;
 
  private:
-  std::unordered_map<std::string, std::unique_ptr<OrtTypeInfo>> inputs_, outputs_;
+  struct TensorInfo {
+    std::unique_ptr<OrtTypeInfo> type_info;
+    const OrtSession* session;
+  };
+  std::unordered_map<std::string, TensorInfo> inputs_, outputs_;
 };
 
 struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {

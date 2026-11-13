@@ -894,6 +894,20 @@ inline std::vector<std::string> OrtSession::GetOutputNames() const {
   return out;
 }
 
+inline std::vector<const OrtMemoryInfo*> OrtSession::GetMemoryInfoForInputs() const {
+  std::vector<const OrtMemoryInfo*> out(GetInputCount());
+  if (!out.empty())
+    Ort::ThrowOnError(Ort::api->SessionGetMemoryInfoForInputs(this, out.data(), out.size()));
+  return out;
+}
+
+inline std::vector<const OrtMemoryInfo*> OrtSession::GetMemoryInfoForOutputs() const {
+  std::vector<const OrtMemoryInfo*> out(GetOutputCount());
+  if (!out.empty())
+    Ort::ThrowOnError(Ort::api->SessionGetMemoryInfoForOutputs(this, out.data(), out.size()));
+  return out;
+}
+
 inline std::string OrtSession::GetOverridableInitializerName(size_t index) const {
   Ort::StringAllocator string_allocator;
   Ort::ThrowOnError(Ort::api->SessionGetOverridableInitializerName(this, index, &string_allocator, &string_allocator.out));
