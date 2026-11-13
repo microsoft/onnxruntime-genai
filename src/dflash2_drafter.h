@@ -162,6 +162,10 @@ struct Dflash2Drafter {
   // only decode steps (used by Qwen38GraphEngine).
   void SetPinnedBlockTableWidth(bool pinned) noexcept { pin_block_table_width_ = pinned; }
 
+  // Pre-reserves proposal buffers for up to max_requests_ and pads multi-request 1..block_size
+  // decode steps to one static shape per active batch size when skip_input_sanitizer is enabled.
+  void SetPaddedDecodeSteps(bool padded);
+
   // Bytes of drafter K/V per paged block, so the main cache pool can budget for it up front.
   static size_t BytesPerBlock(const Config& config, size_t paged_block_size,
                               ONNXTensorElementDataType cache_type);
@@ -312,6 +316,7 @@ struct Dflash2Drafter {
   size_t max_block_table_columns_{};
   bool graph_capture_enabled_{};
   bool pin_block_table_width_{false};
+  bool pad_decode_steps_{false};
   GraphAnnotationIds graph_ids_;
   // Bumped whenever a proposal tensor outgrows its buffer and moves. A captured graph records the
   // old addresses, so anything captured before a move must never be replayed after it.

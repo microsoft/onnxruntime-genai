@@ -15,6 +15,7 @@ struct FixedSlotSession {
   virtual ~FixedSlotSession() = default;
   virtual size_t MaxRequestLength() const = 0;
   virtual size_t MaxBatchSize() const = 0;
+  virtual bool SupportsChunkedPrefill() const { return false; }
   // Quiesce all work referencing a slot and inspect pending status before returning it for reuse.
   virtual void ReleaseSlot(size_t slot) = 0;
   virtual void ReleaseSlotForTeardown(size_t slot) noexcept = 0;
@@ -34,6 +35,7 @@ struct FixedSlotCacheManager final : CacheManager {
   void DetachRequestForTeardown(const std::shared_ptr<Request>& request) noexcept override;
   bool SupportsDynamicBatching() const override { return false; }
   bool SupportsContinuousMultiSlotDecoding() const override { return max_slots_ > 1; }
+  bool SupportsChunkedPrefill() const { return session_->SupportsChunkedPrefill(); }
   size_t MaxBatchSize() const override { return max_slots_; }
   size_t MaxStaticBatchSize() const override { return max_slots_; }
   size_t MaxStaticRequestLength() const override { return session_->MaxRequestLength(); }
@@ -58,7 +60,9 @@ struct FixedSlotScheduler final : Scheduler {
   }
 
   void AddRequest(std::shared_ptr<Request> request) override {
-    if (request->PrefillChunkSize().value_or(0) != 0) {
+    const auto* fixed_cache = dynamic_cast<const FixedSlotCacheManager*>(cache_manager_.get());
+    if (request->PrefillChunkSize().value_or(0) != 0 &&
+        !(fixed_cache && fixed_cache->SupportsChunkedPrefill())) {
       throw std::runtime_error(
           "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
           "prefill.");

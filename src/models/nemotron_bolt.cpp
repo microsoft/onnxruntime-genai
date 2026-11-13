@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "nemotron_bolt.h"
+#include "engine/paged_key_value_cache.h"
 #include "engine/request.h"
 #include "search.h"
 
@@ -8,12 +9,20 @@
 #include <array>
 #include <cstdlib>
 #include <limits>
+#include <numeric>
 #include <set>
 
 namespace Generators {
 namespace {
 
 constexpr int kCaptureWarmupRuns = 4;
+
+std::string PresentCacheName(const std::string& past_name) {
+  constexpr std::string_view kPagedPrefix = "past_key_values.";
+  if (past_name.rfind(kPagedPrefix.data(), 0) == 0)
+    return "present." + past_name.substr(kPagedPrefix.size());
+  return "present_" + past_name.substr(5);
+}
 
 void Require(bool condition, const std::string& message) {
   if (!condition)
@@ -218,17 +227,40 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
                                    config_->speculative.max_draft_tokens != 0);
   Require(p_device_->GetType() == DeviceType::CUDA, "a CUDA execution provider is required");
   p_device_scoring_ = GetDeviceInterface(DeviceType::CPU);
-  Require(!config_->engine.dynamic_batching && !config_->engine.static_batching &&
-              !config_->model.draft && !config_->model.mtp.IsEnabled() &&
+  const auto configured_batching = config_->engine.dynamic_batching;
+  if (configured_batching) {
+    Require(configured_batching->max_batch_size >= 1 &&
+                configured_batching->max_batch_size <= kBoltMaxBatchSize,
+            "native Bolt engine.dynamic_batching.max_batch_size must be in [1, 64]");
+    Require(!configured_batching->prefix_caching.value_or(false) ||
+                configured_batching->max_snapshots == 0,
+            "prefix_caching is unsupported");
+    engine_max_batch_size_ = configured_batching->max_batch_size;
+    if (configured_batching->max_scheduled_tokens > 0) {
+      engine_max_scheduled_tokens_ = configured_batching->max_scheduled_tokens;
+    }
+    config_->engine.dynamic_batching.reset();
+  } else if (config_->engine.static_batching) {
+    Require(config_->engine.static_batching->max_batch_size >= 1 &&
+                config_->engine.static_batching->max_batch_size <= kBoltMaxBatchSize,
+            "native Bolt engine.static_batching.max_batch_size must be in [1, 64]");
+    engine_max_batch_size_ = config_->engine.static_batching->max_batch_size;
+  }
+  Require(!config_->model.draft && !config_->model.mtp.IsEnabled() &&
               !config_->model.decoder.sliding_window,
-          "Engine batching, decoder draft, MTP, and decoder sliding_window are unsupported");
+          "decoder draft, MTP, and decoder sliding_window are unsupported");
+  config_->engine.static_batching = Config::Engine::StaticBatching{engine_max_batch_size_};
+
   session_ = CreateSession(env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_);
   const auto& info = session_info_;
   const auto ids_shape = info.GetInputShape("input_ids");
   const bool has_query_rows = info.HasInput("query_rows");
+  const bool has_state_slots = info.HasInput("state_slots");
   has_logit_rows_ = info.HasInput("logit_rows");
   has_aux_rows_ = info.HasInput("aux_rows");
+  paged_attention_ = info.HasInput("block_table") && info.HasInput("cumulative_sequence_lengths") &&
+                     info.HasInput("past_sequence_lengths") && info.HasInput("attention_metadata");
   single_token_decode_ = ids_shape == std::vector<int64_t>({1, -1}) && has_query_rows;
   dynamic_prefill_ = ids_shape == std::vector<int64_t>({1, -1}) && !has_query_rows;
   Require(ids_shape == std::vector<int64_t>({1, 8}) || dynamic_prefill_ ||
@@ -244,9 +276,30 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
   if (dynamic_prefill_ && has_aux_rows_)
     RequireTensor(info, "aux_rows", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {-1});
   RequireTensor(info, "input_ids", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {1, rows});
-  RequireTensor(info, "seqlens_k", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
-  RequireTensor(info, "state_row", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
-  RequireTensor(info, "total_sequence_length", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {});
+  Require(info.HasInput("state_row") &&
+              info.GetInputDataType("state_row") == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
+          "missing or invalid state_row input");
+  const auto state_row_shape = info.GetInputShape("state_row");
+  Require(state_row_shape == std::vector<int64_t>({1}) ||
+              (has_state_slots && state_row_shape == std::vector<int64_t>({-1})),
+          "incompatible tensor state_row");
+  if (has_state_slots) {
+    Require(paged_attention_ &&
+                info.GetInputDataType("state_slots") == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 &&
+                info.GetInputShape("state_slots") == state_row_shape,
+            "state_slots requires PagedAttention and matching int32 batch geometry with state_row");
+  }
+  if (paged_attention_) {
+    RequireTensor(info, "cumulative_sequence_lengths", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1});
+    RequireTensor(info, "past_sequence_lengths", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1});
+    RequireTensor(info, "block_table", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1, -1});
+    RequireTensor(info, "attention_metadata", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {3});
+  } else {
+    Require(!configured_batching || !configured_batching->num_blocks,
+            "num_blocks requires a PagedAttention Bolt target graph");
+    RequireTensor(info, "seqlens_k", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
+    RequireTensor(info, "total_sequence_length", true, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {});
+  }
   RequireTensor(info, "pred_ids", false, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {1, rows});
   RequireTensor(info, "logits", false, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16,
                 {1, rows, config_->model.vocab_size});
@@ -257,44 +310,140 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
   aux_width_ = static_cast<size_t>(aux_shape[2]);
   std::set<std::string> outputs{"logits", "pred_ids", "aux_hidden_states"};
   size_t conv_count = 0, ssm_count = 0, key_count = 0, value_count = 0;
+  size_t recurrent_bank_bytes = 0;
+  std::optional<int64_t> recurrent_bank_dim;
   for (const auto& name : info.GetInputNames()) {
-    if (name == "input_ids" || name == "seqlens_k" || name == "state_row" ||
-        name == "total_sequence_length" || (single_token_decode_ && name == "query_rows") ||
+    if (name == "input_ids" || name == "seqlens_k" || name == "state_row" || name == "state_slots" ||
+        name == "total_sequence_length" || name == "cumulative_sequence_lengths" ||
+        name == "past_sequence_lengths" || name == "block_table" || name == "attention_metadata" ||
+        (single_token_decode_ && name == "query_rows") ||
         (dynamic_prefill_ && (name == "logit_rows" || name == "aux_rows")))
       continue;
     const auto shape = info.GetInputShape(name);
     const auto type = info.GetInputDataType(name);
-    if (name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0) {
+    if (!paged_attention_ && (name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0)) {
       Require(shape.size() == 4 && shape[0] == 1 && shape[1] == 2 &&
                   shape[2] > 8 && shape[3] == 128 && type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16,
               "expected dense bf16 KV[1,2,capacity,128]: " + name);
       if (capacity_ == 0) capacity_ = static_cast<size_t>(shape[2]);
       Require(capacity_ == static_cast<size_t>(shape[2]), "KV capacities differ");
       name.rfind("past_key.", 0) == 0 ? ++key_count : ++value_count;
+    } else if (paged_attention_ && name.rfind("past_key_values.", 0) == 0 &&
+               (name.size() > 4 && (name.substr(name.size() - 4) == ".key" ||
+                                    (name.size() > 6 && name.substr(name.size() - 6) == ".value")))) {
+      Require(shape.size() == 4 && shape[0] < 0 && shape[1] == static_cast<int64_t>(kBoltPagedBlockSize) &&
+                  shape[2] == 2 && shape[3] == 128 && type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16,
+              "expected paged bf16 KV[num_blocks,256,2,128]: " + name);
+      name.substr(name.size() - 4) == ".key" ? ++key_count : ++value_count;
     } else if (name.rfind("past_conv.", 0) == 0) {
-      Require(shape == std::vector<int64_t>({8, 10240, 3}) &&
-                  type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16,
-              "invalid recurrent conv " + name);
+      if (has_state_slots && shape.size() == 4) {
+        Require((shape[0] < 0 || shape[0] >= static_cast<int64_t>(engine_max_batch_size_)) &&
+                    shape[1] == 8 && shape[2] == 10240 && shape[3] == 3 &&
+                    type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16,
+                "invalid banked recurrent conv " + name);
+        if (!recurrent_bank_dim) recurrent_bank_dim = shape[0];
+        Require(*recurrent_bank_dim == shape[0], "recurrent bank dimensions differ");
+        batched_recurrent_ = true;
+      } else {
+        Require(!has_state_slots && shape == std::vector<int64_t>({8, 10240, 3}) &&
+                    type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16,
+                "invalid recurrent conv " + name);
+      }
+      recurrent_bank_bytes += 8ULL * 10240 * 3 * sizeof(uint16_t);
       ++conv_count;
     } else if (name.rfind("past_ssm.", 0) == 0) {
-      Require(shape == std::vector<int64_t>({8, 128, 128, 64}) &&
-                  type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-              "invalid recurrent SSM " + name);
+      if (has_state_slots && shape.size() == 5) {
+        Require((shape[0] < 0 || shape[0] >= static_cast<int64_t>(engine_max_batch_size_)) &&
+                    shape[1] == 8 && shape[2] == 128 && shape[3] == 128 && shape[4] == 64 &&
+                    type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+                "invalid banked recurrent SSM " + name);
+        if (!recurrent_bank_dim) recurrent_bank_dim = shape[0];
+        Require(*recurrent_bank_dim == shape[0], "recurrent bank dimensions differ");
+        batched_recurrent_ = true;
+      } else {
+        Require(!has_state_slots && shape == std::vector<int64_t>({8, 128, 128, 64}) &&
+                    type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+                "invalid recurrent SSM " + name);
+      }
+      recurrent_bank_bytes += 8ULL * 128 * 128 * 64 * sizeof(float);
       ++ssm_count;
     } else {
       throw std::runtime_error("nemotron_bolt: unsupported input " + name);
     }
-    const auto present = "present_" + name.substr(5);
+    const auto present = PresentCacheName(name);
     RequireTensor(info, present, false, type, shape);
     outputs.insert(present);
   }
-  Require(conv_count > 0 && conv_count == ssm_count && key_count == 8 && value_count == 8,
-          "expected matching recurrent states and eight dense attention layers");
+  Require(conv_count > 0 && conv_count == ssm_count && key_count == 8 && value_count == 8 &&
+              batched_recurrent_ == has_state_slots,
+          "expected matching recurrent states and eight attention layers");
   Require(session_->GetOutputNames().size() == outputs.size(), "unexpected target outputs");
-  Require(config_->model.context_length > 0 &&
-              capacity_ <= static_cast<size_t>(std::numeric_limits<int32_t>::max()) &&
-              static_cast<size_t>(config_->model.context_length) <= capacity_ - kBoltVerifyRows,
-          "context_length must leave eight scratch slots in the fixed KV capacity");
+  if (engine_max_batch_size_ > 1) {
+    Require(paged_attention_ && batched_recurrent_ && dynamic_prefill_ && has_logit_rows_ && has_aux_rows_ &&
+                state_row_shape == std::vector<int64_t>({-1}),
+            "max_batch_size > 1 requires a PagedAttention dynamic-prefill Bolt target with banked recurrent state");
+  }
+
+  if (paged_attention_) {
+    paged_block_size_ = configured_batching ? configured_batching->block_size : kBoltPagedBlockSize;
+    Require(paged_block_size_ == kBoltPagedBlockSize, "native Bolt PagedAttention requires block_size=256");
+    constexpr size_t kPrimaryBytesPerBlock = 8ULL * 2 * kBoltPagedBlockSize * 2 * 128 * sizeof(uint16_t);
+    size_t drafter_reserved_bytes = 0;
+    if (config_->speculative.max_draft_tokens != 0 && !config_->model.dflash2.filename.empty()) {
+      const size_t df_blocks =
+          Dflash2Drafter::PoolBlocks(*config_, kBoltPagedBlockSize, engine_max_batch_size_);
+      if (df_blocks != 0) {
+        drafter_reserved_bytes = Dflash2Drafter::PoolBytes(
+            *config_, kBoltPagedBlockSize, df_blocks, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+      }
+      drafter_reserved_bytes += Dflash2Drafter::EmbeddingReservedBytes(
+          engine_max_batch_size_, static_cast<size_t>(std::max(config_->model.dflash2.block_size, 8)),
+          static_cast<size_t>(std::max(config_->model.decoder.hidden_size, 4096)),
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+    }
+    if (configured_batching && configured_batching->num_blocks.has_value()) {
+      paged_num_blocks_ = ResolveConfiguredPagedBlockCount(
+          *configured_batching->num_blocks, kPrimaryBytesPerBlock, 0, drafter_reserved_bytes);
+    } else if (configured_batching && (configured_batching->gpu_utilization_factor.has_value() ||
+                                       configured_batching->device_memory_budget_bytes.has_value())) {
+      size_t free_bytes = 0, total_bytes = 0;
+      p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
+      const size_t state_reserve =
+          engine_max_batch_size_ * recurrent_bank_bytes + drafter_reserved_bytes + (256ULL << 20);
+      if (configured_batching->device_memory_budget_bytes.has_value()) {
+        Require(device_memory_budget_initial_free_bytes_.has_value(),
+                "device_memory_budget_bytes must be configured before loading the model");
+        const size_t avail = DeviceMemoryBudgetAvailableBytes(
+            *configured_batching->device_memory_budget_bytes,
+            *device_memory_budget_initial_free_bytes_, free_bytes,
+            configured_batching->device_memory_headroom_bytes);
+        paged_num_blocks_ = ComputePagedBlockCapacityFromBudget(avail, state_reserve, kPrimaryBytesPerBlock, 0);
+      } else {
+        paged_num_blocks_ = ComputePagedBlockCapacityFromBytes(
+            free_bytes, *configured_batching->gpu_utilization_factor, state_reserve, kPrimaryBytesPerBlock, 0);
+      }
+    } else {
+      Require(config_->model.context_length > 0, "context_length must be positive");
+      paged_num_blocks_ =
+          (static_cast<size_t>(config_->model.context_length) + kBoltVerifyRows + paged_block_size_ - 1) /
+          paged_block_size_;
+    }
+    Require(paged_num_blocks_ >= engine_max_batch_size_,
+            "PagedAttention requires at least max_batch_size KV blocks");
+    capacity_ = paged_num_blocks_ * paged_block_size_;
+    Require(capacity_ > kBoltVerifyRows && capacity_ <= static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+            "paged KV capacity out of int32 range");
+    const size_t max_ctx = capacity_ - kBoltVerifyRows;
+    if (config_->model.context_length <= 0 || static_cast<size_t>(config_->model.context_length) > max_ctx)
+      config_->model.context_length = static_cast<int>(max_ctx);
+    if (config_->search.max_length <= 0 || config_->search.max_length > config_->model.context_length)
+      config_->search.max_length = config_->model.context_length;
+  } else {
+    Require(config_->model.context_length > 0 &&
+                capacity_ <= static_cast<size_t>(std::numeric_limits<int32_t>::max()) &&
+                static_cast<size_t>(config_->model.context_length) <= capacity_ - kBoltVerifyRows,
+            "context_length must leave eight scratch slots in the fixed KV capacity");
+  }
   if (config_->speculative.max_draft_tokens == 0)
     return;
   const auto& d = config_->model.dflash2;
@@ -353,6 +502,7 @@ Tensor& NemotronBoltState::AddTensor(const std::string& name, bool input, Device
 
 NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const GeneratorParams& params)
     : State{params, model}, bolt_{model}, request_{std::make_unique<Request>(model, params.search.max_length)} {
+  std::lock_guard lock{model.execution_mutex_};
   if (model.dynamic_prefill_) {
     prefill_chunk_rows_ = NemotronBoltPrefillChunkRows(params.search.chunk_size, model.capacity_);
   }
@@ -362,14 +512,29 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   int32_t* verify_in_base = verify_inputs_span_.Span().data();
   const auto& dev_mem_info = model.p_device_->GetAllocator().GetInfo();
   for (const auto& name : info.GetInputNames()) {
-    if (name == "input_ids" || name == "seqlens_k" || name == "state_row") {
-      void* ptr = name == "input_ids"   ? static_cast<void*>(verify_in_base)
-                  : name == "seqlens_k" ? static_cast<void*>(verify_in_base + 2 * kBoltVerifyRows)
-                                        : static_cast<void*>(verify_in_base + 2 * kBoltVerifyRows + 4);
-      const size_t bytes = name == "input_ids" ? kBoltVerifyRows * sizeof(int64_t) : sizeof(int32_t);
+    if (name == "input_ids" || name == "seqlens_k" || name == "past_sequence_lengths" ||
+        name == "cumulative_sequence_lengths" || name == "state_row") {
+      void* ptr = name == "input_ids"
+                      ? static_cast<void*>(verify_in_base)
+                  : (name == "seqlens_k" || name == "past_sequence_lengths")
+                      ? static_cast<void*>(verify_in_base + 2 * kBoltVerifyRows)
+                  : name == "cumulative_sequence_lengths"
+                      ? static_cast<void*>(verify_in_base + 2 * kBoltVerifyRows + 2)
+                      : static_cast<void*>(verify_in_base + 2 * kBoltVerifyRows + 4);
+      const size_t bytes = name == "input_ids"
+                               ? kBoltVerifyRows * sizeof(int64_t)
+                           : name == "cumulative_sequence_lengths"
+                               ? 2 * sizeof(int32_t)
+                               : sizeof(int32_t);
       auto shape = info.GetInputShape(name);
       if ((model.single_token_decode_ || model.dynamic_prefill_) && name == "input_ids")
         shape[1] = kBoltVerifyRows;
+      if (name == "past_sequence_lengths")
+        shape = {1};
+      if (name == "cumulative_sequence_lengths")
+        shape = {2};
+      if (name == "state_row")
+        shape = {1};
       auto tensor = std::make_unique<Tensor>(
           OrtValue::CreateTensor(dev_mem_info, ptr, bytes, shape, info.GetInputDataType(name)));
       tensor->p_device_ = model.p_device_;
@@ -378,23 +543,46 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
       tensors_.emplace(name, std::move(tensor));
       continue;
     }
-    auto* device = name == "total_sequence_length" ? GetDeviceInterface(DeviceType::CPU) : model.p_device_;
+    auto* device = (name == "total_sequence_length" || name == "attention_metadata")
+                       ? GetDeviceInterface(DeviceType::CPU)
+                       : model.p_device_;
     auto shape = info.GetInputShape(name);
     if ((model.single_token_decode_ && name == "query_rows") ||
         (model.dynamic_prefill_ && (name == "logit_rows" || name == "aux_rows")))
       shape[0] = kBoltVerifyRows;
+    if (name == "state_slots")
+      shape = {1};
+    if (name == "block_table")
+      shape = {1, static_cast<int64_t>(model.paged_num_blocks_)};
+    if (model.paged_attention_ && name.rfind("past_key_values.", 0) == 0)
+      shape[0] = static_cast<int64_t>(model.paged_num_blocks_);
+    if (model.batched_recurrent_ && (name.rfind("past_conv.", 0) == 0 || name.rfind("past_ssm.", 0) == 0) &&
+        shape[0] < 0)
+      shape[0] = 1;
     auto& tensor = AddTensor(name, true, device, info.GetInputDataType(name), shape);
     if (name == "query_rows" || name == "logit_rows" || name == "aux_rows") {
       const std::array<int64_t, 8> indices{0, 1, 2, 3, 4, 5, 6, 7};
       Upload(tensor, std::span<const int64_t>{indices});
+    } else if (name == "state_slots") {
+      const std::array<int32_t, 1> slot_zero{0};
+      Upload(tensor, std::span<const int32_t>{slot_zero});
+    } else if (name == "block_table") {
+      std::vector<int32_t> table(model.paged_num_blocks_);
+      std::iota(table.begin(), table.end(), 0);
+      Upload(tensor, std::span<const int32_t>{table});
+    } else if (name == "attention_metadata") {
+      const std::array<int32_t, 3> meta{
+          static_cast<int32_t>(model.target_rows_), static_cast<int32_t>(model.capacity_), 1};
+      Upload(tensor, std::span<const int32_t>{meta});
     }
     if (name.rfind("past_", 0) == 0) {
       caches_.push_back(&tensor);
-      if (name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0)
+      if (name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0 ||
+          name.rfind("past_key_values.", 0) == 0)
         kv_caches_.push_back(&tensor);
       else
         recurrent_caches_.push_back(&tensor);
-      output_storage_.push_back("present_" + name.substr(5));
+      output_storage_.push_back(PresentCacheName(name));
       outputs_.push_back(tensor.GetOrtTensor());
     }
   }
@@ -408,6 +596,7 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     if (input_storage_[i] == "input_ids") input_idx_input_ids_ = i;
     if (input_storage_[i] == "logit_rows") input_idx_logit_rows_ = i;
     if (input_storage_[i] == "aux_rows") input_idx_aux_rows_ = i;
+    if (input_storage_[i] == "attention_metadata") input_idx_attn_meta_ = i;
   }
   for (size_t i = 0; i < output_storage_.size(); ++i) {
     if (output_storage_[i] == "logits") output_idx_logits_ = i;
@@ -424,6 +613,15 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
       view->p_device_ = model.p_device_;
       single_token_tensors_.emplace(name, std::move(view));
     }
+    if (model.paged_attention_) {
+      const std::array<int64_t, 1> meta_shape{3};
+      auto meta_one = std::make_unique<Tensor>(GetDeviceInterface(DeviceType::CPU),
+                                               ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+      meta_one->CreateTensor(meta_shape, true);
+      const std::array<int32_t, 3> meta{1, static_cast<int32_t>(model.capacity_), 1};
+      Upload(*meta_one, std::span<const int32_t>{meta});
+      single_token_tensors_.emplace("attention_metadata", std::move(meta_one));
+    }
     for (size_t i = 0; i < input_storage_.size(); ++i)
       if (single_token_tensors_.find(input_storage_[i]) != single_token_tensors_.end())
         single_token_input_indices_.push_back(i);
@@ -435,8 +633,10 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   pred_ids_span_.CpuSpan();
   for (auto& name : input_storage_) input_names_.push_back(name.c_str());
   for (auto& name : output_storage_) output_names_.push_back(name.c_str());
-  const int32_t capacity = static_cast<int32_t>(model.capacity_);
-  Upload(*tensors_.at("total_sequence_length"), std::span<const int32_t>{&capacity, 1});
+  if (!model.paged_attention_) {
+    const int32_t capacity = static_cast<int32_t>(model.capacity_);
+    Upload(*tensors_.at("total_sequence_length"), std::span<const int32_t>{&capacity, 1});
+  }
   if (model.config_->model.decoder.run_options.has_value()) {
     State::SetRunOptions(model.config_->model.decoder.run_options.value());
   }
@@ -514,8 +714,16 @@ DeviceSpan<float> NemotronBoltState::Run(int, DeviceSpan<int32_t>&, DeviceSpan<i
   throw std::runtime_error("nemotron_bolt uses native block decoding, not the logits search path");
 }
 
+bool NemotronBoltState::IsEosToken(int32_t token) const {
+  const auto& eos = model_.config_->model.eos_token_id;
+  return std::find(eos.begin(), eos.end(), token) != eos.end();
+}
+
 void NemotronBoltState::Reset() {
-  if (!caches_zeroed_) {
+  if (bolt_.paged_attention_) {
+    for (auto* cache : recurrent_caches_) cache->GetByteSpan().Zero();
+    caches_zeroed_ = true;
+  } else if (!caches_zeroed_) {
     for (auto* cache : caches_) cache->GetByteSpan().Zero();
     caches_zeroed_ = true;
   } else {
@@ -528,7 +736,7 @@ void NemotronBoltState::Reset() {
         const size_t head_bytes = span.size() / static_cast<size_t>(shape[1]);
         const size_t clear_bytes = rows_to_zero * static_cast<size_t>(shape[3]) * sizeof(uint16_t);
         for (size_t head = 0; head < static_cast<size_t>(shape[1]); ++head) {
-          span.subspan(head * head_bytes, clear_bytes).Zero();
+          bolt_.p_device_->WrapMemory(span.subspan(head * head_bytes, clear_bytes).Span()).Zero();
         }
       }
     }
@@ -547,6 +755,7 @@ void NemotronBoltState::Reset() {
 }
 
 void NemotronBoltState::RewindTo(size_t length) {
+  std::lock_guard lock{bolt_.execution_mutex_};
   Require(length == 0, "only reset-to-zero rewind is supported");
   Reset();
 }
@@ -585,6 +794,8 @@ void NemotronBoltState::RestoreVerifyPrefix(Tensor& tensor, Tensor& prefix) {
 
 std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, bool want_predictions) {
   verified_rows_ = kBoltVerifyRows;
+  if (bolt_.paged_attention_)
+    return VerifyBlock(tokens, want_predictions);
   const size_t prefix = NemotronBoltVerifyPrefixRows(length_);
   if (!prefilled_ || !drafter_ || prefix == kBoltVerifyRows)
     return VerifyBlock(tokens, want_predictions);
@@ -647,8 +858,14 @@ std::vector<int64_t> NemotronBoltState::VerifyBlock(std::span<const int32_t> tok
   auto cpu_in = verify_inputs_span_.CpuSpan();
   auto* ids_out = reinterpret_cast<int64_t*>(cpu_in.data());
   for (size_t i = 0; i < rows; ++i) ids_out[i] = tokens[i];
-  // The R1 package pads only attention to R8, preserving its position and tile arithmetic.
-  cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_ + kBoltVerifyRows - 1);
+  if (bolt_.paged_attention_) {
+    cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_);
+    cpu_in[2 * kBoltVerifyRows + 2] = 0;
+    cpu_in[2 * kBoltVerifyRows + 3] = static_cast<int32_t>(rows);
+  } else {
+    // The R1 package pads only attention to R8, preserving its position and tile arithmetic.
+    cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_ + kBoltVerifyRows - 1);
+  }
   cpu_in[2 * kBoltVerifyRows + 4] = state_row_;
   verify_inputs_span_.CopyCpuToDevice();
   State::Run(*bolt_.session_, params_->use_graph_capture,
@@ -671,21 +888,23 @@ int64_t NemotronBoltState::PrefillChunk(
   OrtValue* orig_ids = inputs_[input_idx_input_ids_];
   OrtValue* orig_logit_rows = bolt_.has_logit_rows_ ? inputs_[input_idx_logit_rows_] : nullptr;
   OrtValue* orig_aux_rows = bolt_.has_aux_rows_ ? inputs_[input_idx_aux_rows_] : nullptr;
+  OrtValue* orig_attn_meta = bolt_.paged_attention_ ? inputs_[input_idx_attn_meta_] : nullptr;
   OrtValue* orig_logits = outputs_[output_idx_logits_];
   OrtValue* orig_preds = outputs_[output_idx_pred_ids_];
   OrtValue* orig_aux = outputs_[output_idx_aux_];
   struct RestoreBindings {
     NemotronBoltState& s;
-    OrtValue *ids, *lrows, *arows, *logits, *preds, *aux;
+    OrtValue *ids, *lrows, *arows, *meta, *logits, *preds, *aux;
     ~RestoreBindings() {
       s.inputs_[s.input_idx_input_ids_] = ids;
       if (s.bolt_.has_logit_rows_) s.inputs_[s.input_idx_logit_rows_] = lrows;
       if (s.bolt_.has_aux_rows_) s.inputs_[s.input_idx_aux_rows_] = arows;
+      if (s.bolt_.paged_attention_) s.inputs_[s.input_idx_attn_meta_] = meta;
       s.outputs_[s.output_idx_logits_] = logits;
       s.outputs_[s.output_idx_pred_ids_] = preds;
       s.outputs_[s.output_idx_aux_] = aux;
     }
-  } restore{*this, orig_ids, orig_logit_rows, orig_aux_rows, orig_logits, orig_preds, orig_aux};
+  } restore{*this, orig_ids, orig_logit_rows, orig_aux_rows, orig_attn_meta, orig_logits, orig_preds, orig_aux};
 
   auto ids_sub = prefill_ids_span_.subspan(0, rows);
   auto ids_cpu = ids_sub.CpuSpan();
@@ -698,12 +917,32 @@ int64_t NemotronBoltState::PrefillChunk(
   inputs_[input_idx_input_ids_] = ids_ort.get();
 
   auto cpu_in = verify_inputs_span_.CpuSpan();
-  cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_ + rows - 1);
+  if (bolt_.paged_attention_) {
+    cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_);
+    cpu_in[2 * kBoltVerifyRows + 2] = 0;
+    cpu_in[2 * kBoltVerifyRows + 3] = static_cast<int32_t>(rows);
+  } else {
+    cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_ + rows - 1);
+  }
   cpu_in[2 * kBoltVerifyRows + 4] = state_row_;
   verify_inputs_span_.subspan(2 * kBoltVerifyRows, 8).CopyCpuRangeToDevice();
 
-  std::unique_ptr<OrtValue> logit_rows_ort, aux_rows_ort, aux_out_ort;
+  std::array<int32_t, 3> prefill_meta_host{
+      static_cast<int32_t>(rows), static_cast<int32_t>(bolt_.capacity_), 1};
+  std::unique_ptr<OrtValue> prefill_meta_ort;
+  if (bolt_.paged_attention_) {
+    const auto& cpu_mem_info = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
+    const std::array<int64_t, 1> meta_shape{3};
+    prefill_meta_ort = OrtValue::CreateTensor(
+        cpu_mem_info, prefill_meta_host.data(), sizeof(prefill_meta_host), meta_shape,
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    inputs_[input_idx_attn_meta_] = prefill_meta_ort.get();
+  }
+
+  std::unique_ptr<OrtValue> logit_rows_ort, logits_out_ort, aux_rows_ort, aux_out_ort;
   std::unique_ptr<Tensor> temp_logits, temp_preds, temp_aux;
+  const size_t logit_row_bytes =
+      static_cast<size_t>(bolt_.config_->model.vocab_size) * sizeof(uint16_t);
   if (bolt_.has_logit_rows_) {
     auto lr_cpu = prefill_logit_rows_span_.CpuSpan();
     lr_cpu[0] = static_cast<int64_t>(rows - 1);
@@ -713,7 +952,18 @@ int64_t NemotronBoltState::PrefillChunk(
         dev_mem_info, prefill_logit_rows_span_.Span().data(), sizeof(int64_t), lr_shape,
         ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
     inputs_[input_idx_logit_rows_] = logit_rows_ort.get();
-    outputs_[output_idx_logits_] = prefill_logits_->GetOrtTensor();
+    if (want_prediction) {
+      const std::array<int64_t, 3> one_logit_shape{1, 1, bolt_.config_->model.vocab_size};
+      uint8_t* logits_dst =
+          reinterpret_cast<uint8_t*>(tensors_.at("logits")->GetMutableRawData()) +
+          (kBoltVerifyRows - 1) * logit_row_bytes;
+      logits_out_ort = OrtValue::CreateTensor(
+          dev_mem_info, logits_dst, logit_row_bytes, one_logit_shape,
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+      outputs_[output_idx_logits_] = logits_out_ort.get();
+    } else {
+      outputs_[output_idx_logits_] = prefill_logits_->GetOrtTensor();
+    }
     outputs_[output_idx_pred_ids_] = prefill_pred_ids_->GetOrtTensor();
   } else {
     const std::array<int64_t, 3> logits_shape{
@@ -771,12 +1021,22 @@ int64_t NemotronBoltState::PrefillChunk(
     prefill_dst.subspan((overlap_start - draft_start) * aux_row_bytes, aux_count * aux_row_bytes)
         .CopyFrom(aux_src.subspan(aux_begin_in_chunk * aux_row_bytes, aux_count * aux_row_bytes));
   }
-  if (!want_prediction) return 0;
+  if (!want_prediction) {
+    // Non-final chunks do not read predictions back on host, so synchronize before reusing pinned
+    // input mirrors or releasing temporary fallback output buffers on the next chunk.
+    bolt_.p_device_->Synchronize();
+    return 0;
+  }
   if (bolt_.has_logit_rows_) {
     auto cpu = prefill_pred_span_.CopyDeviceToCpu();
     return cpu[0];
   }
-  auto cpu = temp_preds->GetDeviceSpan<int64_t>().CopyDeviceToCpu();
+  tensors_.at("logits")
+      ->GetByteSpan()
+      .subspan((kBoltVerifyRows - 1) * logit_row_bytes, logit_row_bytes)
+      .CopyFrom(temp_logits->GetByteSpan().subspan((rows - 1) * logit_row_bytes, logit_row_bytes));
+  auto pred_span = temp_preds->GetDeviceSpan<int64_t>();
+  auto cpu = pred_span.CopyDeviceToCpu();
   return cpu[rows - 1];
 }
 
@@ -799,6 +1059,7 @@ void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int3
 }
 
 void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
+  std::lock_guard lock{bolt_.execution_mutex_};
   Require(!prefilled_ && !tokens.empty(), "AppendTokens requires a fresh or reset generator");
   for (const auto token : tokens)
     Require(token >= 0 && token < model_.config_->model.vocab_size, "token id outside vocabulary");
@@ -869,6 +1130,7 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
 }
 
 int32_t NemotronBoltState::NextToken(size_t public_length) {
+  std::lock_guard lock{bolt_.execution_mutex_};
   Require(prefilled_, "AppendTokens must precede GenerateNextToken");
   Require(params_->search.max_length > 0 &&
               public_length < static_cast<size_t>(params_->search.max_length),
@@ -944,9 +1206,994 @@ SpeculativeStats NemotronBoltState::Stats() const {
     stats.acceptance_rate = static_cast<float>(stats.draft_tokens_accepted) / stats.draft_tokens_evaluated;
   if (stats.rounds != 0) {
     stats.avg_draft_tokens_per_round = 7.0f;
-    stats.mean_emitted_tokens_per_round = static_cast<float>(stats.tokens_emitted - 1) / stats.rounds;
+    const size_t decode_emitted = stats.tokens_emitted > 0 ? stats.tokens_emitted - 1 : 0;
+    stats.mean_emitted_tokens_per_round = static_cast<float>(decode_emitted) / stats.rounds;
   }
   return stats;
+}
+
+Tensor& NemotronBoltBatchState::AddBaseTensor(const std::string& name, bool input, DeviceInterface* device,
+                                              ONNXTensorElementDataType type,
+                                              const std::vector<int64_t>& shape) {
+  auto tensor = std::make_unique<Tensor>(device, type);
+  tensor->CreateTensor(shape, true);
+  auto* value = tensor.get();
+  tensors_.emplace(name, std::move(tensor));
+  if (input) {
+    input_storage_.push_back(name);
+    inputs_.push_back(value->GetOrtTensor());
+  } else {
+    output_storage_.push_back(name);
+    outputs_.push_back(value->GetOrtTensor());
+  }
+  return *value;
+}
+
+NemotronBoltBatchState::NemotronBoltBatchState(const NemotronBoltModel& model,
+                                               const GeneratorParams& params,
+                                               size_t max_slots)
+    : State{params, model}, bolt_{model}, max_slots_{std::max<size_t>(1, max_slots)} {
+  std::lock_guard lock{model.execution_mutex_};
+  Require(model.paged_attention_ && model.batched_recurrent_ && model.dynamic_prefill_ &&
+              model.has_logit_rows_ && model.has_aux_rows_ && max_slots_ <= kBoltMaxBatchSize &&
+              model.paged_num_blocks_ >= max_slots_,
+          "NemotronBoltBatchState requires a PagedAttention dynamic-prefill Bolt target with banked recurrent state");
+  prefill_chunk_rows_ = NemotronBoltPrefillChunkRows(params.search.chunk_size, model.capacity_);
+
+  const auto& info = model.session_info_;
+  const auto& dev_mem_info = model.p_device_->GetAllocator().GetInfo();
+  auto* cpu_device = GetDeviceInterface(DeviceType::CPU);
+
+  const size_t max_decode_rows = max_slots_ * kBoltVerifyRows;
+  decode_ids_span_ = model.p_device_->Allocate<int64_t>(max_decode_rows);
+  decode_ids_span_.CpuSpan();
+  // Packed int32 layout:
+  // [0 .. max_slots_): past_sequence_lengths
+  // [max_slots_ .. 2*max_slots_ + 1): cumulative_sequence_lengths (0, 8, 16, ...)
+  // [2*max_slots_ + 1 .. 3*max_slots_ + 1): state_row
+  // [3*max_slots_ + 1 .. 4*max_slots_ + 1): state_slots
+  decode_meta_span_ = model.p_device_->Allocate<int32_t>(4 * max_slots_ + 4);
+  {
+    auto cpu_meta = decode_meta_span_.CpuSpan();
+    std::fill(cpu_meta.begin(), cpu_meta.end(), 0);
+    for (size_t i = 0; i <= max_slots_; ++i) {
+      cpu_meta[max_slots_ + i] = static_cast<int32_t>(i * kBoltVerifyRows);
+    }
+    decode_meta_span_.CopyCpuToDevice();
+  }
+  decode_block_table_span_ = model.p_device_->Allocate<int32_t>(max_slots_ * model.paged_num_blocks_);
+  decode_block_table_span_.CpuSpan();
+
+  decode_row_indices_ = std::make_unique<Tensor>(model.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  const std::array<int64_t, 1> max_decode_rows_1d{static_cast<int64_t>(max_decode_rows)};
+  decode_row_indices_->CreateTensor(max_decode_rows_1d, true);
+  {
+    std::vector<int64_t> indices(max_decode_rows);
+    std::iota(indices.begin(), indices.end(), int64_t{0});
+    Upload(*decode_row_indices_, std::span<const int64_t>{indices});
+  }
+
+  decode_attn_meta_ = std::make_unique<Tensor>(cpu_device, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+  const std::array<int64_t, 1> meta_3_shape{3};
+  decode_attn_meta_->CreateTensor(meta_3_shape, true);
+  {
+    const std::array<int32_t, 3> meta{
+        static_cast<int32_t>(kBoltVerifyRows), static_cast<int32_t>(model.capacity_), 1};
+    Upload(*decode_attn_meta_, std::span<const int32_t>{meta});
+  }
+
+  decode_logits_ = std::make_unique<Tensor>(model.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  const std::array<int64_t, 3> max_logits_shape{
+      1, static_cast<int64_t>(max_decode_rows), model.config_->model.vocab_size};
+  decode_logits_->CreateTensor(max_logits_shape, true);
+  decode_pred_ids_ = std::make_unique<Tensor>(model.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  const std::array<int64_t, 2> max_preds_shape{1, static_cast<int64_t>(max_decode_rows)};
+  decode_pred_ids_->CreateTensor(max_preds_shape, true);
+  decode_pred_span_ = decode_pred_ids_->GetDeviceSpan<int64_t>();
+  decode_pred_span_.CpuSpan();
+  decode_aux_ = std::make_unique<Tensor>(model.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+  const std::array<int64_t, 3> max_aux_shape{
+      1, static_cast<int64_t>(max_decode_rows), static_cast<int64_t>(model.aux_width_)};
+  decode_aux_->CreateTensor(max_aux_shape, true);
+
+  for (const auto& name : info.GetInputNames()) {
+    if (name == "input_ids") {
+      input_idx_input_ids_ = input_storage_.size();
+      input_storage_.push_back(name);
+      inputs_.push_back(nullptr);
+    } else if (name == "past_sequence_lengths") {
+      input_idx_past_seqlens_ = input_storage_.size();
+      input_storage_.push_back(name);
+      inputs_.push_back(nullptr);
+    } else if (name == "cumulative_sequence_lengths") {
+      input_idx_cu_seqlens_ = input_storage_.size();
+      input_storage_.push_back(name);
+      inputs_.push_back(nullptr);
+    } else if (name == "state_row") {
+      input_idx_state_row_ = input_storage_.size();
+      input_storage_.push_back(name);
+      inputs_.push_back(nullptr);
+    } else if (name == "state_slots") {
+      input_idx_state_slots_ = input_storage_.size();
+      input_storage_.push_back(name);
+      inputs_.push_back(nullptr);
+    } else if (name == "block_table") {
+      input_idx_block_table_ = input_storage_.size();
+      input_storage_.push_back(name);
+      inputs_.push_back(nullptr);
+    } else if (name == "logit_rows") {
+      input_idx_logit_rows_ = input_storage_.size();
+      input_storage_.push_back(name);
+      inputs_.push_back(nullptr);
+    } else if (name == "aux_rows") {
+      input_idx_aux_rows_ = input_storage_.size();
+      input_storage_.push_back(name);
+      inputs_.push_back(nullptr);
+    } else if (name == "attention_metadata") {
+      input_idx_attn_meta_ = input_storage_.size();
+      input_storage_.push_back(name);
+      inputs_.push_back(decode_attn_meta_->GetOrtTensor());
+    } else if (name.rfind("past_", 0) == 0) {
+      auto shape = info.GetInputShape(name);
+      if (name.rfind("past_key_values.", 0) == 0) {
+        shape[0] = static_cast<int64_t>(model.paged_num_blocks_);
+      } else if (shape[0] < 0) {
+        shape[0] = static_cast<int64_t>(max_slots_);
+      }
+      auto& tensor = AddBaseTensor(name, true, model.p_device_, info.GetInputDataType(name), shape);
+      if (name.rfind("past_key_values.", 0) == 0) {
+        kv_caches_.push_back(&tensor);
+      } else {
+        recurrent_caches_.push_back(&tensor);
+      }
+      output_storage_.push_back(PresentCacheName(name));
+      outputs_.push_back(tensor.GetOrtTensor());
+    } else {
+      throw std::runtime_error("nemotron_bolt: unsupported batched input " + name);
+    }
+  }
+
+  output_idx_logits_ = output_storage_.size();
+  output_storage_.push_back("logits");
+  outputs_.push_back(nullptr);
+  output_idx_pred_ids_ = output_storage_.size();
+  output_storage_.push_back("pred_ids");
+  outputs_.push_back(nullptr);
+  output_idx_aux_ = output_storage_.size();
+  output_storage_.push_back("aux_hidden_states");
+  outputs_.push_back(nullptr);
+
+  for (auto& name : input_storage_) input_names_.push_back(name.c_str());
+  for (auto& name : output_storage_) output_names_.push_back(name.c_str());
+
+  if (model.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model.config_->model.decoder.run_options.value());
+  }
+  run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
+  if (!params.use_graph_capture) {
+    run_options_->AddConfigEntry("gpu_graph_id", "-1");
+  }
+
+  // Build static-address OrtValue bindings for every active decode batch size b in [1..max_slots_].
+  batch_bindings_.resize(max_slots_ + 1);
+  int64_t* ids_dev = decode_ids_span_.Span().data();
+  int32_t* meta_dev = decode_meta_span_.Span().data();
+  int32_t* bt_dev = decode_block_table_span_.Span().data();
+  void* idx_dev = decode_row_indices_->GetMutableRawData();
+  void* logits_dev = decode_logits_->GetMutableRawData();
+  void* preds_dev = decode_pred_ids_->GetMutableRawData();
+  void* aux_dev = decode_aux_->GetMutableRawData();
+
+  for (size_t b = 1; b <= max_slots_; ++b) {
+    auto& bind = batch_bindings_[b];
+    bind.inputs = inputs_;
+    bind.outputs = outputs_;
+    const size_t rows_b = b * kBoltVerifyRows;
+    auto add_in_view = [&](size_t idx, void* ptr, size_t bytes, std::span<const int64_t> shape,
+                           ONNXTensorElementDataType dtype) {
+      auto val = OrtValue::CreateTensor(dev_mem_info, ptr, bytes, shape, dtype);
+      bind.inputs[idx] = val.get();
+      bind.owned_inputs.push_back(std::move(val));
+    };
+    auto add_out_view = [&](size_t idx, void* ptr, size_t bytes, std::span<const int64_t> shape,
+                            ONNXTensorElementDataType dtype) {
+      auto val = OrtValue::CreateTensor(dev_mem_info, ptr, bytes, shape, dtype);
+      bind.outputs[idx] = val.get();
+      bind.owned_outputs.push_back(std::move(val));
+    };
+
+    const std::array<int64_t, 2> ids_shape{1, static_cast<int64_t>(rows_b)};
+    const std::array<int64_t, 1> b_shape{static_cast<int64_t>(b)};
+    const std::array<int64_t, 1> bp1_shape{static_cast<int64_t>(b + 1)};
+    const std::array<int64_t, 2> bt_shape{
+        static_cast<int64_t>(b), static_cast<int64_t>(model.paged_num_blocks_)};
+    const std::array<int64_t, 1> rows_1d{static_cast<int64_t>(rows_b)};
+    const std::array<int64_t, 3> logits_shape{
+        1, static_cast<int64_t>(rows_b), model.config_->model.vocab_size};
+    const std::array<int64_t, 3> aux_3d{
+        1, static_cast<int64_t>(rows_b), static_cast<int64_t>(model.aux_width_)};
+    const std::array<int64_t, 2> aux_2d{
+        static_cast<int64_t>(rows_b), static_cast<int64_t>(model.aux_width_)};
+
+    add_in_view(input_idx_input_ids_, ids_dev, rows_b * sizeof(int64_t), ids_shape,
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    add_in_view(input_idx_past_seqlens_, meta_dev, b * sizeof(int32_t), b_shape,
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    add_in_view(input_idx_cu_seqlens_, meta_dev + max_slots_, (b + 1) * sizeof(int32_t), bp1_shape,
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    add_in_view(input_idx_state_row_, meta_dev + 2 * max_slots_ + 1, b * sizeof(int32_t), b_shape,
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    add_in_view(input_idx_state_slots_, meta_dev + 3 * max_slots_ + 1, b * sizeof(int32_t), b_shape,
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    add_in_view(input_idx_block_table_, bt_dev,
+                b * model.paged_num_blocks_ * sizeof(int32_t), bt_shape,
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    add_in_view(input_idx_logit_rows_, idx_dev, rows_b * sizeof(int64_t), rows_1d,
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    add_in_view(input_idx_aux_rows_, idx_dev, rows_b * sizeof(int64_t), rows_1d,
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+
+    add_out_view(output_idx_logits_, logits_dev,
+                 rows_b * static_cast<size_t>(model.config_->model.vocab_size) * sizeof(uint16_t),
+                 logits_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+    add_out_view(output_idx_pred_ids_, preds_dev, rows_b * sizeof(int64_t), ids_shape,
+                 ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    add_out_view(output_idx_aux_, aux_dev, rows_b * model.aux_width_ * sizeof(uint16_t), aux_3d,
+                 ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+
+    bind.aux_view = std::make_unique<Tensor>(OrtValue::CreateTensor(
+        *model.p_device_->GetMemoryInfo(), aux_dev, rows_b * model.aux_width_ * sizeof(uint16_t),
+        aux_2d, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
+    bind.aux_view->p_device_ = model.p_device_;
+  }
+  inputs_ = batch_bindings_[1].inputs;
+  outputs_ = batch_bindings_[1].outputs;
+
+  size_t max_single_prefill_aux_rows = kBoltVerifyRows;
+  if (params.speculative.max_draft_tokens != 0) {
+    size_t blocks = Dflash2Drafter::PoolBlocks(*model.config_, kBoltPagedBlockSize, max_slots_);
+    if (blocks == 0) {
+      blocks = max_slots_ * ((model.capacity_ + kBoltPagedBlockSize - 1) / kBoltPagedBlockSize + 1);
+    }
+    drafter_ = std::make_unique<Dflash2Drafter>(
+        model.drafter_model_, kBoltPagedBlockSize, blocks, max_slots_, /*fixed_single_request=*/false);
+    drafter_->SetPinnedBlockTableWidth(true);
+    drafter_->SetPaddedDecodeSteps(true);
+    max_single_prefill_aux_rows =
+        ((std::max(drafter_->ContextWindow(), kBoltVerifyRows) + kBoltVerifyRows - 1) / kBoltVerifyRows + 1) *
+        kBoltVerifyRows;
+  }
+
+  const size_t max_mixed_rows = max_slots_ * kBoltVerifyRows + prefill_chunk_rows_;
+  mixed_ids_span_ = model.p_device_->Allocate<int64_t>(max_mixed_rows);
+  mixed_ids_span_.CpuSpan();
+  mixed_meta_span_ = model.p_device_->Allocate<int32_t>(4 * max_slots_ + 4);
+  mixed_meta_span_.CpuSpan();
+  mixed_block_table_span_ = model.p_device_->Allocate<int32_t>(max_slots_ * model.paged_num_blocks_);
+  mixed_block_table_span_.CpuSpan();
+  mixed_logit_rows_span_ = model.p_device_->Allocate<int64_t>(max_slots_ * kBoltVerifyRows);
+  mixed_logit_rows_span_.CpuSpan();
+  mixed_aux_rows_span_ = model.p_device_->Allocate<int64_t>(max_slots_ * max_single_prefill_aux_rows);
+  mixed_aux_rows_span_.CpuSpan();
+  if (drafter_) {
+    mixed_propose_aux_ = std::make_unique<Tensor>(model.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+    const std::array<int64_t, 2> max_propose_aux_shape{
+        static_cast<int64_t>(max_slots_ * max_single_prefill_aux_rows),
+        static_cast<int64_t>(model.aux_width_)};
+    mixed_propose_aux_->CreateTensor(max_propose_aux_shape, true);
+  }
+
+  slot_blocks_.resize(max_slots_);
+  slots_.resize(max_slots_);
+  const std::array<int64_t, 2> slot_prefill_aux_shape{
+      static_cast<int64_t>(max_single_prefill_aux_rows), static_cast<int64_t>(model.aux_width_)};
+  for (size_t s = 0; s < max_slots_; ++s) {
+    slots_[s].drafter_key = std::make_unique<Request>(model, params.search.max_length);
+    if (drafter_) {
+      slots_[s].prefill_aux = std::make_unique<Tensor>(model.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+      slots_[s].prefill_aux->CreateTensor(slot_prefill_aux_shape, true);
+    }
+  }
+
+  ResetAll();
+  if (params.use_graph_capture) {
+    for (size_t b = 1; b <= max_slots_; ++b) {
+      auto ids_cpu = decode_ids_span_.CpuSpan();
+      std::fill_n(ids_cpu.begin(), b * kBoltVerifyRows, int64_t{1});
+      decode_ids_span_.subspan(0, b * kBoltVerifyRows).CopyCpuRangeToDevice();
+
+      auto meta_cpu = decode_meta_span_.CpuSpan();
+      for (size_t i = 0; i < b; ++i) {
+        meta_cpu[i] = 0;
+        meta_cpu[2 * max_slots_ + 1 + i] = 0;
+        meta_cpu[3 * max_slots_ + 1 + i] = static_cast<int32_t>(i);
+      }
+      for (size_t i = 0; i <= b; ++i) {
+        meta_cpu[max_slots_ + i] = static_cast<int32_t>(i * kBoltVerifyRows);
+      }
+      decode_meta_span_.CopyCpuToDevice();
+
+      auto bt_cpu = decode_block_table_span_.CpuSpan();
+      std::fill_n(bt_cpu.begin(), b * model.paged_num_blocks_, int32_t{-1});
+      for (size_t i = 0; i < b; ++i) {
+        bt_cpu[i * model.paged_num_blocks_] = static_cast<int32_t>(i);
+      }
+      decode_block_table_span_.subspan(0, b * model.paged_num_blocks_).CopyCpuRangeToDevice();
+
+      inputs_ = batch_bindings_[b].inputs;
+      outputs_ = batch_bindings_[b].outputs;
+      for (int run = 0; run < kCaptureWarmupRuns; ++run) {
+        State::Run(*bolt_.session_, true, static_cast<int>(b * kBoltVerifyRows), static_cast<int>(b), nullptr);
+        if (run == kCaptureWarmupRuns - 1) {
+          (void)decode_pred_span_.subspan(0, b * kBoltVerifyRows).CopyDeviceToCpu();
+        }
+      }
+    }
+    if (drafter_) {
+      for (size_t b = 1; b <= max_slots_; ++b) {
+        std::vector<Dflash2Drafter::Feed> feeds(b);
+        for (size_t i = 0; i < b; ++i) {
+          feeds[i] = Dflash2Drafter::Feed{
+              .request = slots_[i].drafter_key.get(),
+              .aux_row_begin = i * kBoltVerifyRows,
+              .aux_row_count = kBoltVerifyRows,
+              .first_position = 0,
+              .anchor_token = 1,
+              .draft_eligible = true,
+              .wants_drafts = true,
+          };
+        }
+        std::vector<std::vector<int32_t>> proposals;
+        for (int run = 0; run < kCaptureWarmupRuns; ++run) {
+          drafter_->ReleaseAll();
+          Require(drafter_->Propose(*batch_bindings_[b].aux_view, feeds, proposals) &&
+                      proposals.size() == b,
+                  "failed to warm batched DFlash2 drafter");
+        }
+      }
+    }
+    ResetAll();
+  }
+}
+
+NemotronBoltBatchState::~NemotronBoltBatchState() = default;
+
+DeviceSpan<float> NemotronBoltBatchState::Run(int, DeviceSpan<int32_t>&, DeviceSpan<int32_t>) {
+  throw std::runtime_error("nemotron_bolt uses native block decoding, not the logits search path");
+}
+
+bool NemotronBoltBatchState::IsEosToken(int32_t token) const {
+  const auto& eos = model_.config_->model.eos_token_id;
+  return std::find(eos.begin(), eos.end(), token) != eos.end();
+}
+
+size_t NemotronBoltBatchState::BlocksNeededForSlot(size_t slot, size_t total_seq_len) const {
+  const size_t needed = (total_seq_len + kBoltPagedBlockSize - 1) / kBoltPagedBlockSize;
+  const size_t current = slot_blocks_.at(slot).size();
+  return needed > current ? needed - current : 0;
+}
+
+void NemotronBoltBatchState::EnsureSlotBlocks(size_t slot, size_t total_seq_len) {
+  auto& blocks = slot_blocks_.at(slot);
+  const size_t needed = (total_seq_len + kBoltPagedBlockSize - 1) / kBoltPagedBlockSize;
+  while (blocks.size() < needed) {
+    Require(!free_blocks_.empty(), "PagedAttention block pool exhausted");
+    blocks.push_back(free_blocks_.back());
+    free_blocks_.pop_back();
+  }
+}
+
+void NemotronBoltBatchState::ResetAll() {
+  for (auto* cache : recurrent_caches_) {
+    cache->GetByteSpan().Zero();
+  }
+  model_.p_device_->Synchronize();
+  if (drafter_) drafter_->ReleaseAll();
+  free_blocks_.resize(bolt_.paged_num_blocks_);
+  std::iota(free_blocks_.rbegin(), free_blocks_.rend(), int32_t{0});
+  for (auto& blocks : slot_blocks_) blocks.clear();
+  for (auto& s : slots_) {
+    s.length = 0;
+    s.state_row = 0;
+    s.anchor = 0;
+    s.drafts.clear();
+    s.prefilled = false;
+    s.dirty = false;
+  }
+  last_decode_slots_.clear();
+  last_decode_block_counts_.clear();
+  stats_ = {};
+}
+
+void NemotronBoltBatchState::ResetSlot(size_t slot) {
+  std::lock_guard lock{bolt_.execution_mutex_};
+  Require(slot < max_slots_, "slot index out of range");
+  auto& s = slots_[slot];
+  auto& blocks = slot_blocks_[slot];
+  if (!blocks.empty()) {
+    free_blocks_.insert(free_blocks_.end(), blocks.rbegin(), blocks.rend());
+    blocks.clear();
+  }
+  last_decode_slots_.clear();
+  last_decode_block_counts_.clear();
+  if (drafter_) {
+    drafter_->Release(s.drafter_key.get());
+  }
+  if (s.dirty) {
+    for (auto* cache : recurrent_caches_) {
+      auto span = cache->GetByteSpan();
+      const size_t bank_bytes = span.size() / max_slots_;
+      bolt_.p_device_->WrapMemory(span.subspan(slot * bank_bytes, bank_bytes).Span()).Zero();
+    }
+    model_.p_device_->Synchronize();
+    s.dirty = false;
+  }
+  s.length = 0;
+  s.state_row = 0;
+  s.anchor = 0;
+  s.drafts.clear();
+  s.prefilled = false;
+}
+
+void NemotronBoltBatchState::StepBatch(std::span<const NemotronBoltSlotTask> tasks,
+                                       std::span<NemotronBoltEngineStep> results) {
+  std::lock_guard lock{bolt_.execution_mutex_};
+  Require(!tasks.empty() && tasks.size() <= max_slots_ && results.size() == tasks.size(),
+          "invalid NemotronBoltBatchState step batch");
+  for (size_t i = 0; i < tasks.size(); ++i) {
+    results[i] = NemotronBoltEngineStep{};
+    const auto& task = tasks[i];
+    Require(task.slot < max_slots_ && task.remaining_budget > 0, "invalid slot or zero budget in StepBatch");
+    const auto& s = slots_[task.slot];
+    if (task.is_decode) {
+      Require(s.prefilled, "StepBatch decode task requires a prefilled slot");
+    } else {
+      Require(!s.prefilled && !task.full_prompt.empty() && task.prefill_tokens > 0 &&
+                  task.prefill_offset == s.length &&
+                  task.prefill_offset + task.prefill_tokens <= task.full_prompt.size(),
+              "invalid StepBatch prefill cursor");
+      if (task.prefill_offset == 0) {
+        for (const auto token : task.full_prompt) {
+          Require(token >= 0 && token < model_.config_->model.vocab_size, "token id outside vocabulary");
+        }
+      }
+    }
+  }
+  const bool all_decode = std::all_of(tasks.begin(), tasks.end(), [](const auto& t) { return t.is_decode; });
+  if (all_decode) {
+    StepPureDecode(tasks, results);
+  } else {
+    StepMixedOrPrefill(tasks, results);
+  }
+}
+
+void NemotronBoltBatchState::StepPureDecode(std::span<const NemotronBoltSlotTask> tasks,
+                                            std::span<NemotronBoltEngineStep> results) {
+  const size_t b = tasks.size();
+  const size_t rows = b * kBoltVerifyRows;
+  auto ids_cpu = decode_ids_span_.CpuSpan();
+  auto meta_cpu = decode_meta_span_.CpuSpan();
+
+  bool same_block_table = (last_decode_slots_.size() == b);
+  for (size_t i = 0; i < b; ++i) {
+    const size_t s_idx = tasks[i].slot;
+    auto& s = slots_[s_idx];
+    s.dirty = true;
+    EnsureSlotBlocks(s_idx, s.length + kBoltVerifyRows);
+    ids_cpu[i * kBoltVerifyRows] = s.anchor;
+    if (drafter_) {
+      Require(s.drafts.size() == kBoltVerifyRows - 1, "missing draft block for speculative slot");
+      for (size_t j = 0; j < kBoltVerifyRows - 1; ++j) {
+        ids_cpu[i * kBoltVerifyRows + 1 + j] = s.drafts[j];
+      }
+    } else {
+      for (size_t j = 1; j < kBoltVerifyRows; ++j) {
+        ids_cpu[i * kBoltVerifyRows + j] = s.anchor;
+      }
+    }
+    meta_cpu[i] = static_cast<int32_t>(s.length);
+    meta_cpu[max_slots_ + i] = static_cast<int32_t>(i * kBoltVerifyRows);
+    meta_cpu[2 * max_slots_ + 1 + i] = s.state_row;
+    meta_cpu[3 * max_slots_ + 1 + i] = static_cast<int32_t>(s_idx);
+    if (!same_block_table || last_decode_slots_[i] != s_idx ||
+        last_decode_block_counts_[i] != slot_blocks_[s_idx].size()) {
+      same_block_table = false;
+    }
+  }
+  meta_cpu[max_slots_ + b] = static_cast<int32_t>(rows);
+
+  decode_ids_span_.subspan(0, rows).CopyCpuRangeToDevice();
+  decode_meta_span_.CopyCpuToDevice();
+
+  if (!same_block_table) {
+    auto bt_cpu = decode_block_table_span_.CpuSpan();
+    const size_t cols = bolt_.paged_num_blocks_;
+    for (size_t i = 0; i < b; ++i) {
+      const auto& blocks = slot_blocks_[tasks[i].slot];
+      auto row = bt_cpu.subspan(i * cols, cols);
+      std::copy(blocks.begin(), blocks.end(), row.begin());
+      std::fill(row.begin() + blocks.size(), row.end(), int32_t{-1});
+    }
+    decode_block_table_span_.subspan(0, b * cols).CopyCpuRangeToDevice();
+    last_decode_slots_.resize(b);
+    last_decode_block_counts_.resize(b);
+    for (size_t i = 0; i < b; ++i) {
+      last_decode_slots_[i] = tasks[i].slot;
+      last_decode_block_counts_[i] = slot_blocks_[tasks[i].slot].size();
+    }
+  }
+
+  inputs_ = batch_bindings_[b].inputs;
+  outputs_ = batch_bindings_[b].outputs;
+  State::Run(*bolt_.session_, params_->use_graph_capture, static_cast<int>(rows), static_cast<int>(b), nullptr);
+  ++stats_.target_forward_passes;
+
+  auto preds_cpu = decode_pred_span_.subspan(0, rows).CopyDeviceToCpu();
+  std::vector<Dflash2Drafter::Feed> feeds;
+  std::vector<size_t> feed_slots;
+  if (drafter_) {
+    feeds.reserve(b);
+    feed_slots.reserve(b);
+  }
+
+  for (size_t i = 0; i < b; ++i) {
+    const size_t s_idx = tasks[i].slot;
+    auto& s = slots_[s_idx];
+    auto& out = results[i];
+    std::span<const int64_t> preds_i{preds_cpu.data() + i * kBoltVerifyRows, kBoltVerifyRows};
+    if (!drafter_) {
+      s.anchor = static_cast<int32_t>(preds_i[0]);
+      ++s.length;
+      s.state_row = 0;
+      out.tokens[0] = s.anchor;
+      out.count = 1;
+      out.speculation = SpeculativeRowMetrics{1, 1};
+      continue;
+    }
+
+    const auto tokens = NemotronBoltRoundTokens(
+        s.drafts, preds_i, tasks[i].remaining_budget, model_.config_->model.eos_token_id, kBoltVerifyRows);
+    const NemotronBoltRoundStats round_stats = GetNemotronBoltRoundStats(s.drafts, tokens);
+    const size_t committed_rows = tokens.size() - 1;
+
+    std::copy_n(s.drafts.begin(), kBoltVerifyRows - 1, out.drafts.begin());
+    for (size_t j = 0; j < tokens.size(); ++j) out.tokens[j] = tokens[j];
+    out.count = tokens.size();
+    out.speculative_round = true;
+    out.verify_forward_passes = (i == 0) ? 1 : 0;
+    out.speculation = SpeculativeRowMetrics{7, round_stats.accepted};
+
+    const size_t first_position = s.length;
+    s.anchor = static_cast<int32_t>(preds_i[committed_rows]);
+    s.length += committed_rows + 1;
+    s.state_row = static_cast<int32_t>(committed_rows);
+
+    const bool finishes =
+        tokens.size() >= tasks[i].remaining_budget || (!tokens.empty() && IsEosToken(tokens.back()));
+    if (!finishes) {
+      feeds.push_back(Dflash2Drafter::Feed{
+          .request = s.drafter_key.get(),
+          .aux_row_begin = i * kBoltVerifyRows,
+          .aux_row_count = committed_rows + 1,
+          .first_position = first_position,
+          .anchor_token = s.anchor,
+          .draft_eligible = true,
+          .wants_drafts = true,
+      });
+      feed_slots.push_back(s_idx);
+    }
+  }
+
+  if (!feeds.empty()) {
+    std::vector<std::vector<int32_t>> proposals;
+    Require(drafter_->Propose(*batch_bindings_[b].aux_view, feeds, proposals) &&
+                proposals.size() == feeds.size(),
+            "batched DFlash2 drafter proposal failed");
+    for (size_t f = 0; f < feeds.size(); ++f) {
+      Require(proposals[f].size() == kBoltVerifyRows - 1, "DFlash2 drafter did not produce seven tokens");
+      slots_[feed_slots[f]].drafts = std::move(proposals[f]);
+    }
+    ++stats_.draft_forward_passes;
+  }
+}
+
+void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlotTask> tasks,
+                                                std::span<NemotronBoltEngineStep> results) {
+  last_decode_slots_.clear();
+  last_decode_block_counts_.clear();
+
+  const size_t b = tasks.size();
+  const size_t window = drafter_ ? drafter_->ContextWindow() : 0;
+  const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
+
+  struct TaskLayout {
+    size_t row_offset{};
+    size_t row_count{};
+    size_t logit_offset{};
+    size_t aux_offset{};
+    size_t aux_count{};
+    size_t draft_start{};
+    size_t draft_rows{};
+    size_t overlap_start{};
+    bool last_chunk{};
+    bool need_aux{};
+    bool single_aux_chunk{};
+  };
+  std::vector<TaskLayout> layouts(b);
+
+  size_t total_rows = 0;
+  int32_t max_q_len = 1;
+  int32_t max_kv_len = 1;
+  std::vector<int64_t> logit_rows;
+  std::vector<int64_t> aux_rows;
+  bool want_any_preds = false;
+
+  for (size_t i = 0; i < b; ++i) {
+    const auto& task = tasks[i];
+    auto& s = slots_[task.slot];
+    auto& lay = layouts[i];
+    s.dirty = true;
+    lay.row_offset = total_rows;
+    if (task.is_decode) {
+      lay.row_count = kBoltVerifyRows;
+      EnsureSlotBlocks(task.slot, s.length + kBoltVerifyRows);
+      lay.logit_offset = logit_rows.size();
+      for (size_t r = 0; r < kBoltVerifyRows; ++r) {
+        logit_rows.push_back(static_cast<int64_t>(lay.row_offset + r));
+      }
+      want_any_preds = true;
+      if (drafter_) {
+        lay.need_aux = true;
+        lay.single_aux_chunk = true;
+        lay.aux_offset = aux_rows.size();
+        lay.aux_count = kBoltVerifyRows;
+        for (size_t r = 0; r < kBoltVerifyRows; ++r) {
+          aux_rows.push_back(static_cast<int64_t>(lay.row_offset + r));
+        }
+      }
+      max_q_len = std::max(max_q_len, static_cast<int32_t>(kBoltVerifyRows));
+      max_kv_len = std::max(max_kv_len, static_cast<int32_t>(s.length + kBoltVerifyRows));
+    } else {
+      lay.row_count = task.prefill_tokens;
+      lay.last_chunk = (task.prefill_offset + task.prefill_tokens >= task.full_prompt.size());
+      EnsureSlotBlocks(task.slot, s.length + lay.row_count);
+      if (lay.last_chunk) {
+        lay.logit_offset = logit_rows.size();
+        logit_rows.push_back(static_cast<int64_t>(lay.row_offset + lay.row_count - 1));
+        want_any_preds = true;
+      }
+      if (drafter_) {
+        lay.draft_start =
+            (window != 0 && task.full_prompt.size() > window)
+                ? ((task.full_prompt.size() - window) / kBoltVerifyRows) * kBoltVerifyRows
+                : 0;
+        lay.draft_rows = task.full_prompt.size() - lay.draft_start;
+        if (task.prefill_offset + lay.row_count > lay.draft_start) {
+          lay.need_aux = true;
+          lay.overlap_start = std::max(task.prefill_offset, lay.draft_start);
+          const size_t begin_in_chunk = lay.overlap_start - task.prefill_offset;
+          lay.aux_count = lay.row_count - begin_in_chunk;
+          lay.aux_offset = aux_rows.size();
+          lay.single_aux_chunk = (lay.last_chunk && lay.overlap_start == lay.draft_start);
+          for (size_t r = 0; r < lay.aux_count; ++r) {
+            aux_rows.push_back(static_cast<int64_t>(lay.row_offset + begin_in_chunk + r));
+          }
+        }
+      }
+      max_q_len = std::max(max_q_len, static_cast<int32_t>(lay.row_count));
+      max_kv_len = std::max(max_kv_len, static_cast<int32_t>(s.length + lay.row_count));
+    }
+    total_rows += lay.row_count;
+  }
+
+  if (logit_rows.empty()) logit_rows.push_back(0);
+  if (aux_rows.empty()) aux_rows.push_back(0);
+
+  if (total_rows > mixed_ids_span_.size()) {
+    mixed_ids_span_ = bolt_.p_device_->Allocate<int64_t>(total_rows);
+    mixed_ids_span_.CpuSpan();
+  }
+  if (logit_rows.size() > mixed_logit_rows_span_.size()) {
+    mixed_logit_rows_span_ = bolt_.p_device_->Allocate<int64_t>(logit_rows.size());
+    mixed_logit_rows_span_.CpuSpan();
+  }
+  if (aux_rows.size() > mixed_aux_rows_span_.size()) {
+    mixed_aux_rows_span_ = bolt_.p_device_->Allocate<int64_t>(aux_rows.size());
+    mixed_aux_rows_span_.CpuSpan();
+  }
+
+  {
+    auto ids_sub = mixed_ids_span_.subspan(0, total_rows);
+    auto ids_cpu = ids_sub.CpuSpan();
+    auto meta_cpu = mixed_meta_span_.CpuSpan();
+    auto bt_cpu = mixed_block_table_span_.CpuSpan();
+    const size_t cols = bolt_.paged_num_blocks_;
+
+    meta_cpu[max_slots_] = 0;
+    for (size_t i = 0; i < b; ++i) {
+      const auto& task = tasks[i];
+      const auto& s = slots_[task.slot];
+      const auto& lay = layouts[i];
+      if (task.is_decode) {
+        ids_cpu[lay.row_offset] = s.anchor;
+        if (drafter_) {
+          for (size_t j = 0; j < kBoltVerifyRows - 1; ++j) {
+            ids_cpu[lay.row_offset + 1 + j] = s.drafts[j];
+          }
+        } else {
+          for (size_t j = 1; j < kBoltVerifyRows; ++j) {
+            ids_cpu[lay.row_offset + j] = s.anchor;
+          }
+        }
+      } else {
+        for (size_t r = 0; r < lay.row_count; ++r) {
+          ids_cpu[lay.row_offset + r] = task.full_prompt[task.prefill_offset + r];
+        }
+      }
+      meta_cpu[i] = static_cast<int32_t>(s.length);
+      meta_cpu[max_slots_ + i + 1] = static_cast<int32_t>(lay.row_offset + lay.row_count);
+      meta_cpu[2 * max_slots_ + 1 + i] = s.state_row;
+      meta_cpu[3 * max_slots_ + 1 + i] = static_cast<int32_t>(task.slot);
+
+      const auto& blocks = slot_blocks_[task.slot];
+      auto bt_row = bt_cpu.subspan(i * cols, cols);
+      std::copy(blocks.begin(), blocks.end(), bt_row.begin());
+      std::fill(bt_row.begin() + blocks.size(), bt_row.end(), int32_t{-1});
+    }
+    ids_sub.CopyCpuRangeToDevice();
+    mixed_meta_span_.CopyCpuToDevice();
+    mixed_block_table_span_.subspan(0, b * cols).CopyCpuRangeToDevice();
+  }
+
+  {
+    auto lr_sub = mixed_logit_rows_span_.subspan(0, logit_rows.size());
+    std::copy(logit_rows.begin(), logit_rows.end(), lr_sub.CpuSpan().begin());
+    lr_sub.CopyCpuRangeToDevice();
+
+    auto ar_sub = mixed_aux_rows_span_.subspan(0, aux_rows.size());
+    std::copy(aux_rows.begin(), aux_rows.end(), ar_sub.CpuSpan().begin());
+    ar_sub.CopyCpuRangeToDevice();
+  }
+
+  const auto& dev_mem_info = bolt_.p_device_->GetAllocator().GetInfo();
+  const auto& cpu_mem_info = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
+  int32_t* meta_dev = mixed_meta_span_.Span().data();
+
+  const std::array<int64_t, 2> ids_shape{1, static_cast<int64_t>(total_rows)};
+  const std::array<int64_t, 1> b_shape{static_cast<int64_t>(b)};
+  const std::array<int64_t, 1> bp1_shape{static_cast<int64_t>(b + 1)};
+  const std::array<int64_t, 2> bt_shape{
+      static_cast<int64_t>(b), static_cast<int64_t>(bolt_.paged_num_blocks_)};
+  const std::array<int64_t, 1> lr_shape{static_cast<int64_t>(logit_rows.size())};
+  const std::array<int64_t, 1> ar_shape{static_cast<int64_t>(aux_rows.size())};
+  const std::array<int64_t, 1> attn_meta_shape{3};
+  std::array<int32_t, 3> attn_meta_host{max_q_len, max_kv_len, 1};
+
+  auto ids_ort = OrtValue::CreateTensor(
+      dev_mem_info, mixed_ids_span_.Span().data(), total_rows * sizeof(int64_t), ids_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  auto past_ort = OrtValue::CreateTensor(
+      dev_mem_info, meta_dev, b * sizeof(int32_t), b_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+  auto cu_ort = OrtValue::CreateTensor(
+      dev_mem_info, meta_dev + max_slots_, (b + 1) * sizeof(int32_t), bp1_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+  auto srow_ort = OrtValue::CreateTensor(
+      dev_mem_info, meta_dev + 2 * max_slots_ + 1, b * sizeof(int32_t), b_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+  auto sslot_ort = OrtValue::CreateTensor(
+      dev_mem_info, meta_dev + 3 * max_slots_ + 1, b * sizeof(int32_t), b_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+  auto bt_ort = OrtValue::CreateTensor(
+      dev_mem_info, mixed_block_table_span_.Span().data(),
+      b * bolt_.paged_num_blocks_ * sizeof(int32_t), bt_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+  auto lr_ort = OrtValue::CreateTensor(
+      dev_mem_info, mixed_logit_rows_span_.Span().data(), logit_rows.size() * sizeof(int64_t),
+      lr_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  auto ar_ort = OrtValue::CreateTensor(
+      dev_mem_info, mixed_aux_rows_span_.Span().data(), aux_rows.size() * sizeof(int64_t),
+      ar_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  auto attn_meta_ort = OrtValue::CreateTensor(
+      cpu_mem_info, attn_meta_host.data(), sizeof(attn_meta_host), attn_meta_shape,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+
+  Tensor temp_logits{bolt_.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16};
+  const std::array<int64_t, 3> temp_logits_shape{
+      1, static_cast<int64_t>(logit_rows.size()), bolt_.config_->model.vocab_size};
+  temp_logits.CreateTensor(temp_logits_shape, true);
+  Tensor temp_preds{bolt_.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64};
+  const std::array<int64_t, 2> temp_preds_shape{1, static_cast<int64_t>(logit_rows.size())};
+  temp_preds.CreateTensor(temp_preds_shape, true);
+  Tensor temp_aux{bolt_.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16};
+  const std::array<int64_t, 3> temp_aux_shape{
+      1, static_cast<int64_t>(aux_rows.size()), static_cast<int64_t>(bolt_.aux_width_)};
+  temp_aux.CreateTensor(temp_aux_shape, true);
+
+  inputs_ = batch_bindings_[1].inputs;
+  outputs_ = batch_bindings_[1].outputs;
+  inputs_[input_idx_input_ids_] = ids_ort.get();
+  inputs_[input_idx_past_seqlens_] = past_ort.get();
+  inputs_[input_idx_cu_seqlens_] = cu_ort.get();
+  inputs_[input_idx_state_row_] = srow_ort.get();
+  inputs_[input_idx_state_slots_] = sslot_ort.get();
+  inputs_[input_idx_block_table_] = bt_ort.get();
+  inputs_[input_idx_logit_rows_] = lr_ort.get();
+  inputs_[input_idx_aux_rows_] = ar_ort.get();
+  inputs_[input_idx_attn_meta_] = attn_meta_ort.get();
+  outputs_[output_idx_logits_] = temp_logits.GetOrtTensor();
+  outputs_[output_idx_pred_ids_] = temp_preds.GetOrtTensor();
+  outputs_[output_idx_aux_] = temp_aux.GetOrtTensor();
+
+  try {
+    State::Run(*bolt_.session_, false, 0, 0, nullptr);
+    ++stats_.target_forward_passes;
+
+    std::vector<int64_t> preds_host;
+    if (want_any_preds) {
+      auto pred_span = temp_preds.GetDeviceSpan<int64_t>();
+      auto cpu = pred_span.CopyDeviceToCpu();
+      preds_host.assign(cpu.begin(), cpu.end());
+    }
+
+    auto temp_aux_bytes = temp_aux.GetByteSpan();
+    for (size_t i = 0; i < b; ++i) {
+      const auto& task = tasks[i];
+      const auto& lay = layouts[i];
+      if (!task.is_decode && lay.need_aux && !lay.single_aux_chunk) {
+        auto dst = slots_[task.slot].prefill_aux->GetByteSpan();
+        dst.subspan((lay.overlap_start - lay.draft_start) * aux_row_bytes, lay.aux_count * aux_row_bytes)
+            .CopyFrom(temp_aux_bytes.subspan(lay.aux_offset * aux_row_bytes, lay.aux_count * aux_row_bytes));
+      }
+    }
+
+    std::vector<Dflash2Drafter::Feed> feeds;
+    std::vector<size_t> feed_slots;
+    std::vector<size_t> feed_task_indices;
+    bool needs_staged_propose_aux = false;
+    bool counted_verify_pass = false;
+
+    for (size_t i = 0; i < b; ++i) {
+      const auto& task = tasks[i];
+      const auto& lay = layouts[i];
+      auto& s = slots_[task.slot];
+      auto& out = results[i];
+
+      if (task.is_decode) {
+        std::span<const int64_t> preds_i{preds_host.data() + lay.logit_offset, kBoltVerifyRows};
+        if (!drafter_) {
+          s.anchor = static_cast<int32_t>(preds_i[0]);
+          ++s.length;
+          s.state_row = 0;
+          out.tokens[0] = s.anchor;
+          out.count = 1;
+          out.speculation = SpeculativeRowMetrics{1, 1};
+          continue;
+        }
+        const auto tokens = NemotronBoltRoundTokens(
+            s.drafts, preds_i, task.remaining_budget, model_.config_->model.eos_token_id, kBoltVerifyRows);
+        const NemotronBoltRoundStats round_stats = GetNemotronBoltRoundStats(s.drafts, tokens);
+        const size_t committed_rows = tokens.size() - 1;
+        std::copy_n(s.drafts.begin(), kBoltVerifyRows - 1, out.drafts.begin());
+        for (size_t j = 0; j < tokens.size(); ++j) out.tokens[j] = tokens[j];
+        out.count = tokens.size();
+        out.speculative_round = true;
+        out.verify_forward_passes = counted_verify_pass ? 0 : 1;
+        counted_verify_pass = true;
+        out.speculation = SpeculativeRowMetrics{7, round_stats.accepted};
+
+        const size_t first_position = s.length;
+        s.anchor = static_cast<int32_t>(preds_i[committed_rows]);
+        s.length += committed_rows + 1;
+        s.state_row = static_cast<int32_t>(committed_rows);
+
+        const bool finishes =
+            tokens.size() >= task.remaining_budget || (!tokens.empty() && IsEosToken(tokens.back()));
+        if (!finishes) {
+          feeds.push_back(Dflash2Drafter::Feed{
+              .request = s.drafter_key.get(),
+              .aux_row_begin = lay.aux_offset,
+              .aux_row_count = committed_rows + 1,
+              .first_position = first_position,
+              .anchor_token = s.anchor,
+              .draft_eligible = true,
+              .wants_drafts = true,
+          });
+          feed_slots.push_back(task.slot);
+          feed_task_indices.push_back(i);
+        }
+      } else {
+        s.length += lay.row_count;
+        s.state_row = static_cast<int32_t>(std::min(lay.row_count, kBoltVerifyRows) - 1);
+        out.prompt_tokens_processed = lay.row_count;
+        out.prompt_complete = lay.last_chunk;
+        if (lay.last_chunk) {
+          s.anchor = static_cast<int32_t>(preds_host[lay.logit_offset]);
+          s.prefilled = true;
+          stats_.effective_k = drafter_ ? 7 : 0;
+          if (task.remaining_budget > 0) {
+            out.tokens[0] = s.anchor;
+            out.count = 1;
+            out.speculation = SpeculativeRowMetrics{1, 1};
+            if (drafter_ && task.remaining_budget > 1 && !IsEosToken(s.anchor)) {
+              if (!lay.single_aux_chunk) needs_staged_propose_aux = true;
+              feeds.push_back(Dflash2Drafter::Feed{
+                  .request = s.drafter_key.get(),
+                  .aux_row_begin = lay.aux_offset,
+                  .aux_row_count = lay.draft_rows,
+                  .first_position = lay.draft_start,
+                  .anchor_token = s.anchor,
+                  .draft_eligible = true,
+                  .wants_drafts = true,
+              });
+              feed_slots.push_back(task.slot);
+              feed_task_indices.push_back(i);
+            }
+          }
+        }
+      }
+    }
+
+    if (!feeds.empty()) {
+      std::unique_ptr<Tensor> direct_aux_2d;
+      Tensor* propose_aux_source = nullptr;
+      if (!needs_staged_propose_aux) {
+        const std::array<int64_t, 2> aux_2d_shape{
+            static_cast<int64_t>(aux_rows.size()), static_cast<int64_t>(bolt_.aux_width_)};
+        direct_aux_2d = std::make_unique<Tensor>(OrtValue::CreateTensor(
+            *bolt_.p_device_->GetMemoryInfo(), temp_aux.GetMutableRawData(),
+            temp_aux.GetByteSpan().size(), aux_2d_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16));
+        direct_aux_2d->p_device_ = bolt_.p_device_;
+        propose_aux_source = direct_aux_2d.get();
+      } else {
+        size_t staged_rows = 0;
+        for (const auto& f : feeds) staged_rows += f.aux_row_count;
+        if (staged_rows * aux_row_bytes > mixed_propose_aux_->GetByteSpan().size()) {
+          mixed_propose_aux_ = std::make_unique<Tensor>(bolt_.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16);
+          const std::array<int64_t, 2> staged_aux_shape{
+              static_cast<int64_t>(staged_rows), static_cast<int64_t>(bolt_.aux_width_)};
+          mixed_propose_aux_->CreateTensor(staged_aux_shape, true);
+        }
+        auto dst = mixed_propose_aux_->GetByteSpan();
+        size_t cursor = 0;
+        for (size_t f = 0; f < feeds.size(); ++f) {
+          const size_t ti = feed_task_indices[f];
+          const auto& lay = layouts[ti];
+          const size_t count = feeds[f].aux_row_count;
+          if (tasks[ti].is_decode || lay.single_aux_chunk) {
+            dst.subspan(cursor * aux_row_bytes, count * aux_row_bytes)
+                .CopyFrom(temp_aux_bytes.subspan(lay.aux_offset * aux_row_bytes, count * aux_row_bytes));
+          } else {
+            auto src = slots_[feed_slots[f]].prefill_aux->GetByteSpan();
+            dst.subspan(cursor * aux_row_bytes, count * aux_row_bytes)
+                .CopyFrom(src.subspan(0, count * aux_row_bytes));
+          }
+          feeds[f].aux_row_begin = cursor;
+          cursor += count;
+        }
+        propose_aux_source = mixed_propose_aux_.get();
+      }
+      std::vector<std::vector<int32_t>> proposals;
+      Require(drafter_->Propose(*propose_aux_source, feeds, proposals) &&
+                  proposals.size() == feeds.size(),
+              "mixed-step DFlash2 drafter proposal failed");
+      for (size_t f = 0; f < feeds.size(); ++f) {
+        Require(proposals[f].size() == kBoltVerifyRows - 1, "DFlash2 drafter did not produce seven tokens");
+        slots_[feed_slots[f]].drafts = std::move(proposals[f]);
+      }
+      ++stats_.draft_forward_passes;
+    } else if (!want_any_preds) {
+      bolt_.p_device_->Synchronize();
+    }
+  } catch (...) {
+    try {
+      bolt_.p_device_->Synchronize();
+    } catch (...) {
+    }
+    inputs_ = batch_bindings_[1].inputs;
+    outputs_ = batch_bindings_[1].outputs;
+    throw;
+  }
+  inputs_ = batch_bindings_[1].inputs;
+  outputs_ = batch_bindings_[1].outputs;
 }
 
 std::unique_ptr<DecodingStrategy> MakeNemotronBoltStrategy(Generator& generator) {

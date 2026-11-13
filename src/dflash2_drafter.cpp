@@ -775,6 +775,50 @@ void Dflash2Drafter::InitializeSnapshotCache(std::shared_ptr<PrefixSnapshotCache
   prefix_snapshot_cache_ = std::move(snapshot_cache);
 }
 
+void Dflash2Drafter::SetPaddedDecodeSteps(bool padded) {
+  pad_decode_steps_ = padded;
+  if (!padded || fixed_single_request_ || !fixed_padding_enabled_) {
+    return;
+  }
+  const size_t block_size = static_cast<size_t>(config_.block_size);
+  const size_t num_spec = static_cast<size_t>(config_.num_draft_tokens);
+  const size_t top_k = static_cast<size_t>(config_.selector_top_k);
+  const size_t max_single_ctx_rows =
+      ((std::max(context_window_, block_size) + block_size - 1) / block_size + 1) * block_size;
+  const size_t max_ctx_rows = CheckedMultiply(max_requests_, max_single_ctx_rows, "DFlash 2 max context rows");
+  const size_t max_block_rows = CheckedMultiply(max_requests_, block_size, "DFlash 2 max block rows");
+  const size_t max_tokens = CheckedAdd(max_ctx_rows, max_block_rows, "DFlash 2 max packed rows");
+  constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
+  auto* device = model_->p_device_inputs_;
+  StepTensor(step_tensors_.packed_aux, device, aux_type_,
+             {static_cast<int64_t>(max_ctx_rows), static_cast<int64_t>(aux_hidden_size_)});
+  StepTensor(step_tensors_.input_ids, device, Ort::TypeToTensorType<int64_t>,
+             {static_cast<int64_t>(max_block_rows)});
+  if (model_->cpu_embedding_) {
+    StepTensor(step_tensors_.embeddings, device, model_->cpu_embedding_->type_,
+               {static_cast<int64_t>(max_block_rows), model_->cpu_embedding_->hidden_size_});
+  }
+  if (has_q_row_map_) {
+    StepTensor(step_tensors_.q_row_map, device, int32_type, {static_cast<int64_t>(max_tokens)});
+  }
+  StepTensor(step_tensors_.qkv_row_map, device, int32_type, {static_cast<int64_t>(max_tokens)});
+  StepTensor(step_tensors_.block_row_index, device, int32_type, {static_cast<int64_t>(max_block_rows)});
+  if (!config_.inputs.anchor_row_index.empty()) {
+    StepTensor(step_tensors_.anchor_row_index, device, int32_type, {static_cast<int64_t>(max_requests_)});
+  }
+  StepTensor(step_tensors_.cumulative_sequence_lengths, device, int32_type,
+             {static_cast<int64_t>(max_requests_ + 1)});
+  StepTensor(step_tensors_.past_sequence_lengths, device, int32_type, {static_cast<int64_t>(max_requests_)});
+  StepTensor(step_tensors_.block_table, device, int32_type,
+             {static_cast<int64_t>(max_requests_), static_cast<int64_t>(max_block_table_columns_)});
+  StepTensor(step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU), int32_type, {3});
+  StepTensor(step_tensors_.candidate_ids, device, int32_type,
+             {static_cast<int64_t>(max_requests_), static_cast<int64_t>(num_spec), static_cast<int64_t>(top_k)});
+  StepTensor(step_tensors_.scores, device, Ort::TypeToTensorType<float>,
+             {static_cast<int64_t>(max_requests_), static_cast<int64_t>(num_spec),
+              static_cast<int64_t>(top_k), static_cast<int64_t>(top_k)});
+}
+
 Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
                           ONNXTensorElementDataType type, const std::vector<int64_t>& shape,
                           bool* reallocated, std::unique_ptr<Tensor>* displaced) {
@@ -1264,6 +1308,12 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   const bool fixed_graph_step =
       fixed_single_request_ &&
       (num_ctx_rows == block_size || (fixed_padding_enabled_ && num_ctx_rows < block_size));
+  const bool padded_batch_decode_step =
+      !fixed_single_request_ && pad_decode_steps_ && fixed_padding_enabled_ &&
+      drafts_wanted && block_feed_indices.size() == served.size() &&
+      std::all_of(served.begin(), served.end(), [&](size_t idx) {
+        return ingest_count[idx] >= 1 && ingest_count[idx] <= block_size;
+      });
   if (fixed_single_request_) {
     if (served.size() != 1 || block_feed_indices.size() != 1 || num_ctx_rows == 0 ||
         num_ctx_rows > max_ctx_rows) {
@@ -1277,6 +1327,12 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       layout.qkv_row_map.resize(2 * block_size, static_cast<int32_t>(block_size));
       num_ctx_rows = block_size;
     }
+  } else if (padded_batch_decode_step) {
+    const size_t padded_tokens = CheckedMultiply(served.size(), 2 * block_size, "DFlash 2 padded decode rows");
+    layout.q_row_map.resize(padded_tokens, 0);
+    layout.qkv_row_map.resize(padded_tokens, static_cast<int32_t>(num_block_rows));
+    num_ctx_rows = CheckedMultiply(served.size(), block_size, "DFlash 2 padded context rows");
+    uniform_ingest = true;
   }
   const size_t num_tokens = layout.q_row_map.size();
   auto device = model_->p_device_inputs_;
@@ -1479,11 +1535,13 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   // Everything the captured launches bake in: the packed row counts, the block-table width, and the
   // generation of the buffers those launches recorded addresses for.
   const size_t known_graph_shapes = graph_ids_.size();
+  const bool uses_padded_query_bound = fixed_graph_step || padded_batch_decode_step;
   const int annotation_id =
       graph_eligible
           ? graph_ids_.Id(GraphAnnotationIds::Key{
                 served.size(), batch, num_ctx_rows, block_table_columns,
-                fixed_graph_step ? 2 * block_size : static_cast<size_t>(layout.max_query_len), buffer_generation_})
+                uses_padded_query_bound ? 2 * block_size : static_cast<size_t>(layout.max_query_len),
+                buffer_generation_})
           : -1;
   const bool capture = annotation_id > 0;
   if (capture && graph_ids_.size() != known_graph_shapes && g_log.enabled && g_log.graph_capture) {
@@ -1508,7 +1566,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     // the exact per-sequence lengths from device memory, which is what keeps replay correct as the
     // sequences grow.
     const AttentionMetadataValues exact_values{
-        fixed_graph_step ? static_cast<int32_t>(2 * block_size) : layout.max_query_len,
+        uses_padded_query_bound ? static_cast<int32_t>(2 * block_size) : layout.max_query_len,
         layout.max_kv_len, layout.min_kv_len};
     const AttentionMetadataValues values =
         capture ? GetAttentionMetadataForGraphStep(
