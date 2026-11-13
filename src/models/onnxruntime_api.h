@@ -131,8 +131,11 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
+/// OrtApi function-table version negotiated by InitApi (at most ORT_API_VERSION of the build headers).
+/// Gate calls to OrtApi functions on this.
 inline uint32_t api_version{};
-// Unlike the negotiated function table, runtime features are not capped by our build headers.
+/// Minor version of the loaded onnxruntime library, parsed from GetVersionString() (1.33.x -> 33; 0 if
+/// unparseable). Not capped by the build headers. Gate on this for behavior fixed inside ORT itself.
 inline uint32_t runtime_api_version{};
 
 inline uint32_t ParseRuntimeApiVersion(std::string_view version) {
