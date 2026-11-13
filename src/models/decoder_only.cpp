@@ -284,8 +284,28 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   size_t processed_tokens = 0;
   int length = total_length - static_cast<int>(num_tokens);
 
-  const bool slide_inputs = model_.config_->model.decoder.sliding_window.has_value() &&
-                            model_.config_->model.decoder.sliding_window->slide_inputs;
+  const auto& sliding_window = model_.config_->model.decoder.sliding_window;
+  const bool slide_inputs = sliding_window.has_value() && sliding_window->slide_inputs;
+  const bool left_padded_sliding = slide_inputs && sliding_window->alignment != "left";
+  size_t logits_chunk_start = ((num_tokens - 1) / chunk_size) * chunk_size;
+  if (!all_tokens_valid && params_->BatchBeamSize() == 1 && !left_padded_sliding) {
+    auto tokens_cpu = next_tokens.CopyDeviceToCpu();
+    size_t idx = num_tokens;
+    bool found_non_pad = false;
+    while (idx-- > 0) {
+      if (tokens_cpu[idx] != model_.config_->model.pad_token_id) {
+        found_non_pad = true;
+        break;
+      }
+    }
+    if (found_non_pad) {
+      logits_chunk_start = (idx / chunk_size) * chunk_size;
+    } else if (slide_inputs && sliding_window->alignment == "left") {
+      logits_chunk_start = 0;
+    }
+  }
+
+  DeviceSpan<float> saved_logits{};
   if (model_.config_->model.decoder.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.decoder.run_options.value());
   }
@@ -309,11 +329,17 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
     bool graph_capture_this_run = false;  // Disable graph capture during chunking
     State::Run(*model_.session_decoder_, graph_capture_this_run);
 
+    if (processed_tokens == logits_chunk_start && processed_tokens + current_chunk_size < num_tokens) {
+      auto chunk_logits = logits_.Get(all_tokens_valid);
+      saved_logits = model_.p_device_logits_->Allocate<float>(chunk_logits.size());
+      saved_logits.CopyFrom(chunk_logits);
+    }
+
     processed_tokens += current_chunk_size;
   }
 
-  // Return logits from the last chunk for potential sampling
-  return logits_.Get(all_tokens_valid);
+  // Return logits from the target chunk for potential sampling
+  return saved_logits.empty() ? logits_.Get(all_tokens_valid) : saved_logits;
 }
 
 void DecoderOnly_State::ValidateRewindTo(size_t index) const {

@@ -76,7 +76,6 @@ struct WindowedInputIDs : public InputIDs {
   std::unique_ptr<OrtValue> total_sequence_length_;
   std::unique_ptr<OrtValue> past_sequence_length_;
   int32_t historical_num_tokens_{};
-  bool first_decode_after_prefill_{false};
 };
 
 std::unique_ptr<InputIDs> CreateInputIDs(State& state);

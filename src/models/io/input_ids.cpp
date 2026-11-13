@@ -193,6 +193,10 @@ void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
       return static_cast<int32_t>(valid_end - valid_begin);
     };
 
+    if (past_sequence_length_)
+      *past_sequence_length_->GetTensorMutableData<int32_t>() =
+          historical_num_tokens_ - 1 + static_cast<int32_t>(window_size_);
+
     historical_num_tokens_ += get_unpadded_sequence_length(new_tokens.CpuSpan(), model_.config_->model.pad_token_id);
 
     value_ = OrtValue::CreateTensor<int32_t>(model_.p_device_inputs_->GetAllocator(), shape_);
@@ -203,10 +207,6 @@ void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
     // window_index = 0, value_ -> [0, a, b]
     std::copy_n(new_tokens.Span().begin(), window_size_, value_->GetTensorMutableData<int32_t>());
 
-    if (past_sequence_length_)
-      *past_sequence_length_->GetTensorMutableData<int32_t>() += static_cast<int32_t>(window_size_);
-
-    first_decode_after_prefill_ = true;
     window_index_++;
   } else if (window_index_ < num_windows_) {
     // new_tokens -> [a, b, c, d, e]
@@ -231,16 +231,9 @@ void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
       }
     }
 
-    if (first_decode_after_prefill_) {
-      if (past_sequence_length_)
-        *past_sequence_length_->GetTensorMutableData<int32_t>() = historical_num_tokens_;
-      first_decode_after_prefill_ = false;
-    } else {
-      if (past_sequence_length_) {
-        *past_sequence_length_->GetTensorMutableData<int32_t>() += 1;
-        historical_num_tokens_ = *past_sequence_length_->GetTensorMutableData<int32_t>();
-      }
-    }
+    if (past_sequence_length_)
+      *past_sequence_length_->GetTensorMutableData<int32_t>() = historical_num_tokens_;
+    ++historical_num_tokens_;
 
     value_->GetTensorMutableData<int32_t>()[0] = new_tokens.Span()[0];
   }

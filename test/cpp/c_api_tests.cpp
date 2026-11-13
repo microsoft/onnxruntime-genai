@@ -4089,6 +4089,20 @@ TEST(CAPITests, SlidingWindowKvCachePrefillDecodeAndContinuation) {
     }
     generator->GenerateNextToken();  // Samples 4 + ((36 + 8) % 10) = 8
     EXPECT_EQ(generator->GetSequenceData(0)[generator->GetSequenceCount(0) - 1], 8);
+
+    // Left-aligned prompt whose entire final window is trailing right-padding ([2, 3, 4, 0, 0, 0])
+    // preserves logits from the last real token (4 at pos=2) rather than selecting a PAD slot.
+    auto generator_pad_window = OgaGenerator::Create(*model, *params);
+    const std::array<int32_t, 6> trailing_pad_window{2, 3, 4, 0, 0, 0};
+    generator_pad_window->AppendTokens(trailing_pad_window.data(), trailing_pad_window.size());
+    {
+      auto logits = generator_pad_window->GetLogits();
+      const auto* data = reinterpret_cast<const float*>(logits->Data());
+      EXPECT_FLOAT_EQ(data[0], 4.0f);   // Token 4 from Window 0, not PAD=0 from Window 1
+      EXPECT_FLOAT_EQ(data[1], 2.0f);   // Position 2
+      EXPECT_FLOAT_EQ(data[2], 90.0f);  // 10 * (2 + 3 + 4)
+      EXPECT_FLOAT_EQ(data[3], 60.0f);  // 10 * (1 + 2 + 3)
+    }
   }
 
   // 3. Multi-window all-pad prefill keeps KV cache masked to zero and starts decode at position 0.

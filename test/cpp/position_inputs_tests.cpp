@@ -986,7 +986,8 @@ TEST(WindowedInputIdsTest, HandlesOneTokenWindowAndAlignmentEdgePastSequenceLeng
     EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 5);
   }
 
-  // 3. Left-aligned [0, 3, 4, 5, 0, 0] preserves leading BOS==0 and counts 4 valid tokens.
+  // 3. Left-aligned [0, 3, 4, 5, 0, 0] preserves leading BOS==0 and counts 4 valid tokens,
+  //    and a single decode step followed by continuation keeps past_sequence_length aligned.
   {
     std::shared_ptr<PositionTestModel> model;
     std::shared_ptr<GeneratorParams> params;
@@ -995,9 +996,22 @@ TEST(WindowedInputIdsTest, HandlesOneTokenWindowAndAlignmentEdgePastSequenceLeng
     ids->Add();
 
     run_update(*ids, *params, {0, 3, 4, 5, 0, 0});
+    EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 2);
     run_update(*ids, *params, {0, 3, 4, 5, 0, 0});
+    EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 5);
+
+    // Single decode step (5th valid token -> index 4), then continuation [6, 7, 0] (2 valid tokens).
     run_update(*ids, *params, {8});
     EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 4);
+
+    run_update(*ids, *params, {6, 7, 0});
+    EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 7);
+
+    // Post-continuation decode (8th valid token -> index 7).
+    run_update(*ids, *params, {9});
+    EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 7);
+    run_update(*ids, *params, {10});
+    EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 8);
   }
 }
 
