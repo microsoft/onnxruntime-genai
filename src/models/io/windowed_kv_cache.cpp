@@ -79,6 +79,10 @@ WindowedKeyValueCache::WindowedKeyValueCache(State& state)
                              std::to_string(layer_count_) + ". Please check the num_hidden_layers attribute in the model configuration.");
   }
 
+  if (state_.params_->BatchBeamSize() != 1) {
+    throw std::runtime_error("Batch beam size must be 1 for WindowedKeyValueCache.");
+  }
+
   const auto initial_window_size = model_.config_->model.decoder.sliding_window->window_size;
 
   if (initial_window_size <= 1) {
@@ -86,6 +90,7 @@ WindowedKeyValueCache::WindowedKeyValueCache(State& state)
                              std::to_string(initial_window_size) +
                              ". Please check the sliding_window.window_size attribute in the model configuration.");
   }
+  configured_window_size_ = static_cast<size_t>(initial_window_size);
 
   const auto num_key_value_heads = model_.config_->model.decoder.num_key_value_heads;
   const auto head_size = model_.config_->model.decoder.head_size;
@@ -149,8 +154,14 @@ WindowedKeyValueCache::WindowedKeyValueCache(State& state)
 
     key_caches_out_.push_back(
         OrtValue::CreateTensor(Allocator(), initial_key_cache_shape_out, type_));
+    std::fill_n(key_caches_out_[i]->GetTensorMutableData<uint8_t>(),
+                ElementCountFromShape(initial_key_cache_shape_out),
+                static_cast<uint8_t>(model_.config_->model.decoder.sliding_window->pad_value));
     value_caches_out_.push_back(
         OrtValue::CreateTensor(Allocator(), initial_value_cache_shape_out, type_));
+    std::fill_n(value_caches_out_[i]->GetTensorMutableData<uint8_t>(),
+                ElementCountFromShape(initial_value_cache_shape_out),
+                static_cast<uint8_t>(model_.config_->model.decoder.sliding_window->pad_value));
   }
 }
 
@@ -336,25 +347,146 @@ void WindowedKeyValueCache::TransitionLayerToTokenGeneration(size_t layer_idx) {
   state_.outputs_[output_index_ + 2 * layer_idx + 1] = value_caches_out_[layer_idx].get();
 }
 
+void WindowedKeyValueCache::TransitionLayerToPrefill(size_t layer_idx) {
+  auto& layer_state = per_layer_states_[layer_idx];
+
+  const auto updated_window_size = static_cast<int64_t>(configured_window_size_);
+  const auto& key_cache_shape_in = layer_state.key_cache_shape_in;
+  const auto& key_cache_shape_out = layer_state.key_cache_shape_out;
+  const auto& value_cache_shape_in = layer_state.value_cache_shape_in;
+  const auto& value_cache_shape_out = layer_state.value_cache_shape_out;
+
+  const auto num_key_value_heads = model_.config_->model.decoder.num_key_value_heads;
+  const auto head_size = model_.config_->model.decoder.head_size;
+  const auto context_length = model_.config_->model.context_length;
+
+  const auto updated_key_cache_shape_in = std::array<int64_t, 4>{
+      num_key_value_heads, 1, head_size, context_length - updated_window_size};
+  const auto updated_value_cache_shape_in = std::array<int64_t, 4>{
+      num_key_value_heads, 1, context_length - updated_window_size, head_size};
+  const auto updated_key_cache_shape_out = std::array<int64_t, 4>{
+      num_key_value_heads, 1, head_size, updated_window_size};
+  const auto updated_value_cache_shape_out = std::array<int64_t, 4>{
+      num_key_value_heads, 1, updated_window_size, head_size};
+
+  const int64_t out_width = key_cache_shape_out[3];
+  const int64_t kept_from_in = updated_key_cache_shape_in[3] - out_width;
+  const int64_t drop_from_in = key_cache_shape_in[3] - kept_from_in;
+
+  std::unique_ptr<OrtValue> key_cache = OrtValue::CreateTensor(Allocator(), updated_key_cache_shape_in, type_);
+  uint8_t* key_cache_data = key_cache->GetTensorMutableData<uint8_t>();
+  uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
+  uint8_t* key_cache_out_data = key_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
+
+  const int64_t num_key_cache_chunks = updated_key_cache_shape_in[0] * updated_key_cache_shape_in[2];
+  for (int64_t j = 0; j < num_key_cache_chunks; ++j) {
+    cpu_span<uint8_t> key_dst_prefix(key_cache_data + j * updated_key_cache_shape_in[3], kept_from_in);
+    cpu_span<uint8_t> key_src_prefix(key_cache_in_data + j * key_cache_shape_in[3] + drop_from_in, kept_from_in);
+    std::copy(key_src_prefix.begin(), key_src_prefix.end(), key_dst_prefix.begin());
+
+    cpu_span<uint8_t> key_dst_suffix(key_cache_data + j * updated_key_cache_shape_in[3] + kept_from_in, out_width);
+    cpu_span<uint8_t> key_src_suffix(key_cache_out_data + j * out_width, out_width);
+    std::copy(key_src_suffix.begin(), key_src_suffix.end(), key_dst_suffix.begin());
+  }
+
+  key_caches_in_[layer_idx] = std::move(key_cache);
+  key_caches_out_[layer_idx] = OrtValue::CreateTensor(Allocator(), updated_key_cache_shape_out, type_);
+
+  std::unique_ptr<OrtValue> value_cache = OrtValue::CreateTensor(Allocator(), updated_value_cache_shape_in, type_);
+  uint8_t* value_cache_data = value_cache->GetTensorMutableData<uint8_t>();
+  uint8_t* value_cache_in_data = value_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
+  uint8_t* value_cache_out_data = value_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
+
+  for (int64_t j = 0; j < updated_value_cache_shape_in[0]; ++j) {
+    cpu_span<uint8_t> val_dst_prefix(
+        value_cache_data + j * updated_value_cache_shape_in[2] * updated_value_cache_shape_in[3],
+        kept_from_in * updated_value_cache_shape_in[3]);
+    cpu_span<uint8_t> val_src_prefix(
+        value_cache_in_data + (j * value_cache_shape_in[2] + drop_from_in) * value_cache_shape_in[3],
+        kept_from_in * value_cache_shape_in[3]);
+    std::copy(val_src_prefix.begin(), val_src_prefix.end(), val_dst_prefix.begin());
+
+    cpu_span<uint8_t> val_dst_suffix(
+        value_cache_data + (j * updated_value_cache_shape_in[2] + kept_from_in) * updated_value_cache_shape_in[3],
+        value_cache_shape_out[2] * value_cache_shape_out[3]);
+    cpu_span<uint8_t> val_src_suffix(
+        value_cache_out_data + j * value_cache_shape_out[2] * value_cache_shape_out[3],
+        value_cache_shape_out[2] * value_cache_shape_out[3]);
+    std::copy(val_src_suffix.begin(), val_src_suffix.end(), val_dst_suffix.begin());
+  }
+
+  value_caches_in_[layer_idx] = std::move(value_cache);
+  value_caches_out_[layer_idx] = OrtValue::CreateTensor(Allocator(), updated_value_cache_shape_out, type_);
+
+  layer_state.window_size = configured_window_size_;
+  layer_state.key_cache_shape_in = updated_key_cache_shape_in;
+  layer_state.value_cache_shape_in = updated_value_cache_shape_in;
+  layer_state.key_cache_shape_out = updated_key_cache_shape_out;
+  layer_state.value_cache_shape_out = updated_value_cache_shape_out;
+
+  state_.inputs_[input_index_ + 2 * layer_idx] = key_caches_in_[layer_idx].get();
+  state_.inputs_[input_index_ + 2 * layer_idx + 1] = value_caches_in_[layer_idx].get();
+  state_.outputs_[output_index_ + 2 * layer_idx] = key_caches_out_[layer_idx].get();
+  state_.outputs_[output_index_ + 2 * layer_idx + 1] = value_caches_out_[layer_idx].get();
+}
+
 void WindowedKeyValueCache::UpdateLayer(DeviceSpan<int32_t> /*beam_indices*/, int total_length, size_t layer_idx) {
   assert(layer_idx < layer_count_);
+  if (total_length <= 0) {
+    throw std::runtime_error("WindowedKeyValueCache requires a positive total_length");
+  }
 
   auto& layer_state = per_layer_states_[layer_idx];
 
   if (layer_state.is_first_update) {
-    layer_state.num_windows = (total_length + layer_state.window_size - 1) / layer_state.window_size;
     layer_state.is_first_update = false;
-    ++layer_state.window_index;
+    layer_state.processed_length = total_length;
+    if (total_length == 1) {
+      TransitionLayerToTokenGeneration(layer_idx);
+      return;
+    }
+    if (static_cast<size_t>(total_length) % configured_window_size_ != 0) {
+      throw std::runtime_error("WindowedKeyValueCache prefill length must be a multiple of sliding_window.window_size");
+    }
+    layer_state.num_windows = static_cast<size_t>(total_length) / configured_window_size_;
+    layer_state.window_index = 1;
     return;
   }
 
-  if (layer_state.window_size == 1 || layer_state.window_index < layer_state.num_windows) {
+  if (layer_state.window_index < layer_state.num_windows) {
     SlideLayer(layer_idx);
     ++layer_state.window_index;
     return;
   }
 
-  TransitionLayerToTokenGeneration(layer_idx);
+  const int incoming = total_length - layer_state.processed_length;
+  if (incoming == 0 && layer_state.window_size == configured_window_size_) {
+    TransitionLayerToTokenGeneration(layer_idx);
+    return;
+  }
+  if (incoming == 1) {
+    layer_state.processed_length = total_length;
+    if (layer_state.window_size == 1) {
+      SlideLayer(layer_idx);
+      ++layer_state.window_index;
+    } else {
+      TransitionLayerToTokenGeneration(layer_idx);
+    }
+    return;
+  }
+  if (incoming > 0 && static_cast<size_t>(incoming) % configured_window_size_ == 0) {
+    layer_state.processed_length = total_length;
+    layer_state.num_windows = static_cast<size_t>(incoming) / configured_window_size_;
+    layer_state.window_index = 1;
+    if (layer_state.window_size == configured_window_size_) {
+      SlideLayer(layer_idx);
+    } else {
+      TransitionLayerToPrefill(layer_idx);
+    }
+    return;
+  }
+
+  throw std::runtime_error("WindowedKeyValueCache received unsupported sequence length step");
 }
 
 void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current_length) {

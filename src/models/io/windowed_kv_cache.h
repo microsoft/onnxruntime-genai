@@ -43,6 +43,7 @@ struct WindowedKeyValueCache : KeyValueCache {
     size_t window_index{0};
     size_t window_size{};
     size_t num_windows{};
+    int processed_length{0};
     bool is_first_update{true};
 
     CacheTensorShape key_cache_shape_in{}, key_cache_shape_out{};
@@ -58,6 +59,7 @@ struct WindowedKeyValueCache : KeyValueCache {
 
   void SlideLayer(size_t layer_idx);
   void TransitionLayerToTokenGeneration(size_t layer_idx);
+  void TransitionLayerToPrefill(size_t layer_idx);
   void UpdateLayer(DeviceSpan<int32_t> beam_indices, int total_length, size_t layer_idx);
 
   DeviceInterface& Device() { return *model_.p_device_kvcache_; }
@@ -70,6 +72,7 @@ struct WindowedKeyValueCache : KeyValueCache {
   State& state_;
   const Model& model_{state_.model_};
   const size_t layer_count_;
+  size_t configured_window_size_{};
 
   std::vector<LayerState> per_layer_states_;
 

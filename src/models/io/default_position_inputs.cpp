@@ -150,6 +150,9 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
     position_ids_shape_[1] = new_kv_length;
     CreateNextPositionIDsTensor();
     state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
+  } else if (position_ids_next_ && position_ids_shape_[0] > 1 && position_ids_shape_[1] == 1) {
+    position_ids_->GetByteSpan().CopyFrom(position_ids_next_->GetByteSpan());
+    position_ids_next_ = nullptr;
   }
   // Try to update position ids on the device. If it fails, copy to CPU, update there, and copy back to device.
   if (!model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_)) {
@@ -203,6 +206,9 @@ void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> n
           *position = 0;
         }
         abs_position--;
+      }
+      if (!found_first_non_pad) {
+        position_data_next[i] = static_cast<T>(-1);
       }
     }
   }

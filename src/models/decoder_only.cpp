@@ -147,6 +147,15 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
       ple_state_(CreatePleState(*this)),
       indexer_cache_(CreateIndexerCache(*this)),
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
+  if (model_.config_->model.decoder.sliding_window.has_value() &&
+      model_.config_->model.decoder.sliding_window->slide_inputs) {
+    if (model_.config_->model.decoder.sliding_window->window_size <= 0) {
+      throw std::runtime_error("Window size must be greater than 0");
+    }
+    if (params.BatchBeamSize() != 1) {
+      throw std::runtime_error("Batch beam size must be 1 for sliding a window over input_ids.");
+    }
+  }
   input_ids_.Add();
   position_inputs_->Add();
   const auto& rope_context_name = model_.rope_context_input_;
@@ -211,6 +220,13 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
 
   if (rope_context_length_)
     *rope_context_length_->GetTensorMutableData<int64_t>() = total_length;
+
+  const auto& sliding_window = model_.config_->model.decoder.sliding_window;
+  if (sliding_window.has_value() && sliding_window->slide_inputs && num_tokens > 1) {
+    return RunWithChunking(total_length, next_tokens, next_indices,
+                           static_cast<size_t>(sliding_window->window_size), all_tokens_valid);
+  }
+
   const bool replaying_rope_cache = rope_context_length_ && num_tokens == static_cast<size_t>(total_length);
   if ((first_run_ || replaying_rope_cache) && chunk_size_opt.has_value() &&
       chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
@@ -268,6 +284,28 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   size_t processed_tokens = 0;
   int length = total_length - static_cast<int>(num_tokens);
 
+  const auto& sliding_window = model_.config_->model.decoder.sliding_window;
+  const bool slide_inputs = sliding_window.has_value() && sliding_window->slide_inputs;
+  const bool left_padded_sliding = slide_inputs && sliding_window->alignment != "left";
+  size_t logits_chunk_start = ((num_tokens - 1) / chunk_size) * chunk_size;
+  if (!all_tokens_valid && params_->BatchBeamSize() == 1 && !left_padded_sliding) {
+    auto tokens_cpu = next_tokens.CopyDeviceToCpu();
+    size_t idx = num_tokens;
+    bool found_non_pad = false;
+    while (idx-- > 0) {
+      if (tokens_cpu[idx] != model_.config_->model.pad_token_id) {
+        found_non_pad = true;
+        break;
+      }
+    }
+    if (found_non_pad) {
+      logits_chunk_start = (idx / chunk_size) * chunk_size;
+    } else if (slide_inputs && sliding_window->alignment == "left") {
+      logits_chunk_start = 0;
+    }
+  }
+
+  DeviceSpan<float> saved_logits{};
   if (model_.config_->model.decoder.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.decoder.run_options.value());
   }
@@ -279,7 +317,7 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
     length = length + static_cast<int>(current_chunk_size);
 
     // Process this chunk - fills KV cache progressively
-    UpdateInputsOutputs(chunk_tokens, next_indices, length);
+    UpdateInputsOutputs(chunk_tokens, next_indices, length, slide_inputs ? next_tokens : DeviceSpan<int32_t>{});
     if (engram_state_) {
       engram_state_->UpdateInputsOutputs(chunk_tokens);
       engram_state_->Run(length, chunk_tokens, next_indices);
@@ -291,11 +329,17 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
     bool graph_capture_this_run = false;  // Disable graph capture during chunking
     State::Run(*model_.session_decoder_, graph_capture_this_run);
 
+    if (processed_tokens == logits_chunk_start && processed_tokens + current_chunk_size < num_tokens) {
+      auto chunk_logits = logits_.Get(all_tokens_valid);
+      saved_logits = model_.p_device_logits_->Allocate<float>(chunk_logits.size());
+      saved_logits.CopyFrom(chunk_logits);
+    }
+
     processed_tokens += current_chunk_size;
   }
 
-  // Return logits from the last chunk for potential sampling
-  return logits_.Get(all_tokens_valid);
+  // Return logits from the target chunk for potential sampling
+  return saved_logits.empty() ? logits_.Get(all_tokens_valid) : saved_logits;
 }
 
 void DecoderOnly_State::ValidateRewindTo(size_t index) const {
@@ -362,7 +406,8 @@ void DecoderOnly_State::CropToAccepted(size_t new_length, size_t recurrent_posit
     indexer_cache_->CommitAcceptedPrefix(recurrent_position + 1);
 }
 
-void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
+void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices,
+                                            int total_length, DeviceSpan<int32_t> position_tokens) {
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
 
@@ -370,22 +415,24 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
   int position_length = total_length;
   int kv_cache_length = total_length;
 
-  if (model_.config_->model.decoder.sliding_window.has_value() &&
-      model_.config_->model.decoder.sliding_window->window_size > 0) {
-    const int window_size = model_.config_->model.decoder.sliding_window->window_size;
+  const auto& sliding_window = model_.config_->model.decoder.sliding_window;
+  if (sliding_window.has_value() && sliding_window->window_size > 0) {
+    const int window_size = sliding_window->window_size;
 
     // Position IDs are clamped when slide_inputs is true
-    if (model_.config_->model.decoder.sliding_window->slide_inputs) {
+    if (sliding_window->slide_inputs) {
       position_length = std::min(total_length, window_size);
     }
 
-    // KV cache is clamped when slide_key_value_cache is true
-    if (model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
+    // KV cache is clamped when slide_key_value_cache is true on EP-managed sliding caches
+    if (sliding_window->slide_key_value_cache &&
+        !UsesNonRewindableWindowedKeyValueCache(model_, model_.config_->model.decoder)) {
       kv_cache_length = std::min(total_length, window_size);
     }
   }
 
-  position_inputs_->Update(next_tokens, position_length, static_cast<int>(new_length));
+  position_inputs_->Update(position_tokens.empty() ? next_tokens : position_tokens,
+                           position_length, static_cast<int>(new_length));
   if (kv_cache_)
     kv_cache_->Update(beam_indices, kv_cache_length);
   if (recurrent_state_)

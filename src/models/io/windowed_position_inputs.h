@@ -21,18 +21,21 @@ struct WindowedPositionInputs : PositionInputs {
   const Model& model_{state_.model_};
   bool has_mask_input_{};
   bool has_posid_input_{};
+  bool is_first_update_{true};
   std::array<int64_t, 2> position_ids_shape_{};
   ONNXTensorElementDataType position_ids_type_{};
   std::unique_ptr<OrtValue> position_ids_;
   std::array<int64_t, 2> attention_mask_shape_{};
   ONNXTensorElementDataType attention_mask_type_{};
   std::unique_ptr<OrtValue> attention_mask_;
-  size_t attention_mask_backward_offset_{~0U};
+  int64_t next_position_id_{};
   size_t attention_mask_index_{~0U};
   size_t position_ids_index_{~0U};
   size_t window_size_{};
   size_t num_windows_{};
   size_t window_index_{};
+  size_t valid_begin_{};
+  size_t valid_end_{};
 };
 
 }  // namespace Generators

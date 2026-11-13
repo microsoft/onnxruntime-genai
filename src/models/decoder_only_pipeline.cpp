@@ -372,13 +372,35 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
   // It is true only for the prompt processing part when the provided tokens are more than 1.
   first_run_ = next_tokens.size() > 1;
   size_t num_chunks{1};
+  size_t logits_chunk_index{0};
   if (first_run_ && model_.config_->model.decoder.sliding_window.has_value()) {
-    int window_size = model_.config_->model.decoder.sliding_window->window_size;
+    const size_t window_size = static_cast<size_t>(model_.config_->model.decoder.sliding_window->window_size);
     num_chunks = (next_tokens.size() + window_size - 1) / window_size;
+    logits_chunk_index = num_chunks - 1;
+    if (model_.config_->model.decoder.sliding_window->slide_inputs &&
+        model_.config_->model.decoder.sliding_window->alignment == "left") {
+      auto tokens_cpu = next_tokens.CopyDeviceToCpu();
+      size_t idx = tokens_cpu.size();
+      bool found_non_pad = false;
+      while (idx-- > 0) {
+        if (tokens_cpu[idx] != model_.config_->model.pad_token_id) {
+          found_non_pad = true;
+          break;
+        }
+      }
+      logits_chunk_index = found_non_pad ? (idx / window_size) : 0;
+    }
   }
 
+  DeviceSpan<float> saved_logits{};
   for (size_t i = 0; i < num_chunks; ++i) {
-    RunPipeline(total_length, next_tokens, next_indices, (i == num_chunks - 1));
+    RunPipeline(total_length, next_tokens, next_indices, (i == logits_chunk_index));
+
+    if (i == logits_chunk_index && logits_chunk_index + 1 < num_chunks) {
+      auto chunk_logits = logits_.Get();
+      saved_logits = model_.p_device_logits_->Allocate<float>(chunk_logits.size());
+      saved_logits.CopyFrom(chunk_logits);
+    }
 
     if (model_.config_->model.decoder.sliding_window.has_value() && i < num_chunks - 1) {
       // Sliding the window over the input_ids, key_cache, and value_cache, position_ids, and attention_mask
@@ -405,7 +427,7 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
 
   first_run_ = false;
 
-  return logits_.Get();
+  return saved_logits.empty() ? logits_.Get() : saved_logits;
 }
 
 void DecoderOnlyPipelineState::UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices, int total_length) {
