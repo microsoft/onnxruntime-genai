@@ -43,6 +43,7 @@ struct WindowedKeyValueCache : KeyValueCache {
     size_t window_index{0};
     size_t window_size{};
     size_t num_windows{};
+    int processed_length{0};
     bool is_first_update{true};
 
     CacheTensorShape key_cache_shape_in{}, key_cache_shape_out{};

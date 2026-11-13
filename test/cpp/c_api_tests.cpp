@@ -4138,6 +4138,49 @@ TEST(CAPITests, SlidingWindowKvCachePrefillDecodeAndContinuation) {
     beam_params->SetSearchOption("num_beams", 2);
     EXPECT_THROW(OgaGenerator::Create(*model, *beam_params), std::runtime_error);
   }
+
+  // 4. Consecutive AppendTokens calls without generation between them, plus 1-window prefill -> 2 decodes (3, 4, 5).
+  {
+    ScopedDir pkg{write_package("consecutive", "right", 14)};
+    auto model = OgaModel::Create(pkg.path.string().c_str());
+    auto params = OgaGeneratorParams::Create(*model);
+
+    // 4a. Single-window prefill (length 3) followed by 2 decode steps (cumulative lengths 4 and 5).
+    {
+      auto gen1 = OgaGenerator::Create(*model, *params);
+      const std::array<int32_t, 3> p1{2, 3, 4};
+      gen1->AppendTokens(p1.data(), p1.size());
+      gen1->GenerateNextToken();  // Samples 4 + ((9 + 2) % 10) = 5 (cumulative len 4)
+      gen1->GenerateNextToken();  // Runs 5 at pos=3 (len 4); samples 4 + ((14 + 3) % 10) = 11 (len 5)
+      gen1->GenerateNextToken();  // Runs 11 at pos=4 (len 5); samples 4 + ((25 + 4) % 10) = 13 (len 6)
+      ASSERT_EQ(gen1->GetSequenceCount(0), 6u);
+      EXPECT_EQ(gen1->GetSequenceData(0)[3], 5);
+      EXPECT_EQ(gen1->GetSequenceData(0)[4], 11);
+      EXPECT_EQ(gen1->GetSequenceData(0)[5], 13);
+    }
+
+    // 4b. Two consecutive AppendTokens calls (6 tokens then 3 tokens) before any GenerateNextToken.
+    {
+      auto gen2 = OgaGenerator::Create(*model, *params);
+      const std::array<int32_t, 4> append1{2, 3, 4, 5};  // Left-padded to [0, 0, 2, 3, 4, 5] (len 6)
+      const std::array<int32_t, 2> append2{6, 7};        // Left-padded to [0, 6, 7] (len 9)
+      gen2->AppendTokens(append1.data(), append1.size());
+      gen2->AppendTokens(append2.data(), append2.size());
+      {
+        auto logits = gen2->GetLogits();
+        const auto* data = reinterpret_cast<const float*>(logits->Data());
+        EXPECT_FLOAT_EQ(data[0], 7.0f);    // Selected token ID
+        EXPECT_FLOAT_EQ(data[1], 5.0f);    // Positions 0..3 (append1) + 4..5 (append2)
+        EXPECT_FLOAT_EQ(data[2], 270.0f);  // 10 * (2 + 3 + 4 + 5 + 6 + 7)
+        EXPECT_FLOAT_EQ(data[3], 210.0f);  // 10 * (1 + 2 + 3 + 4 + 5 + 6)
+      }
+      gen2->GenerateNextToken();  // Samples 4 + ((27 + 5) % 10) = 6
+      gen2->GenerateNextToken();  // Runs 6 at pos=6 -> active sum=33 -> samples 4 + ((33 + 6) % 10) = 13
+      ASSERT_EQ(gen2->GetSequenceCount(0), 11u);
+      EXPECT_EQ(gen2->GetSequenceData(0)[9], 6);
+      EXPECT_EQ(gen2->GetSequenceData(0)[10], 13);
+    }
+  }
 }
 
 TEST(CAPITests, SlidingWindowPipelineSkipsLmHeadOnTrailingPadWindows) {

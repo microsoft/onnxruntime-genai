@@ -439,21 +439,17 @@ void WindowedKeyValueCache::UpdateLayer(DeviceSpan<int32_t> /*beam_indices*/, in
   auto& layer_state = per_layer_states_[layer_idx];
 
   if (layer_state.is_first_update) {
-    layer_state.num_windows = (static_cast<size_t>(total_length) + layer_state.window_size - 1) / layer_state.window_size;
     layer_state.is_first_update = false;
-    ++layer_state.window_index;
-    return;
-  }
-
-  if (layer_state.window_size == 1) {
-    if (static_cast<size_t>(total_length) >= configured_window_size_) {
-      TransitionLayerToPrefill(layer_idx);
-      layer_state.num_windows = (static_cast<size_t>(total_length) + configured_window_size_ - 1) / configured_window_size_;
-      layer_state.window_index = 1;
+    layer_state.processed_length = total_length;
+    if (total_length == 1) {
+      TransitionLayerToTokenGeneration(layer_idx);
       return;
     }
-    SlideLayer(layer_idx);
-    ++layer_state.window_index;
+    if (static_cast<size_t>(total_length) % configured_window_size_ != 0) {
+      throw std::runtime_error("WindowedKeyValueCache prefill length must be a multiple of sliding_window.window_size");
+    }
+    layer_state.num_windows = static_cast<size_t>(total_length) / configured_window_size_;
+    layer_state.window_index = 1;
     return;
   }
 
@@ -463,7 +459,34 @@ void WindowedKeyValueCache::UpdateLayer(DeviceSpan<int32_t> /*beam_indices*/, in
     return;
   }
 
-  TransitionLayerToTokenGeneration(layer_idx);
+  const int incoming = total_length - layer_state.processed_length;
+  if (incoming == 0 && layer_state.window_size == configured_window_size_) {
+    TransitionLayerToTokenGeneration(layer_idx);
+    return;
+  }
+  if (incoming == 1) {
+    layer_state.processed_length = total_length;
+    if (layer_state.window_size == 1) {
+      SlideLayer(layer_idx);
+      ++layer_state.window_index;
+    } else {
+      TransitionLayerToTokenGeneration(layer_idx);
+    }
+    return;
+  }
+  if (incoming > 0 && static_cast<size_t>(incoming) % configured_window_size_ == 0) {
+    layer_state.processed_length = total_length;
+    layer_state.num_windows = static_cast<size_t>(incoming) / configured_window_size_;
+    layer_state.window_index = 1;
+    if (layer_state.window_size == configured_window_size_) {
+      SlideLayer(layer_idx);
+    } else {
+      TransitionLayerToPrefill(layer_idx);
+    }
+    return;
+  }
+
+  throw std::runtime_error("WindowedKeyValueCache received unsupported sequence length step");
 }
 
 void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current_length) {
