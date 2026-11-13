@@ -88,6 +88,7 @@ struct State {
   virtual OrtValue* GetOutput(const char* name);
 
   void ClearIO();  // Clear all inputs/outputs
+  void ValidateDeclaredState(int64_t total_length = 0) const;
 
   virtual void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
   virtual void SetRunOption(const char* key, const char* value);
@@ -126,6 +127,7 @@ struct State {
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;
+  const int declared_state_max_length_;
 
  private:
   // Capture identity includes input length, execution variant, and active adapters.
@@ -189,6 +191,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                             OrtSessionOptions* session_options, bool is_session_recreation = false);
 
   bool IsPruned() const;
+  const Config::Model::Decoder::DeclaredState* GetDeclaredState() const;
+  bool DeclaredStateSharesBuffer() const;
+  void ValidateDeclaredStateParams(const GeneratorParams& params) const;
+  std::shared_ptr<const void> AcquireDeclaredStateLease(const GeneratorParams& params) const;
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
@@ -238,6 +244,17 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   void AddGgufInitializers(OrtSessionOptions& session_options);
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
+
+ private:
+  struct DeclaredStateEnvelope {
+    explicit DeclaredStateEnvelope(const Config& config);
+    Config::Model::Decoder::DeclaredState limits;
+    bool share_buffer;
+    std::string json;
+    mutable std::mutex resident_mutex;
+    mutable std::weak_ptr<const void> resident;
+  };
+  std::unique_ptr<const DeclaredStateEnvelope> declared_state_;
 };
 
 }  // namespace Generators

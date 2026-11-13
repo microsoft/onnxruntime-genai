@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -71,6 +72,30 @@ namespace {
 constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
     "session.model_external_initializers_file_folder_path";
 constexpr const char* kOrtSessionOptionEpContextFilePath = "ep.context_file_path";
+
+template <typename Api, typename = void>
+struct HasDeclaredStateApi : std::false_type {};
+
+template <typename Api>
+struct HasDeclaredStateApi<Api, std::void_t<decltype(&Api::GetDeclaredStateSupport),
+                                            decltype(&Api::SessionOptionsSetDeclaredStateContract)>> : std::true_type {};
+
+template <typename Api>
+void SetDeclaredStateContract(const Api& api, OrtSessionOptions& options, const std::string& json) {
+  if (Ort::api_version < 33) {
+    throw std::runtime_error("K1 requires an ORT SDK and runtime with the declared-state APIs (API 33 or later).");
+  }
+  // API-version equality alone does not establish that an experimental SDK contains these slots.
+  if constexpr (HasDeclaredStateApi<Api>::value) {
+    uint32_t max_version = 0;
+    Ort::ThrowOnError(api.GetDeclaredStateSupport(&max_version));
+    if (max_version < 1)
+      throw std::runtime_error("K1 requires positive support for dense declared-state schema version 1.");
+    Ort::ThrowOnError(api.SessionOptionsSetDeclaredStateContract(&options, json.data(), json.size()));
+  } else {
+    throw std::runtime_error("K1 requires an ORT SDK and runtime with the declared-state APIs (API 33 or later).");
+  }
+}
 
 struct SharedInitializerEntry {
   DeviceSpan<uint8_t> device_data;
@@ -604,10 +629,24 @@ State::State(const GeneratorParams& params, const Model& model, DeviceInterface*
       // capture), so only a state on that device may use it.
       p_session_device_inputs_{p_session_device_ == model.p_device_ ? model.p_device_inputs_ : p_session_device_},
       run_options_{OrtRunOptions::Create()},
+      declared_state_max_length_{params.search.max_length},
       extra_outputs_{*this} {
+  ValidateDeclaredState();
   // Reserve the default (1-token) decode capture identity.
   if (params_->use_graph_capture) {
     GraphIdForLength(1, 0);
+  }
+}
+
+void State::ValidateDeclaredState(int64_t total_length) const {
+  if (!model_.GetDeclaredState())
+    return;
+  model_.ValidateDeclaredStateParams(*params_);
+  if (params_->search.max_length != declared_state_max_length_) {
+    throw std::runtime_error("K1 generator max_length cannot change after construction.");
+  }
+  if (total_length < 0 || total_length > declared_state_max_length_) {
+    throw std::runtime_error("K1 sequence length exceeds the generator's immutable cache envelope.");
   }
 }
 
@@ -659,6 +698,7 @@ void State::DumpOutputs() {
 void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
                 int graph_capture_variant, OrtIoBinding* binding) {
   DurationTrace trace{"State::Run"};
+  ValidateDeclaredState();
 
   if (params_->use_graph_capture) {
     graph_capture_session_ = &session;
@@ -1032,8 +1072,57 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
   return type_info->second.type_info->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
 }
 
+Model::DeclaredStateEnvelope::DeclaredStateEnvelope(const Config& config)
+    : limits{*config.model.decoder.declared_state},
+      share_buffer{config.search.past_present_share_buffer},
+      json{BuildDeclaredStateContract(config)} {}
+
+const Config::Model::Decoder::DeclaredState* Model::GetDeclaredState() const {
+  return declared_state_ ? &declared_state_->limits : nullptr;
+}
+
+bool Model::DeclaredStateSharesBuffer() const {
+  return declared_state_ && declared_state_->share_buffer;
+}
+
+void Model::ValidateDeclaredStateParams(const GeneratorParams& params) const {
+  if (!declared_state_)
+    return;
+  if (params.model_.get() != this || params.search.batch_size != 1 || params.search.num_beams != 1 ||
+      params.search.num_return_sequences != 1 || params.search.max_length <= 0 ||
+      params.search.max_length > declared_state_->limits.max_sequence_length ||
+      params.IsPastPresentShareBufferEnabled(config_->model.type) != declared_state_->share_buffer ||
+      params.use_graph_capture || params.use_multi_profile || params.speculative.ngram_size != 0) {
+    throw std::runtime_error(
+        "K1 generator parameters must belong to this model and preserve its batch, beam, length, "
+        "alias, and non-speculative/non-capture envelope.");
+  }
+}
+
+std::shared_ptr<const void> Model::AcquireDeclaredStateLease(const GeneratorParams& params) const {
+  if (!declared_state_)
+    return {};
+  ValidateDeclaredStateParams(params);
+  std::lock_guard lock{declared_state_->resident_mutex};
+  if (!declared_state_->resident.expired()) {
+    throw std::runtime_error("K1 permits only one resident generator; destroy it before creating another.");
+  }
+  auto lease = std::make_shared<const int>(0);
+  declared_state_->resident = lease;
+  return lease;
+}
+
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
+  if (config_->model.decoder.declared_state) {
+    ValidateDeclaredStateConfig(*config_);
+    if ((p_device_->GetType() != DeviceType::CPU && p_device_->GetType() != DeviceType::CUDA) ||
+        p_device_->GetKeyValueCacheQuantizationBits(config_->model.decoder.session_options) != 0) {
+      throw std::runtime_error("K1 currently supports only unquantized CPU/CUDA dense GQA caches.");
+    }
+    declared_state_ = std::make_unique<DeclaredStateEnvelope>(*config_);
+    SetDeclaredStateContract(*Ort::api, *session_options_, declared_state_->json);
+  }
   EnsureDeviceOrtInit(*p_device_, *config_);
   if (config_->engine.dynamic_batching &&
       config_->engine.dynamic_batching->device_memory_budget_bytes &&

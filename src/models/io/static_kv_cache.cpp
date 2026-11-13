@@ -228,6 +228,7 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
       past_present_share_buffer_{state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type)},
       shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0,
              model_.config_->model.decoder.head_size} {
+  state_.ValidateDeclaredState();
   if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
     Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
 
@@ -421,6 +422,41 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
     if (!layer_shapes_.empty()) {
       for (int i = 0; i < layer_count_; ++i) {
         layer_shapes_[i][2] = cache_seq_len;
+      }
+    }
+  }
+
+  if (const auto* limits = model_.GetDeclaredState()) {
+    if (layer_count_ != model_.config_->model.decoder.num_hidden_layers) {
+      throw std::runtime_error("K1 requires every dense cache layer to be included in the declaration.");
+    }
+    if (past_present_share_buffer_ != model_.DeclaredStateSharesBuffer()) {
+      throw std::runtime_error("K1 cache alias policy differs from the session declaration.");
+    }
+    const auto validate_capacity = [&](const auto& shape) {
+      if (shape[0] != 1 || shape[2] < 0 || shape[2] > limits->max_sequence_length ||
+          (past_present_share_buffer_ && shape[2] < state_.params_->search.max_length)) {
+        throw std::runtime_error("K1 cache allocation exceeds or cannot cover the declared sequence envelope.");
+      }
+    };
+    validate_capacity(shape_);
+    for (const auto& shape : layer_shapes_)
+      validate_capacity(shape);
+    for (int i = 0; i < layer_count_ * 2; ++i) {
+      if (!kv_layer_indices_.empty() && kv_layer_indices_[i / 2] != i / 2) {
+        throw std::runtime_error("K1 cache layers must match the declared contiguous layer range.");
+      }
+      const auto& shape = layer_shapes_.empty() ? shape_ : layer_shapes_[i / 2];
+      const auto input_shape = model_.session_info_.GetInputShape(input_name_strings_[i]);
+      const auto output_shape = model_.session_info_.GetOutputShape(output_name_strings_[i]);
+      if (input_shape.size() != 4 || output_shape.size() != 4 ||
+          input_shape[1] <= 0 || input_shape[3] <= 0 ||
+          input_shape[1] != shape[1] || input_shape[3] != shape[3] ||
+          output_shape[1] != shape[1] || output_shape[3] != shape[3] ||
+          model_.session_info_.GetInputDataType(input_name_strings_[i]) != type_ ||
+          model_.session_info_.GetOutputDataType(output_name_strings_[i]) != type_) {
+        throw std::runtime_error(
+            "K1 requires concrete cache head geometry and a matching allocation dtype for " + input_name_strings_[i]);
       }
     }
   }

@@ -9,6 +9,7 @@
 namespace Generators {
 
 void DynamicKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+  state_.ValidateDeclaredState(total_length);
   current_length_ = total_length;
 
   if (!is_first_update_) {
