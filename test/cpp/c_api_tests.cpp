@@ -4114,5 +4114,14 @@ TEST(CAPITests, SlidingWindowKvCachePrefillDecodeAndContinuation) {
     ASSERT_EQ(generator->GetSequenceCount(0), 8u);
     EXPECT_EQ(generator->GetSequenceData(0)[6], 4);
     EXPECT_EQ(generator->GetSequenceData(0)[7], 8);
+
+    // Batched or beam configurations are explicitly rejected for sliding_window inputs.
+    auto batched_params = OgaGeneratorParams::Create(*model);
+    batched_params->SetSearchOption("batch_size", 2);
+    EXPECT_THROW(OgaGenerator::Create(*model, *batched_params), std::runtime_error);
+
+    auto beam_params = OgaGeneratorParams::Create(*model);
+    beam_params->SetSearchOption("num_beams", 2);
+    EXPECT_THROW(OgaGenerator::Create(*model, *beam_params), std::runtime_error);
   }
 }

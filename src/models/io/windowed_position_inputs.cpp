@@ -22,6 +22,9 @@ WindowedPositionInputs::WindowedPositionInputs(State& state)
     if (!model_.config_->model.decoder.sliding_window.has_value()) {
       throw std::runtime_error("Sliding a window over position_ids and attention_mask requires sliding_window to be set in the genai_config.json.");
     }
+    if (state_.params_->BatchBeamSize() != 1) {
+      throw std::runtime_error("Batch beam size must be 1 for sliding a window over position_ids and attention_mask.");
+    }
     const int configured_window_size = model_.config_->model.decoder.sliding_window->window_size;
     if (configured_window_size <= 0) {
       throw std::runtime_error("Window size must be greater than 0");

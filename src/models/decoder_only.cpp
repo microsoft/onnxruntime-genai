@@ -148,9 +148,13 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
       indexer_cache_(CreateIndexerCache(*this)),
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   if (model_.config_->model.decoder.sliding_window.has_value() &&
-      model_.config_->model.decoder.sliding_window->slide_inputs &&
-      model_.config_->model.decoder.sliding_window->window_size <= 0) {
-    throw std::runtime_error("Window size must be greater than 0");
+      model_.config_->model.decoder.sliding_window->slide_inputs) {
+    if (model_.config_->model.decoder.sliding_window->window_size <= 0) {
+      throw std::runtime_error("Window size must be greater than 0");
+    }
+    if (params.BatchBeamSize() != 1) {
+      throw std::runtime_error("Batch beam size must be 1 for sliding a window over input_ids.");
+    }
   }
   input_ids_.Add();
   position_inputs_->Add();

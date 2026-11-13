@@ -79,6 +79,10 @@ WindowedKeyValueCache::WindowedKeyValueCache(State& state)
                              std::to_string(layer_count_) + ". Please check the num_hidden_layers attribute in the model configuration.");
   }
 
+  if (state_.params_->BatchBeamSize() != 1) {
+    throw std::runtime_error("Batch beam size must be 1 for WindowedKeyValueCache.");
+  }
+
   const auto initial_window_size = model_.config_->model.decoder.sliding_window->window_size;
 
   if (initial_window_size <= 1) {
