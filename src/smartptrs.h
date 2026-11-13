@@ -134,7 +134,7 @@ struct PositionInputs {
   virtual void RewindTo(size_t index) = 0;
   virtual OrtValue* GetRotaryPositionIds() { return nullptr; }
   virtual void SetRotaryPositionIds(OrtValue* positions) { (void)positions; }
-  virtual bool BindCheckpoint(StateCheckpointDescription& description) { return false; }
+  virtual bool BindCheckpoint(StateCheckpointDescription&) { return false; }
 };
 
 struct BatchedSamplerState {
