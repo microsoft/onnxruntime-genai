@@ -177,6 +177,7 @@ struct Generator : LeakChecked<Generator> {
   // True when sampling reduces to greedy/argmax selection (do_sample off, top_k == 1, or
   // temperature == 0). Computed once at construction so callers don't re-derive it.
   bool IsGreedySampling() const;
+  size_t CachedPromptTokens() const { return cached_prompt_tokens_; }
 
  private:
   friend class ASRPostProcessor;
@@ -191,6 +192,8 @@ struct Generator : LeakChecked<Generator> {
   size_t PaddedInputIdsSize(size_t input_ids_count) const;
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
+  void ComputePrefillLogits(DeviceSpan<int32_t> next_tokens, cpu_span<const int32_t> tokens = {});
+  size_t cached_prompt_tokens_{};
   void RunGeneratedToken();
   DeviceSpan<float> RunWithRopeCache(DeviceSpan<int32_t> next_tokens);
   int rope_cache_length_{};

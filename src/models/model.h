@@ -20,6 +20,8 @@ namespace Generators {
 struct Tokenizer;
 struct MultiModalProcessor;
 class ThreadPool;
+class StateCheckpointDescription;
+class StateCheckpointCache;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
@@ -46,6 +48,7 @@ struct State {
   virtual ~State();
 
   virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
+  virtual void RunPrefill(int total_length, DeviceSpan<int32_t>& next_tokens) { Run(total_length, next_tokens); }
   virtual void Finalize(int current_length) {}
 
   virtual bool SupportsRewind() const { return true; }
@@ -58,6 +61,9 @@ struct State {
   // cache is rolled back the usual way). Used by MTP self-speculative decoding to undo a
   // rejected draft, since recurrent state cannot be partially cropped like KV cache.
   virtual void SnapshotState(size_t position) { (void)position; }
+
+  // Null means that some live state cannot yet be checkpointed completely.
+  virtual std::unique_ptr<StateCheckpointDescription> DescribeCheckpoint();
 
   // Lossless multi-token MTP crop: when the model carries a window of per-position recurrent
   // state (state_window > 1), the accepted prefix can be committed WITHOUT a replay
@@ -212,6 +218,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   // constrained_logits_processor.cpp so builds without llguidance do not depend on its types.
   mutable std::mutex guidance_cache_mutex_;
   mutable std::shared_ptr<GuidanceCacheState> guidance_cache_;
+  mutable std::mutex generator_prefix_mutex_;
+  mutable std::shared_ptr<StateCheckpointCache> generator_prefix_cache_;
 
   /// Create session options from config. Public so components like VAD can create
   /// properly configured sessions using the GenAI infrastructure.

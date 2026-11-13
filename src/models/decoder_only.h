@@ -53,11 +53,13 @@ struct DecoderOnly_State : State {
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                         bool all_tokens_valid);
+  void RunPrefill(int total_length, DeviceSpan<int32_t>& next_tokens) override;
 
   void RewindTo(size_t index) override;
   void ValidateRewindTo(size_t index) const override;
 
   void SnapshotState(size_t position) override;
+  std::unique_ptr<StateCheckpointDescription> DescribeCheckpoint() override;
 
   bool HasCroppableRecurrentState() const override;
   bool CropRequiresSnapshot() const override {
@@ -75,8 +77,11 @@ struct DecoderOnly_State : State {
   void SetRotaryPositionIds(OrtValue* positions) override { position_inputs_->SetRotaryPositionIds(positions); }
 
  private:
+  DeviceSpan<float> RunImpl(int total_length, DeviceSpan<int32_t>& next_tokens,
+                            DeviceSpan<int32_t> next_indices, bool all_tokens_valid, bool extract_logits);
   DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
-                                    DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid);
+                                    DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid,
+                                    bool extract_logits);
 
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
 
@@ -95,6 +100,7 @@ struct DecoderOnly_State : State {
   std::unique_ptr<EngramState> engram_state_;
   std::unique_ptr<Embeddings> engram_embeddings_;
   ExtraInputs extra_inputs_{*this};
+  bool checkpoint_extra_inputs_{};
 };
 
 }  // namespace Generators

@@ -1,6 +1,7 @@
 #include "generator/generators.h"
 #include "models/model.h"
 #include "models/io/input_ids.h"
+#include "models/state-checkpoint.h"
 
 namespace Generators {
 
@@ -44,6 +45,18 @@ void DefaultInputIDs::Add() {
     state_.inputs_.push_back(current_sequence_length_.get());
     state_.input_names_.push_back(model_.config_->model.decoder.inputs.past_sequence_length.c_str());
     state_.inputs_.push_back(past_sequence_length_.get());
+  }
+}
+
+void DefaultInputIDs::BindCheckpoint(StateCheckpointDescription& description) {
+  description.BindValue(is_prompt_);
+  if (current_sequence_length_) {
+    description.BindValue<int32_t>(
+        [this] { return *current_sequence_length_->GetTensorData<int32_t>(); },
+        [this](const int32_t& length) { *current_sequence_length_->GetTensorMutableData<int32_t>() = length; });
+    description.BindValue<int32_t>(
+        [this] { return *past_sequence_length_->GetTensorData<int32_t>(); },
+        [this](const int32_t& length) { *past_sequence_length_->GetTensorMutableData<int32_t>() = length; });
   }
 }
 

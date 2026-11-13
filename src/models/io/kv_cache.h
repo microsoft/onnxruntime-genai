@@ -33,6 +33,8 @@ struct KeyValueCache {
 
   virtual void RewindTo(size_t index) = 0;
 
+  virtual bool BindCheckpoint(StateCheckpointDescription& description) { return false; }
+
   // Note: PartialUpdate() is mainly for supporting DecoderOnlyPipelineState usage where we update
   // part of the KV cache after running part of the pipeline.
   // An alternative may be to have a dedicated KV cache per IntermediatePipelineState.

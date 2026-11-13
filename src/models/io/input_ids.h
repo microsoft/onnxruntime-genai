@@ -26,6 +26,7 @@ struct DefaultInputIDs : InputIDs {
   const char* name_;
 
   OrtValue* Get() override { return value_->GetOrtTensor(); }
+  void BindCheckpoint(StateCheckpointDescription& description);
 
  private:
   State& state_;

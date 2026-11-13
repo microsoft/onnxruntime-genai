@@ -24,6 +24,7 @@ struct RecurrentState {
   // in place so buffer addresses stay stable (required by CUDA-graph replay).
   void Snapshot(size_t position);
   void RestoreSnapshot();
+  void BindCheckpoint(StateCheckpointDescription& description);
 
   // Per-position recurrent-state cropping (lossless multi-token MTP). When the model is exported
   // with `state_window=W`, the past/present conv + recurrent state tensors carry a

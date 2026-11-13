@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/io/ple_state.h"
+#include "models/state-checkpoint.h"
 #include <algorithm>
 
 namespace Generators {
@@ -114,6 +115,17 @@ void PleState::Update() {
     state_.outputs_[output_index_ + index] = presents_[index].get();
   }
   if (!pasts_.empty()) graph_buffer_variant_ ^= 1;
+}
+
+void PleState::BindCheckpoint(StateCheckpointDescription& description) {
+  for (size_t i = 0; i < presents_.size(); ++i)
+    description.BindTensor(output_name_strings_[i], [this, i] { return presents_[i].get(); });
+  description.BindValue<int>(
+      [this] { return forward_length_; },
+      [this](const int& length) {
+        forward_length_ = length;
+        snapshot_valid_ = false;
+      });
 }
 
 void PleState::ValidateRewindTo(size_t index) const {

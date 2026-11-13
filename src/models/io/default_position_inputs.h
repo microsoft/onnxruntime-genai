@@ -15,6 +15,7 @@ struct DefaultPositionInputs : PositionInputs {
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
   void RewindTo(size_t index) override;
+  bool BindCheckpoint(StateCheckpointDescription& description) override;
 
  private:
   void AddAttentionMask();
@@ -46,6 +47,7 @@ struct DefaultPositionInputs : PositionInputs {
   std::unique_ptr<PositionIdsBuffer> position_buffer_;
   std::unique_ptr<AttentionMaskBuffer> mask_buffer_;
   bool is_first_update_{true};
+  int current_length_{};
 };
 
 }  // namespace Generators
