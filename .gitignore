@@ -52,9 +52,6 @@ examples/csharp/ModelChat/models
 
 !/test/models/engine/
 /test/models/engine/*
-!/test/models/engine/synthetic-bolt-hybrid/
-!/test/models/engine/synthetic-bolt-hybrid/generate_model.py
-!/test/models/engine/synthetic-bolt-hybrid/model.onnx
 !/test/models/engine/synthetic-fixed-components/
 !/test/models/engine/synthetic-fixed-components/decoder.onnx
 !/test/models/engine/synthetic-fixed-components/genai_config.json
