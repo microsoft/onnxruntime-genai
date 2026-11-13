@@ -236,8 +236,9 @@ class LFM2Model(Model):
 
     def make_post_norm(self, layer_id, norm, location):
         # LFM3's sandwich norm: a plain RMSNorm on the block output before it joins the residual
-        # stream, so it becomes the skip input of the next SkipLayerNorm. LFM2 layers have none.
-        if norm is None:
+        # stream, so it becomes the skip input of the next SkipLayerNorm. LFM2 layers have none, and transformers'
+        # LFM3 has an Identity without use_sandwich_norm.
+        if norm is None or isinstance(norm, torch.nn.Identity):
             return
         root_input = self.layernorm_attrs["root_input"]
         self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
@@ -273,7 +274,8 @@ class LFM3Model(LFM2Model):
     - RoPE per attention layer type (nested `rope_parameters`). The full-attention layers rotate only
       a prefix of the frequencies of the full head dim and leave a zero-frequency tail, like Gemma4's
       proportional RoPE, so the tail is baked into a full-width cos/sin cache;
-    - a sigmoid output gate per head (`gate_proj`) applied before `o_proj`;
+    - a sigmoid output gate per head (`g_proj` in transformers, `gate_proj` in the checkpoints' code) applied
+      before `o_proj`;
     - sandwich norms (`post_operator_norm`, `post_ffn_norm`), see `LFM2Model.make_post_norm`.
 
     d1-2B's full-attention layers read the whole prompt both ways; its other layers stay causal.
@@ -423,11 +425,15 @@ class LFM3Model(LFM2Model):
         return attributes
 
     def make_attention_output_proj(self, layer_id, attention, root_input, **kwargs):
+        # transformers' g_proj is None without use_attention_gate; the checkpoints' code calls it gate_proj.
+        gate_proj = attention.g_proj if hasattr(attention, "g_proj") else attention.gate_proj
+        if gate_proj is None:
+            return super().make_attention_output_proj(layer_id, attention, root_input, **kwargs)
         # attn_output * sigmoid(gate_proj(x)), one gate per head, broadcast over head_dim
         basename = f"/model/layers.{layer_id}/attn/gate"
         gate_shape = self.make_hidden_state_shape(last_dim=self.num_attn_heads)
         lead = [0] * (len(gate_shape) - 1)
-        gate_name = self.make_matmul(attention.gate_proj, f"{basename}/MatMul", root_input)
+        gate_name = self.make_matmul(gate_proj, f"{basename}/MatMul", root_input)
         self.make_sigmoid(f"{basename}/Sigmoid", f"{gate_name}/output_0", self.io_dtype, gate_shape)
         self.make_reshape(
             f"{basename}/Reshape_gate",
