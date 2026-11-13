@@ -133,7 +133,8 @@ TEST(NativeDeviceMemoryBudgetTest, RejectsMissingBaselineHeadroomInvalidFactorsA
                std::overflow_error);
 }
 
-TEST(NativeDeviceMemoryBudgetTest, SharedInitializationPreservesMemoryControlsWhenPolicyIsNormalizedOrCachingIsInactive) {
+TEST(NativeDeviceMemoryBudgetTest,
+     SharedInitializationPreservesMemoryControlsWhenPolicyIsNormalizedOrCachingIsInactive) {
   for (int inactive = 0; inactive < 3; ++inactive) {
     SCOPED_TRACE(inactive);
     CountingCudaDevice device;

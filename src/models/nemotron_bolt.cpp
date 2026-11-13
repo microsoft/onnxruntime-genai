@@ -133,7 +133,8 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
       Require(!batching->prefix_caching.value_or(false), "prefix caching requires a windowed drafter");
     auto storage = memory_budget_.ConfigurePrefixCache(
         *config_, config_->model.dflash2.sliding_window > 0 ? nullptr : "prefix caching requires a windowed drafter");
-    if (storage) prefix_cache_ = std::make_unique<StateCheckpointCache>(std::move(storage), kBoltVerifyRows, "nemotron_bolt");
+    if (storage)
+      prefix_cache_ = std::make_unique<StateCheckpointCache>(std::move(storage), kBoltVerifyRows, "nemotron_bolt");
     config_->engine.dynamic_batching.reset();
   }
   Require((!config_->engine.static_batching || config_->engine.static_batching->max_batch_size == 1) &&

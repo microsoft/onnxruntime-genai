@@ -214,9 +214,9 @@ struct Dflash2Drafter {
   static size_t PrefixCheckpointBytes(const Config& config, size_t paged_block_size,
                                       ONNXTensorElementDataType cache_type);
   bool CanCapturePrefix(const Request* request, size_t token_count) const;
-  std::shared_ptr<const Dflash2PrefixCheckpoint> CapturePrefix(const Request* request,
-                                                               size_t token_count,
-                                                               std::shared_ptr<const PagedWindowPrefixCheckpoint> target_window = {});
+  std::shared_ptr<const Dflash2PrefixCheckpoint> CapturePrefix(
+      const Request* request, size_t token_count,
+      std::shared_ptr<const PagedWindowPrefixCheckpoint> target_window = {});
 
   /**
    * @brief Ingests every served feed's context and drafts for the ones that asked.
