@@ -102,7 +102,7 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       throw std::runtime_error("WindowedPositionInputs::Update requires next_tokens size to be a positive multiple of window_size");
     }
     num_windows_ = next_tokens.size() / window_size_;
-    auto tokens_cpu = next_tokens.CpuSpan();
+    auto tokens_cpu = next_tokens.CopyDeviceToCpu();
     valid_begin_ = 0;
     valid_end_ = tokens_cpu.size();
     if (model_.config_->model.decoder.sliding_window->alignment == "left") {

@@ -926,6 +926,81 @@ TEST_P(WindowedPositionInputsTest, RejectsInvalidWindowDimensionsAndShortInput) 
 
 INSTANTIATE_TEST_SUITE_P(IntTypes, WindowedPositionInputsTest, testing::Bool());
 
+TEST(WindowedInputIdsTest, HandlesOneTokenWindowAndAlignmentEdgePastSequenceLength) {
+  auto make_state = [](int window_size, const std::string& alignment,
+                       std::shared_ptr<PositionTestModel>& out_model,
+                       std::shared_ptr<GeneratorParams>& out_params) {
+    out_model = std::make_shared<PositionTestModel>(false, 1, 1);
+    out_model->config_->model.decoder.inputs.input_ids = "mask32";
+    out_model->config_->model.decoder.inputs.total_sequence_length = "mask32";
+    out_model->config_->model.decoder.inputs.past_sequence_length = "pos32";
+    Config::Model::Decoder::SlidingWindow sw{};
+    sw.window_size = window_size;
+    sw.alignment = alignment;
+    sw.slide_inputs = true;
+    out_model->config_->model.decoder.sliding_window = sw;
+    out_params = std::make_shared<GeneratorParams>(*out_model);
+    return std::make_unique<PositionTestState>(*out_params, *out_model);
+  };
+
+  auto run_update = [](InputIDs& ids, GeneratorParams& params, std::initializer_list<int32_t> vals) {
+    auto span = params.p_device->Allocate<int32_t>(vals.size());
+    std::copy(vals.begin(), vals.end(), span.CpuSpan().begin());
+    ids.Update(span);
+  };
+
+  // 1. window_size=1 with a 1-token first update allocates value_ without null dereference.
+  {
+    std::shared_ptr<PositionTestModel> model;
+    std::shared_ptr<GeneratorParams> params;
+    auto state = make_state(1, "right", model, params);
+    auto ids = CreateInputIDs(*state);
+    ids->Add();
+
+    run_update(*ids, *params, {7});
+    ASSERT_NE(ids->Get(), nullptr);
+    EXPECT_EQ(ids->Get()->GetTensorData<int32_t>()[0], 7);
+    EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 0);
+
+    run_update(*ids, *params, {9});
+    EXPECT_EQ(ids->Get()->GetTensorData<int32_t>()[0], 9);
+    EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 1);
+
+    run_update(*ids, *params, {10});
+    EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 2);
+  }
+
+  // 2. Right-aligned [0, 0, 2, 3, 4, 5] counts 4 valid tokens for past_sequence_length.
+  {
+    std::shared_ptr<PositionTestModel> model;
+    std::shared_ptr<GeneratorParams> params;
+    auto state = make_state(3, "right", model, params);
+    auto ids = CreateInputIDs(*state);
+    ids->Add();
+
+    run_update(*ids, *params, {0, 0, 2, 3, 4, 5});
+    run_update(*ids, *params, {0, 0, 2, 3, 4, 5});
+    run_update(*ids, *params, {8});
+    EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 4);
+    run_update(*ids, *params, {9});
+    EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 5);
+  }
+
+  // 3. Left-aligned [0, 3, 4, 5, 0, 0] preserves leading BOS==0 and counts 4 valid tokens.
+  {
+    std::shared_ptr<PositionTestModel> model;
+    std::shared_ptr<GeneratorParams> params;
+    auto state = make_state(3, "left", model, params);
+    auto ids = CreateInputIDs(*state);
+    ids->Add();
+
+    run_update(*ids, *params, {0, 3, 4, 5, 0, 0});
+    run_update(*ids, *params, {0, 3, 4, 5, 0, 0});
+    run_update(*ids, *params, {8});
+    EXPECT_EQ(state->GetInput("pos32")->GetTensorData<int32_t>()[0], 4);
+  }
+}
+
 TEST(LogitsAllPadTest, SlicesValidBoundsOnAllPadSequences) {
   auto base_model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
   const size_t vocab_size = static_cast<size_t>(base_model->config_->model.vocab_size);

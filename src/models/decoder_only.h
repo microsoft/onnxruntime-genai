@@ -78,11 +78,12 @@ struct DecoderOnly_State : State {
   DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
                                     DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid);
 
-  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length,
+                           DeviceSpan<int32_t> position_tokens = {});
 
   const DecoderOnly_Model& model_;
 
-  std::unique_ptr<InputIDs> input_ids_{CreateInputIDs(*this)};
+  DefaultInputIDs input_ids_{*this};
   Logits logits_{*this};
   std::unique_ptr<KeyValueCache> kv_cache_;
   std::unique_ptr<RecurrentState> recurrent_state_;
