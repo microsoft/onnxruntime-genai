@@ -370,7 +370,9 @@ std::vector<int64_t> NemotronBoltState::Verify(std::span<const int32_t> tokens, 
   cpu_in[2 * kBoltVerifyRows] = static_cast<int32_t>(length_ + kBoltVerifyRows - 1);
   cpu_in[2 * kBoltVerifyRows + 4] = state_row_;
   verify_inputs_span_.CopyCpuToDevice();
-  State::Run(*bolt_.session_, true, 8, 0, nullptr);
+  // Keep the fixed-R8 target uncaptured: GQA may request workspace that the plugin CUDA EP
+  // cannot grow while a stream is capturing. The DFlash drafter still uses graph replay.
+  State::Run(*bolt_.session_, false, 8, 0, nullptr);
   ++stats_.target_forward_passes;
   if (!want_predictions) return {};
   auto cpu = pred_ids_span_.CopyDeviceToCpu();
