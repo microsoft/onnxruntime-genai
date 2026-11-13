@@ -5,7 +5,6 @@
 #include "model.h"
 #include "dflash2_drafter.h"
 #include <deque>
-#include <optional>
 
 namespace Generators {
 
@@ -16,10 +15,6 @@ struct NemotronBoltTestAccess;
 inline constexpr size_t kBoltVerifyRows = 8;
 inline constexpr size_t kBoltDefaultPrefillChunkRows = 4096;
 
-// Rows per dynamic-prefill target pass from search.chunk_size (genai_config.json or set_search_options).
-// Values <= 8 select the fixed R8 path; larger values are capped to the KV capacity minus the
-// verification scratch.
-size_t NemotronBoltPrefillChunkRows(std::optional<size_t> configured, size_t capacity);
 size_t NemotronBoltVerifyPrefixRows(size_t position);
 size_t NemotronBoltVerifyUsableRows(size_t position, size_t capacity, int max_length);
 void ValidateNemotronBoltSearch(const GeneratorParams& params);
@@ -52,6 +47,7 @@ struct NemotronBoltModel : Model {
   size_t capacity_{};
   size_t aux_width_{};
   size_t target_rows_{kBoltVerifyRows};
+  size_t prefill_chunk_rows_{kBoltDefaultPrefillChunkRows};
   bool single_token_decode_{};
   bool dynamic_prefill_{};
   bool has_logit_rows_{};
@@ -109,7 +105,6 @@ struct NemotronBoltState : State {
   std::unique_ptr<Tensor> prefill_aux_;
   std::unique_ptr<Request> request_;
   size_t length_{};
-  size_t prefill_chunk_rows_{kBoltVerifyRows};
   size_t verified_rows_{};
   int32_t state_row_{};
   int32_t anchor_{};

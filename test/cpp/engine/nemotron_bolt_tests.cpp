@@ -652,6 +652,7 @@ TEST(NemotronBolt, RejectsUnsupportedSearchInsteadOfIgnoringIt) {
       [](auto& p) { p.speculative.min_adaptive_k = 2; },
       [](auto& p) { p.speculative.cooldown = true; },
       [](auto& p) { p.speculative.max_draft_tokens = 4; },
+      [](auto& p) { p.search.chunk_size = 8; },
       [](auto& p) { p.use_graph_capture = false; }};
   for (const auto& change : changes) {
     auto invalid = std::make_shared<GeneratorParams>(config);
@@ -671,26 +672,6 @@ TEST(NemotronBolt, RejectsUnsupportedSearchInsteadOfIgnoringIt) {
   invalid_sliding->use_graph_capture = true;
   EXPECT_THROW(ValidateNemotronBoltSearch(*invalid_sliding), std::runtime_error);
   EXPECT_THROW(CreateSearch(*invalid_sliding), std::runtime_error);
-}
-
-TEST(NemotronBolt, PrefillChunkRowsFollowSearchChunkSize) {
-  constexpr size_t capacity = 135168;
-  Config config;
-  config.model.type = "nemotron_bolt";
-  config.model.dflash2.sliding_window = 1024;
-  config.speculative.max_draft_tokens = 7;
-  config.search.chunk_size = 2048;
-  auto params = std::make_shared<GeneratorParams>(config);
-  params->use_graph_capture = true;
-  EXPECT_NO_THROW(ValidateNemotronBoltSearch(*params));
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(std::nullopt, capacity), kBoltDefaultPrefillChunkRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{0}, capacity), kBoltDefaultPrefillChunkRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{2048}, capacity), 2048u);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{1}, capacity), kBoltVerifyRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{8}, capacity), kBoltVerifyRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(size_t{1} << 20, capacity), capacity - kBoltVerifyRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(std::nullopt, 1024), 1024u - kBoltVerifyRows);
-  EXPECT_EQ(NemotronBoltPrefillChunkRows(std::nullopt, 12), kBoltVerifyRows);
 }
 
 TEST(NemotronBolt, TargetOnlySearchDoesNotRequireCapture) {
