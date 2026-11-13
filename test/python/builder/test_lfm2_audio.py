@@ -179,6 +179,7 @@ def _audio_builder(tmp_path, extra_options=None, model_name_or_path=None):
     model.cache_dir = str(tmp_path / "cache")
     model.hf_token = True
     model.extra_options = extra_options or {}
+    model.revision = model.extra_options.get("base_revision")
     model.model_name_or_path = model_name_or_path or str(tmp_path)
     return model
 
@@ -246,12 +247,13 @@ def test_lfm2_audio_load_weights_downloads_the_checkpoint_named_by_the_config(mo
     hub.snapshot_download = fake_snapshot_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
 
-    builder = _audio_builder(tmp_path, model_name_or_path="LiquidAI/LFM2.5-Audio-1.5B")
+    builder = _audio_builder(tmp_path, {"base_revision": "0123abcd"}, model_name_or_path="LiquidAI/LFM2.5-Audio-1.5B")
     loaded = builder.load_weights("")
 
     assert type(loaded).__name__ == "Lfm2ForCausalLM"
     assert asked[0][0] == "LiquidAI/LFM2.5-Audio-1.5B"
     assert asked[0][1]["cache_dir"] == builder.cache_dir
+    assert asked[0][1]["revision"] == "0123abcd"
 
 
 def test_lfm2_audio_load_weights_prefers_a_local_input_path(monkeypatch, tmp_path):

@@ -36,14 +36,17 @@ struct Lfm2AudioMelConfig {
 int64_t Lfm2AudioNumMelFrames(int64_t num_samples, const Lfm2AudioMelConfig& config);
 int64_t Lfm2AudioNumValidMelFrames(int64_t num_samples, const Lfm2AudioMelConfig& config);
 
+// Helpers shared with Lfm3AudioProcessor take `processor_name`, which starts their error messages.
+
 // Decoder tokens one clip contributes: the encoder subsamples the mel frames by subsampling_factor
 // with ceil rounding (three stride-2 convolutions with padding 1 for the shipped models).
-int64_t Lfm2AudioNumTokens(int64_t num_mel_frames, int64_t subsampling_factor);
+int64_t Lfm2AudioNumTokens(int64_t num_mel_frames, int64_t subsampling_factor, const char* processor_name);
 
 // torchaudio.functional.resample with its defaults (Hann-windowed sinc, lowpass_filter_width 6,
 // rolloff 0.99), which is what the reference's ChatState.add_audio brings every clip to the
 // encoder's rate with, upwards as well as downwards.
-std::vector<float> ResampleLfm2Audio(const float* pcm, int64_t num_samples, int64_t source_rate, int64_t target_rate);
+std::vector<float> ResampleLfm2Audio(const float* pcm, int64_t num_samples, int64_t source_rate, int64_t target_rate,
+                                     const char* processor_name);
 
 // Computes the normalized log-mel spectrogram of one mono clip, time-major [num_frames, num_mels],
 // the layout the encoder's mel_spectrogram input takes. Throws if the clip is too short to
@@ -54,7 +57,17 @@ std::vector<float> ComputeLfm2AudioMel(const float* pcm, int64_t num_samples, co
 // Splits the prompt at each marker. Throws unless the prompt holds exactly one marker per clip, the
 // rule the vision processor applies to <image>, so the encoder features and the placeholders can
 // never be misaligned or silently dropped. Returns num_clips + 1 text segments.
-std::vector<std::string> SplitLfm2AudioPrompt(const std::string& prompt, size_t num_clips);
+std::vector<std::string> SplitLfm2AudioPrompt(const std::string& prompt, size_t num_clips, const char* processor_name);
+
+// Decodes clip `index` to mono PCM at `sample_rate`, resampled with ResampleLfm2Audio.
+std::vector<float> DecodeLfm2AudioClip(const Audios& audios, size_t index, int64_t sample_rate, const char* processor_name);
+
+// The prompt's text tokenized segment by segment, with each clip's placeholders spliced between.
+std::vector<int32_t> MakeLfm2AudioPromptTokens(const Tokenizer& tokenizer, const std::vector<std::string>& segments,
+                                               const std::vector<int64_t>& tokens_per_clip, int32_t audio_token_id);
+
+// Adds the staged mel tensor as audio_embeds, cast to the speech model's input type.
+void AddLfm2AudioEmbeds(std::unique_ptr<OrtValue> batch, ONNXTensorElementDataType type, NamedTensors& named_tensors);
 
 struct Lfm2AudioProcessor : Processor {
   Lfm2AudioProcessor(Config& config, const SessionInfo& session_info);
@@ -72,7 +85,6 @@ struct Lfm2AudioProcessor : Processor {
   // Decodes clip `index` to mono PCM at the encoder's sample rate and turns it into log-mel frames.
   ClipMel ComputeClipMel(const Audios& audios, size_t index) const;
 
-  // The prompt's text tokenized segment by segment, with each clip's placeholders spliced between.
   std::vector<int32_t> MakePromptTokens(const Tokenizer& tokenizer, const std::vector<std::string>& segments,
                                         const std::vector<ClipMel>& clips) const;
 

@@ -1115,7 +1115,8 @@ void Generator::RewindToLength(size_t new_length) {
   if (!state_->SupportsRewind())
     throw std::runtime_error("RewindTo is not supported for " + model_type + ".");
   if (model_type == "whisper" || model_type == "phi3v" || model_type == "decoder-pipeline" ||
-      ModelType::IsLFM2(model_type) || model_type == "lfm2_vl" || model_type == "lfm2_audio")
+      ModelType::IsLFM2(model_type) || model_type == "lfm2_vl" || model_type == "lfm3_vl" ||
+      model_type == "lfm2_audio" || model_type == "lfm3_audio")
     throw std::runtime_error("RewindTo is currently not supported for " + model_type + ".");
   const size_t current_length = search_->GetSequenceLength();
   if (new_length > current_length)

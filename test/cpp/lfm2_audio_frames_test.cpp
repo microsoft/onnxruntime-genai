@@ -20,6 +20,7 @@ namespace {
 
 constexpr Lfm2AudioMelConfig kMelConfig{};  // settings of the published checkpoints
 constexpr int64_t kSubsamplingFactor = 8;
+constexpr char kProcessorName[] = "Lfm2AudioProcessor";
 
 template <typename Fn>
 std::string CaptureThrowMessage(Fn&& fn) {
@@ -56,14 +57,14 @@ TEST(Lfm2AudioFramesTest, ClipShorterThanTheWindowStillHasFrames) {
 }
 
 TEST(Lfm2AudioFramesTest, TokensRoundUpToWholeEncoderFrames) {
-  EXPECT_EQ(Lfm2AudioNumTokens(8, kSubsamplingFactor), 1);
-  EXPECT_EQ(Lfm2AudioNumTokens(9, kSubsamplingFactor), 2);
-  EXPECT_EQ(Lfm2AudioNumTokens(101, kSubsamplingFactor), 13);
-  EXPECT_EQ(Lfm2AudioNumTokens(0, kSubsamplingFactor), 0);
+  EXPECT_EQ(Lfm2AudioNumTokens(8, kSubsamplingFactor, kProcessorName), 1);
+  EXPECT_EQ(Lfm2AudioNumTokens(9, kSubsamplingFactor, kProcessorName), 2);
+  EXPECT_EQ(Lfm2AudioNumTokens(101, kSubsamplingFactor, kProcessorName), 13);
+  EXPECT_EQ(Lfm2AudioNumTokens(0, kSubsamplingFactor, kProcessorName), 0);
 }
 
 TEST(Lfm2AudioFramesTest, TokensRejectANonPositiveSubsamplingFactor) {
-  EXPECT_NE(CaptureThrowMessage([] { Lfm2AudioNumTokens(64, 0); }).find("subsampling_factor must be positive"),
+  EXPECT_NE(CaptureThrowMessage([] { Lfm2AudioNumTokens(64, 0, kProcessorName); }).find("subsampling_factor must be positive"),
             std::string::npos);
 }
 
@@ -120,7 +121,7 @@ TEST(Lfm2AudioMelTest, RejectsAWindowLongerThanTheFftSize) {
 }
 
 TEST(Lfm2AudioPromptTest, SplitsAroundEveryMarker) {
-  const auto segments = SplitLfm2AudioPrompt("before <|audio|> middle <|audio|> after", 2);
+  const auto segments = SplitLfm2AudioPrompt("before <|audio|> middle <|audio|> after", 2, kProcessorName);
   ASSERT_EQ(segments.size(), 3u);
   EXPECT_EQ(segments[0], "before ");
   EXPECT_EQ(segments[1], " middle ");
@@ -130,7 +131,7 @@ TEST(Lfm2AudioPromptTest, SplitsAroundEveryMarker) {
 TEST(Lfm2AudioPromptTest, KeepsEmptySegmentsAroundAdjacentMarkers) {
   // Adjacent markers and a prompt that is nothing but a marker still need their empty text segments,
   // so the clips stay in order and nothing is dropped.
-  const auto segments = SplitLfm2AudioPrompt("<|audio|><|audio|>", 2);
+  const auto segments = SplitLfm2AudioPrompt("<|audio|><|audio|>", 2, kProcessorName);
   ASSERT_EQ(segments.size(), 3u);
   EXPECT_EQ(segments[0], "");
   EXPECT_EQ(segments[1], "");
@@ -138,41 +139,41 @@ TEST(Lfm2AudioPromptTest, KeepsEmptySegmentsAroundAdjacentMarkers) {
 }
 
 TEST(Lfm2AudioPromptTest, TextOnlyPromptWithNoClipsIsOneSegment) {
-  const auto segments = SplitLfm2AudioPrompt("no audio here", 0);
+  const auto segments = SplitLfm2AudioPrompt("no audio here", 0, kProcessorName);
   ASSERT_EQ(segments.size(), 1u);
   EXPECT_EQ(segments[0], "no audio here");
 }
 
 TEST(Lfm2AudioPromptTest, RejectsAMarkerCountThatDoesNotMatchTheClips) {
-  EXPECT_NE(CaptureThrowMessage([] { SplitLfm2AudioPrompt("only text", 1); })
+  EXPECT_NE(CaptureThrowMessage([] { SplitLfm2AudioPrompt("only text", 1, kProcessorName); })
                 .find("contains 0 <|audio|> markers but 1 audio clips"),
             std::string::npos);
-  EXPECT_NE(CaptureThrowMessage([] { SplitLfm2AudioPrompt("<|audio|> and <|audio|>", 1); })
+  EXPECT_NE(CaptureThrowMessage([] { SplitLfm2AudioPrompt("<|audio|> and <|audio|>", 1, kProcessorName); })
                 .find("contains 2 <|audio|> markers but 1 audio clips"),
             std::string::npos);
-  EXPECT_NE(CaptureThrowMessage([] { SplitLfm2AudioPrompt("<|audio|>", 0); })
+  EXPECT_NE(CaptureThrowMessage([] { SplitLfm2AudioPrompt("<|audio|>", 0, kProcessorName); })
                 .find("contains 1 <|audio|> markers but 0 audio clips"),
             std::string::npos);
 }
 
 TEST(Lfm2AudioResampleTest, SameRateIsACopy) {
   const std::vector<float> samples{0.1f, -0.2f, 0.3f};
-  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 3, 16000, 16000), samples);
+  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 3, 16000, 16000, kProcessorName), samples);
 }
 
 TEST(Lfm2AudioResampleTest, LengthIsTheCeilingOfTheRateRatio) {
   // torchaudio trims to ceil(target * num_samples / source), up as well as down.
   const std::vector<float> samples(1001, 0.0f);
-  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 1001, 44100, 16000).size(), 364u);
-  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 1001, 48000, 16000).size(), 334u);
-  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 1001, 8000, 16000).size(), 2002u);
+  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 1001, 44100, 16000, kProcessorName).size(), 364u);
+  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 1001, 48000, 16000, kProcessorName).size(), 334u);
+  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 1001, 8000, 16000, kProcessorName).size(), 2002u);
 }
 
 TEST(Lfm2AudioResampleTest, KeepsAConstantSignalConstantAwayFromTheEdges) {
   // The kernels of every output phase sum to one, so only the zero padding at the ends shows.
   const std::vector<float> samples(4410, 0.5f);
   for (const int64_t source_rate : {8000, 22050, 44100}) {
-    const auto resampled = ResampleLfm2Audio(samples.data(), 4410, source_rate, 16000);
+    const auto resampled = ResampleLfm2Audio(samples.data(), 4410, source_rate, 16000, kProcessorName);
     for (size_t i = resampled.size() / 4; i < 3 * resampled.size() / 4; ++i) {
       ASSERT_NEAR(resampled[i], 0.5f, 2e-3f) << source_rate << " Hz, sample " << i;
     }
@@ -181,7 +182,7 @@ TEST(Lfm2AudioResampleTest, KeepsAConstantSignalConstantAwayFromTheEdges) {
 
 TEST(Lfm2AudioResampleTest, RejectsARateThatIsNotPositive) {
   const std::vector<float> samples(16, 0.0f);
-  EXPECT_NE(CaptureThrowMessage([&] { ResampleLfm2Audio(samples.data(), 16, 0, 16000); }).find("cannot resample"),
+  EXPECT_NE(CaptureThrowMessage([&] { ResampleLfm2Audio(samples.data(), 16, 0, 16000, kProcessorName); }).find("cannot resample"),
             std::string::npos);
 }
 

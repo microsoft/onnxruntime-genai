@@ -16,6 +16,8 @@ namespace Generators {
 
 namespace {
 
+constexpr char kProcessorName[] = "Lfm2AudioProcessor";
+
 // The list overload of MultiModalProcessor::Process fills payload.prompts and leaves payload.prompt
 // empty. Batching is not supported, so a single-entry list is the prompt and anything longer is an error
 // rather than silently dropped text.
@@ -85,17 +87,18 @@ int64_t Lfm2AudioNumValidMelFrames(int64_t num_samples, const Lfm2AudioMelConfig
   return (padded - config.fft_size) / config.hop_length;
 }
 
-int64_t Lfm2AudioNumTokens(int64_t num_mel_frames, int64_t subsampling_factor) {
+int64_t Lfm2AudioNumTokens(int64_t num_mel_frames, int64_t subsampling_factor, const char* processor_name) {
   if (subsampling_factor <= 0) {
-    throw std::runtime_error("Lfm2AudioProcessor: subsampling_factor must be positive.");
+    throw std::runtime_error(std::string(processor_name) + ": subsampling_factor must be positive.");
   }
   return (num_mel_frames + subsampling_factor - 1) / subsampling_factor;
 }
 
-std::vector<float> ResampleLfm2Audio(const float* pcm, int64_t num_samples, int64_t source_rate, int64_t target_rate) {
+std::vector<float> ResampleLfm2Audio(const float* pcm, int64_t num_samples, int64_t source_rate, int64_t target_rate,
+                                     const char* processor_name) {
   if (source_rate <= 0 || target_rate <= 0) {
-    throw std::runtime_error("Lfm2AudioProcessor: cannot resample from " + std::to_string(source_rate) + " Hz to " +
-                             std::to_string(target_rate) + " Hz.");
+    throw std::runtime_error(std::string(processor_name) + ": cannot resample from " + std::to_string(source_rate) +
+                             " Hz to " + std::to_string(target_rate) + " Hz.");
   }
   if (source_rate == target_rate) {
     return {pcm, pcm + num_samples};
@@ -111,9 +114,18 @@ std::vector<float> ResampleLfm2Audio(const float* pcm, int64_t num_samples, int6
   const int64_t width = static_cast<int64_t>(std::ceil(kLowpassFilterWidth * static_cast<double>(orig) / base_freq));
   const int64_t kernel_size = 2 * width + orig;
 
-  // One kernel per output phase, built in double and stored in float as torchaudio does.
-  std::vector<float> kernels(static_cast<size_t>(target * kernel_size));
-  for (int64_t phase = 0; phase < target; ++phase) {
+  std::vector<float> padded(static_cast<size_t>(width + num_samples + width + orig), 0.0f);
+  std::copy(pcm, pcm + num_samples, padded.begin() + width);
+
+  // ceil(target * num_samples / orig) samples; the strided convolution makes a few more, which
+  // torchaudio trims.
+  const int64_t num_outputs = (target * num_samples + orig - 1) / orig;
+  std::vector<float> resampled(static_cast<size_t>(num_outputs));
+
+  // Output i uses phase i % target's kernel, built in double and stored in float as torchaudio does.
+  // Built one phase at a time: all target kernels together can take gigabytes for an odd source rate.
+  std::vector<float> kernel(static_cast<size_t>(kernel_size));
+  for (int64_t phase = 0; phase < std::min(target, num_outputs); ++phase) {
     for (int64_t k = 0; k < kernel_size; ++k) {
       double t = (-static_cast<double>(phase) / static_cast<double>(target) +
                   static_cast<double>(k - width) / static_cast<double>(orig)) *
@@ -122,26 +134,16 @@ std::vector<float> ResampleLfm2Audio(const float* pcm, int64_t num_samples, int6
       const double window = std::pow(std::cos(t * kPi / kLowpassFilterWidth / 2.0), 2.0);
       t *= kPi;
       const double sinc = t == 0.0 ? 1.0 : std::sin(t) / t;
-      kernels[static_cast<size_t>(phase * kernel_size + k)] =
-          static_cast<float>(sinc * window * base_freq / static_cast<double>(orig));
+      kernel[static_cast<size_t>(k)] = static_cast<float>(sinc * window * base_freq / static_cast<double>(orig));
     }
-  }
-
-  std::vector<float> padded(static_cast<size_t>(width + num_samples + width + orig), 0.0f);
-  std::copy(pcm, pcm + num_samples, padded.begin() + width);
-
-  // ceil(target * num_samples / orig) samples; the strided convolution makes a few more, which
-  // torchaudio trims.
-  const int64_t num_outputs = (target * num_samples + orig - 1) / orig;
-  std::vector<float> resampled(static_cast<size_t>(num_outputs));
-  for (int64_t i = 0; i < num_outputs; ++i) {
-    const float* frame = padded.data() + (i / target) * orig;
-    const float* kernel = kernels.data() + (i % target) * kernel_size;
-    float value = 0.0f;
-    for (int64_t k = 0; k < kernel_size; ++k) {
-      value += frame[k] * kernel[k];
+    for (int64_t i = phase; i < num_outputs; i += target) {
+      const float* frame = padded.data() + (i / target) * orig;
+      float value = 0.0f;
+      for (int64_t k = 0; k < kernel_size; ++k) {
+        value += frame[k] * kernel[static_cast<size_t>(k)];
+      }
+      resampled[static_cast<size_t>(i)] = value;
     }
-    resampled[static_cast<size_t>(i)] = value;
   }
   return resampled;
 }
@@ -220,7 +222,7 @@ std::vector<float> ComputeLfm2AudioMel(const float* pcm, int64_t num_samples, co
   return mel;
 }
 
-std::vector<std::string> SplitLfm2AudioPrompt(const std::string& prompt, size_t num_clips) {
+std::vector<std::string> SplitLfm2AudioPrompt(const std::string& prompt, size_t num_clips, const char* processor_name) {
   const std::string marker{kLfm2AudioMarker};
   std::vector<std::string> segments;
   size_t position = 0;
@@ -235,11 +237,70 @@ std::vector<std::string> SplitLfm2AudioPrompt(const std::string& prompt, size_t 
   // decoder positions.
   const size_t num_markers = segments.size() - 1;
   if (num_markers != num_clips) {
-    throw std::runtime_error("Lfm2AudioProcessor: the prompt contains " + std::to_string(num_markers) + " " + marker +
+    throw std::runtime_error(std::string(processor_name) + ": the prompt contains " + std::to_string(num_markers) + " " + marker +
                              " markers but " + std::to_string(num_clips) + " audio clips were provided. Put exactly one " +
                              marker + " in the prompt per clip.");
   }
   return segments;
+}
+
+std::vector<float> DecodeLfm2AudioClip(const Audios& audios, size_t index, int64_t sample_rate, const char* processor_name) {
+  // Decoded at the file's own rate and resampled here, the way the reference does it: the decoder's
+  // resampler is a different filter, enough to change a token, and it cannot resample upwards.
+  ort_extensions::OrtxObjectPtr<OrtxTensorResult> decoded;
+  CheckResult(OrtxDecodeAudio(audios.audios_.get(), index, /*target_sample_rate=*/0, /*stereo_to_mono=*/1,
+                              decoded.ToBeAssigned()));
+
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
+  CheckResult(OrtxTensorResultGetAt(decoded.get(), 0, pcm_tensor.ToBeAssigned()));
+  const float* pcm{};
+  const int64_t* pcm_shape{};
+  size_t pcm_dims{};
+  CheckResult(OrtxGetTensorData(pcm_tensor.get(), reinterpret_cast<const void**>(&pcm), &pcm_shape, &pcm_dims));
+
+  int64_t num_samples = 0;
+  if (pcm_dims == 1) {
+    num_samples = pcm_shape[0];
+  } else if (pcm_dims == 2 && pcm_shape[0] == 1) {
+    num_samples = pcm_shape[1];
+  } else {
+    throw std::runtime_error(std::string(processor_name) + ": expected mono PCM from the audio decoder for clip " +
+                             std::to_string(index) + ", got a rank " + std::to_string(pcm_dims) + " tensor.");
+  }
+
+  ort_extensions::OrtxObjectPtr<OrtxTensor> rate_tensor;
+  CheckResult(OrtxTensorResultGetAt(decoded.get(), 1, rate_tensor.ToBeAssigned()));
+  const int64_t* source_rate{};
+  CheckResult(OrtxGetTensorData(rate_tensor.get(), reinterpret_cast<const void**>(&source_rate), nullptr, nullptr));
+
+  return ResampleLfm2Audio(pcm, num_samples, *source_rate, sample_rate, processor_name);
+}
+
+std::vector<int32_t> MakeLfm2AudioPromptTokens(const Tokenizer& tokenizer, const std::vector<std::string>& segments,
+                                               const std::vector<int64_t>& tokens_per_clip, int32_t audio_token_id) {
+  // Text segments are tokenized on their own, as the reference ChatState does, and each clip
+  // contributes one placeholder per encoder frame between them.
+  std::vector<int32_t> input_ids;
+  for (size_t i = 0; i < segments.size(); ++i) {
+    if (!segments[i].empty()) {
+      const std::vector<int32_t> ids = tokenizer.Encode(segments[i].c_str());
+      input_ids.insert(input_ids.end(), ids.begin(), ids.end());
+    }
+    if (i < tokens_per_clip.size()) {
+      input_ids.insert(input_ids.end(), static_cast<size_t>(tokens_per_clip[i]), audio_token_id);
+    }
+  }
+  return input_ids;
+}
+
+void AddLfm2AudioEmbeds(std::unique_ptr<OrtValue> batch, ONNXTensorElementDataType type, NamedTensors& named_tensors) {
+  if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    named_tensors.emplace(std::string(Config::Defaults::AudioEmbedsName), std::make_shared<Tensor>(std::move(batch)));
+  } else {
+    std::unique_ptr<OrtValue> converted;
+    Cast(*batch, converted, *GetDeviceInterface(DeviceType::CPU), type);
+    named_tensors.emplace(std::string(Config::Defaults::AudioEmbedsName), std::make_shared<Tensor>(std::move(converted)));
+  }
 }
 
 Lfm2AudioProcessor::Lfm2AudioProcessor(Config& config, const SessionInfo& session_info)
@@ -286,58 +347,22 @@ Lfm2AudioProcessor::Lfm2AudioProcessor(Config& config, const SessionInfo& sessio
 }
 
 Lfm2AudioProcessor::ClipMel Lfm2AudioProcessor::ComputeClipMel(const Audios& audios, size_t index) const {
-  // Decoded at the file's own rate and resampled here, the way the reference does it: the decoder's
-  // resampler is a different filter, enough to change a token, and it cannot resample upwards.
-  ort_extensions::OrtxObjectPtr<OrtxTensorResult> decoded;
-  CheckResult(OrtxDecodeAudio(audios.audios_.get(), index, /*target_sample_rate=*/0, /*stereo_to_mono=*/1,
-                              decoded.ToBeAssigned()));
-
-  ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
-  CheckResult(OrtxTensorResultGetAt(decoded.get(), 0, pcm_tensor.ToBeAssigned()));
-  const float* pcm{};
-  const int64_t* pcm_shape{};
-  size_t pcm_dims{};
-  CheckResult(OrtxGetTensorData(pcm_tensor.get(), reinterpret_cast<const void**>(&pcm), &pcm_shape, &pcm_dims));
-
-  int64_t num_samples = 0;
-  if (pcm_dims == 1) {
-    num_samples = pcm_shape[0];
-  } else if (pcm_dims == 2 && pcm_shape[0] == 1) {
-    num_samples = pcm_shape[1];
-  } else {
-    throw std::runtime_error("Lfm2AudioProcessor: expected mono PCM from the audio decoder for clip " +
-                             std::to_string(index) + ", got a rank " + std::to_string(pcm_dims) + " tensor.");
-  }
-
-  ort_extensions::OrtxObjectPtr<OrtxTensor> rate_tensor;
-  CheckResult(OrtxTensorResultGetAt(decoded.get(), 1, rate_tensor.ToBeAssigned()));
-  const int64_t* source_rate{};
-  CheckResult(OrtxGetTensorData(rate_tensor.get(), reinterpret_cast<const void**>(&source_rate), nullptr, nullptr));
-
-  const std::vector<float> samples = ResampleLfm2Audio(pcm, num_samples, *source_rate, mel_config_.sample_rate);
+  const std::vector<float> samples = DecodeLfm2AudioClip(audios, index, mel_config_.sample_rate, kProcessorName);
 
   ClipMel clip;
   clip.mel = ComputeLfm2AudioMel(samples.data(), static_cast<int64_t>(samples.size()), mel_config_, clip.num_frames);
-  clip.num_tokens = Lfm2AudioNumTokens(clip.num_frames, subsampling_factor_);
+  clip.num_tokens = Lfm2AudioNumTokens(clip.num_frames, subsampling_factor_, kProcessorName);
   return clip;
 }
 
 std::vector<int32_t> Lfm2AudioProcessor::MakePromptTokens(const Tokenizer& tokenizer,
                                                           const std::vector<std::string>& segments,
                                                           const std::vector<ClipMel>& clips) const {
-  // Text segments are tokenized on their own, as the reference ChatState does, and each clip
-  // contributes one placeholder per encoder frame between them.
-  std::vector<int32_t> input_ids;
-  for (size_t i = 0; i < segments.size(); ++i) {
-    if (!segments[i].empty()) {
-      const std::vector<int32_t> ids = tokenizer.Encode(segments[i].c_str());
-      input_ids.insert(input_ids.end(), ids.begin(), ids.end());
-    }
-    if (i < clips.size()) {
-      input_ids.insert(input_ids.end(), static_cast<size_t>(clips[i].num_tokens), audio_token_id_);
-    }
+  std::vector<int64_t> tokens_per_clip;
+  for (const auto& clip : clips) {
+    tokens_per_clip.push_back(clip.num_tokens);
   }
-  return input_ids;
+  return MakeLfm2AudioPromptTokens(tokenizer, segments, tokens_per_clip, audio_token_id_);
 }
 
 void Lfm2AudioProcessor::AddAudioTensors(const std::vector<ClipMel>& clips, Ort::Allocator& allocator,
@@ -363,13 +388,7 @@ void Lfm2AudioProcessor::AddAudioTensors(const std::vector<ClipMel>& clips, Ort:
     std::copy(clips[i].mel.begin(), clips[i].mel.end(), batch_data + i * static_cast<size_t>(longest * num_mels));
   }
 
-  if (mel_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    named_tensors.emplace(std::string(Config::Defaults::AudioEmbedsName), std::make_shared<Tensor>(std::move(batch)));
-  } else {
-    std::unique_ptr<OrtValue> converted;
-    Cast(*batch, converted, *GetDeviceInterface(DeviceType::CPU), mel_type_);
-    named_tensors.emplace(std::string(Config::Defaults::AudioEmbedsName), std::make_shared<Tensor>(std::move(converted)));
-  }
+  AddLfm2AudioEmbeds(std::move(batch), mel_type_, named_tensors);
   named_tensors.emplace(std::string(Config::Defaults::AudioLengthsName),
                         std::make_shared<Tensor>(MakeInt64Tensor(mel_lengths, {num_clips}, allocator)));
   named_tensors.emplace(std::string(Config::Defaults::AudioSizesName),
@@ -384,7 +403,7 @@ std::unique_ptr<NamedTensors> Lfm2AudioProcessor::Process(const Tokenizer& token
   auto named_tensors = std::make_unique<NamedTensors>();
 
   // With no clips the prompt must not ask for any; the split with zero clips enforces that.
-  const std::vector<std::string> segments = SplitLfm2AudioPrompt(prompt, num_clips);
+  const std::vector<std::string> segments = SplitLfm2AudioPrompt(prompt, num_clips, kProcessorName);
 
   std::vector<ClipMel> clips;
   clips.reserve(num_clips);

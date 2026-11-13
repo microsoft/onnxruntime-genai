@@ -356,6 +356,10 @@ def get_user_content(model_type: str, num_images: int, num_audios: int, prompt: 
         # per projected vision feature, and <|image_end|>, based on the resized image's patch grid.
         image_tags = "".join(["<image>" for _ in range(num_images)])
         content = image_tags + prompt
+    elif model_type == "lfm3_vl":
+        # LFM3-VL: the C++ image processor repeats each <|image|> once per projected vision feature.
+        image_tags = "".join(["<|vision_start|><|image|><|vision_end|>" for _ in range(num_images)])
+        content = image_tags + prompt
     elif model_type == "lfm2_audio":
         # LFM2-Audio: the C++ audio processor replaces each <|audio|> with one placeholder per
         # encoder frame (one per 80 ms of audio) and splices the encoder output in at those positions.

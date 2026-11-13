@@ -314,7 +314,7 @@ def test_embedding_model_matches_transformers(tmp_path, table_dtype, features_dt
     embedding = lfm2_vl_module.LFM2VLEmbedding(
         copy.deepcopy(config), table_dtype, table_dtype, "cpu", str(tmp_path / "cache"), {}
     )
-    embedding.embed_attrs["image_features_dtype"] = features_dtype
+    embedding.embed_attrs["features"].append(("image_features", IMAGE_TOKEN, features_dtype))
     build(embedding, hf_model, tmp_path)
 
     ids = np.array(ids, np.int64)
@@ -409,6 +409,27 @@ def test_loads_the_checkpoint_once(monkeypatch, tmp_path, decoder_options, quant
 
     shared = not decoder_options and not quantized
     assert loads == ([model.vision] if shared else [model.vision, model.decoder])
+
+
+def test_base_revision_reaches_every_checkpoint_read(monkeypatch, tmp_path):
+    config, _ = tiny_lfm2_vl()
+    write_image_processor(tmp_path / "checkpoint")
+    config.name_or_path = str(tmp_path / "checkpoint")
+    mixin, revisions = lfm2_vl_module.ImageProcessingMixin, []
+    read = mixin.get_image_processor_dict
+    monkeypatch.setattr(
+        mixin,
+        "get_image_processor_dict",
+        staticmethod(lambda *a, **kw: revisions.append(kw["revision"]) or read(*a, **kw)),
+    )
+    options = {"exclude_embeds": True, "base_revision": "0123abcd"}
+    model = builder_module.LFM2VLModel(
+        config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", str(tmp_path / "cache"), options
+    )
+
+    # Model.load_weights pins the load to the revision of the part that loads
+    assert [part.revision for part in (model.vision, model.embedding, model.decoder)] == ["0123abcd"] * 3
+    assert revisions == ["0123abcd"]
 
 
 def test_pre_quantized_checkpoint_reaches_only_the_decoder(tmp_path):
