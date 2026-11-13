@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <sstream>
-#include <unordered_map>
 
 namespace Generators {
 
@@ -96,11 +95,6 @@ int GetWindowedKeyValueCacheSize(const Model& model, const Config::Search& searc
 
 namespace {
 
-std::string DescribeMemoryLocation(const OrtMemoryInfo& info) {
-  return info.GetAllocatorName() + ":" + std::to_string(info.GetDeviceId()) +
-         " (memory type " + std::to_string(info.GetMemoryType()) + ")";
-}
-
 std::vector<std::string> MakePastKeyValueInputNames(const Model& model) {
   std::vector<int> kv_layer_indices;
   const auto& key_template = model.config_->model.decoder.inputs.past_key_names;
@@ -152,15 +146,7 @@ bool ShouldUseSharedPastPresentKeyValueCache(State& state) {
 void DefaultKeyValueCacheBase::ValidatePastPresentLocations(
     const std::string& input_name, const std::string& output_name,
     const OrtMemoryInfo& input, const OrtMemoryInfo& output) {
-  // Separate-buffer decode also reuses each present as the next past.
-  if (input.GetAllocatorName() != output.GetAllocatorName() ||
-      input.GetDeviceType() != output.GetDeviceType() ||
-      input.GetDeviceId() != output.GetDeviceId() ||
-      input.GetMemoryType() != output.GetMemoryType()) {
-    throw std::runtime_error("Dense KV cache locations are incompatible: '" + input_name + "' requires " +
-                             DescribeMemoryLocation(input) + ", but '" + output_name + "' is produced on " +
-                             DescribeMemoryLocation(output) + ". Cross-device cache updates are not supported.");
-  }
+  Model::ValidateCacheLocations(input_name, output_name, input, output);
 }
 
 void DefaultKeyValueCacheBase::InitializeCacheAllocations(int kv_cache_quantization_bits) {
@@ -169,45 +155,9 @@ void DefaultKeyValueCacheBase::InitializeCacheAllocations(int kv_cache_quantizat
       (device_type != DeviceType::CPU && device_type != DeviceType::CUDA))
     return;
 
-  const auto& session = model_.session_info_.GetInputSession(input_name_strings_.front());
-  const auto input_names = session.GetInputNames();
-  const auto output_names = session.GetOutputNames();
-  const auto input_locations = session.GetMemoryInfoForInputs();
-  const auto output_locations = session.GetMemoryInfoForOutputs();
-  std::unordered_map<std::string, const OrtMemoryInfo*> inputs, outputs;
-  for (size_t i = 0; i < input_names.size(); ++i)
-    inputs.emplace(input_names[i], input_locations[i]);
-  for (size_t i = 0; i < output_names.size(); ++i)
-    outputs.emplace(output_names[i], output_locations[i]);
-
-  bool has_cpu_cache = false;
-  for (size_t i = 0; i < input_name_strings_.size(); ++i) {
-    const auto input = inputs.find(input_name_strings_[i]);
-    const auto output = outputs.find(output_name_strings_[i]);
-    if (input == inputs.end() || output == outputs.end())
-      throw std::runtime_error("Dense KV cache pair '" + input_name_strings_[i] + "' / '" +
-                               output_name_strings_[i] + "' must belong to the same decoder session.");
-
-    ValidatePastPresentLocations(input->first, output->first, *input->second, *output->second);
-    const auto& location = *output->second;
-    DeviceInterface* device = nullptr;
-    if (location.GetAllocatorName() == "Cpu" &&
-        location.GetDeviceType() == OrtMemoryInfoDeviceType_CPU &&
-        location.GetDeviceId() == 0 && location.GetMemoryType() == OrtMemTypeDefault) {
-      device = GetDeviceInterface(DeviceType::CPU);
-      has_cpu_cache = true;
-    } else if (device_type == DeviceType::CUDA &&
-               location.GetAllocatorName() == "Cuda" &&
-               location.GetDeviceType() == OrtMemoryInfoDeviceType_GPU &&
-               location.GetMemoryType() == OrtMemTypeDefault &&
-               location.GetDeviceId() == model_.p_device_kvcache_->GetAllocator().GetInfo().GetDeviceId()) {
-      device = model_.p_device_kvcache_;
-    } else {
-      throw std::runtime_error("Unsupported dense KV cache location for '" + output->first + "': " +
-                               DescribeMemoryLocation(location));
-    }
-    cache_allocations_.push_back({input->second, output->second, device, nullptr});
-  }
+  cache_allocations_ = model_.GetCacheAllocations(input_name_strings_, output_name_strings_);
+  const bool has_cpu_cache = std::any_of(cache_allocations_.begin(), cache_allocations_.end(),
+                                         [](const auto& allocation) { return allocation.device->GetType() == DeviceType::CPU; });
 
   if (has_cpu_cache && device_type == DeviceType::CUDA &&
       (state_.params_->search.batch_size != 1 || state_.params_->search.num_beams != 1 ||
@@ -217,9 +167,6 @@ void DefaultKeyValueCacheBase::InitializeCacheAllocations(int kv_cache_quantizat
         "CPU/CUDA dense KV colocation requires batch_size=1, num_beams=1, and unquantized, "
         "non-windowed caches with graph capture disabled.");
   }
-
-  for (auto& allocation : cache_allocations_)
-    allocation.allocator = Ort::Allocator::Create(session, *allocation.output_location);
 }
 
 DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)

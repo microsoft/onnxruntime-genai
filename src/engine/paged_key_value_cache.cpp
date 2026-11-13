@@ -520,6 +520,32 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
   return false;
 }
 
+void PagedKeyValueCache::InitializeCacheAllocations(const std::vector<int>& layers) {
+  const auto& decoder = model_->config_->model.decoder;
+  const auto device_type = model_->p_device_kvcache_->GetType();
+  if (!decoder.pipeline.empty() || (device_type != DeviceType::CPU && device_type != DeviceType::CUDA))
+    return;
+
+  std::vector<std::string> inputs, outputs;
+  for (const int layer : layers) {
+    inputs.push_back(ComposeKeyValueName(decoder.inputs.past_key_names, layer));
+    inputs.push_back(ComposeKeyValueName(decoder.inputs.past_value_names, layer));
+    outputs.push_back(ComposeKeyValueName(decoder.outputs.present_key_names, layer));
+    outputs.push_back(ComposeKeyValueName(decoder.outputs.present_value_names, layer));
+  }
+  for (const int layer : layers) {
+    for (const auto& names : {
+             std::pair{decoder.inputs.past_key_scale_names, decoder.outputs.present_key_scale_names},
+             std::pair{decoder.inputs.past_value_scale_names, decoder.outputs.present_value_scale_names}}) {
+      if (!names.first.empty()) {
+        inputs.push_back(ComposeKeyValueName(names.first, layer));
+        outputs.push_back(ComposeKeyValueName(names.second, layer));
+      }
+    }
+  }
+  cache_allocations_ = model_->GetCacheAllocations(inputs, outputs);
+}
+
 PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
                                        size_t auxiliary_bytes_per_block,
                                        size_t auxiliary_reserved_memory_bytes,
@@ -537,6 +563,63 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   const auto dtype = KeyValueCacheType(model_, paged_group);
   const bool prefix_caching_enabled =
       ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block);
+  InitializeCacheAllocations(paged_group.layer_ids);
+  const bool nonprimary = std::any_of(cache_allocations_.begin(), cache_allocations_.end(),
+                                      [&](const auto& allocation) {
+                                        return allocation.device->GetType() != model_->p_device_kvcache_->GetType();
+                                      });
+  const auto& batching = *model_->config_->engine.dynamic_batching;
+  const bool table_template = decoder.inputs.block_table.find('%') != std::string::npos;
+  if (table_template) {
+    if (cache_allocations_.empty())
+      throw std::runtime_error("Per-layer paged block tables require a flat CPU/CUDA decoder.");
+    const auto marker = decoder.inputs.block_table.find("%d");
+    if (marker == std::string::npos || decoder.inputs.block_table.find('%') != marker ||
+        decoder.inputs.block_table.find('%', marker + 2) != std::string::npos) {
+      throw std::runtime_error("Paged block-table names require exactly one %d layer placeholder.");
+    }
+  }
+  if ((nonprimary || table_template) &&
+      (!batching.num_blocks || batching.device_memory_budget_bytes ||
+       IsGraphCaptureEnabled(decoder.session_options) || decoder.sliding_window ||
+       prefix_caching_enabled || auxiliary_bytes_per_block != 0 || auxiliary_reserved_memory_bytes != 0 ||
+       (decoder.state_groups && decoder.state_groups->size() != 1) ||
+       !decoder.inputs.past_key_scale_names.empty() || !decoder.inputs.past_value_scale_names.empty())) {
+    throw std::runtime_error(
+        "Paged colocation with nonprimary pools or per-layer tables requires explicit num_blocks, "
+        "unquantized non-windowed pools, and no capture, prefix caching, hybrid state, auxiliary caches, or automatic budget sizing.");
+  }
+  if (nonprimary && dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 &&
+      dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
+    throw std::runtime_error("CPU/CUDA paged colocation requires unquantized FP16 or BF16 pools.");
+  }
+  if (!cache_allocations_.empty() && !IsGraphCaptureEnabled(decoder.session_options) &&
+      !window_block_table_required_) {
+    std::set<std::string> tables;
+    for (size_t i = 0; i < paged_group.layer_ids.size(); ++i) {
+      const auto name = table_template ? ComposeKeyValueName(decoder.inputs.block_table, paged_group.layer_ids[i])
+                                       : decoder.inputs.block_table;
+      if (!model_->session_info_.HasInput(name)) {
+        if (nonprimary || table_template)
+          throw std::runtime_error("Paged block table was not found: " + name);
+        continue;
+      }
+      const auto& location = model_->session_info_.GetInputMemoryInfo(name);
+      auto& device = model_->GetCacheDevice(location, name);
+      if (nonprimary || table_template) {
+        const auto shape = model_->session_info_.GetInputShape(name);
+        if (model_->session_info_.GetInputDataType(name) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 || shape.size() != 2)
+          throw std::runtime_error("Paged block tables must be rank-two int32 inputs: " + name);
+        for (size_t side = 0; side < 2; ++side) {
+          const auto& cache_name = side == 0 ? decoder.inputs.past_key_names : decoder.inputs.past_value_names;
+          Model::ValidateCacheLocations(ComposeKeyValueName(cache_name, paged_group.layer_ids[i]), name,
+                                        *cache_allocations_[i * 2 + side].input_location, location);
+        }
+      }
+      if (tables.insert(name).second)
+        block_table_bindings_.push_back({name, std::make_unique<Tensor>(&device, Ort::TypeToTensorType<int32_t>)});
+    }
+  }
 
   const auto windowed = WindowedLayers(model, paged_group);
   size_t num_window_blocks = 0;
@@ -588,8 +671,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
         "to hold a cache block after Engine reservations.");
   }
 
-  auto& allocator = model->p_device_kvcache_->GetAllocator();
-  const auto create_payload = [&](const std::vector<int64_t>& shape,
+  const auto create_payload = [&](Ort::Allocator& allocator, const std::vector<int64_t>& shape,
                                   std::unique_ptr<void, Ort::AllocatorDeleter>& storage) {
     if (!model->config_->engine.dynamic_batching->device_memory_budget_bytes) {
       return OrtValue::CreateTensor(allocator, shape, dtype);
@@ -605,7 +687,8 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
     if (!storage) throw std::bad_alloc();
     return OrtValue::CreateTensor(allocator.GetInfo(), storage.get(), bytes, shape, dtype);
   };
-  for (const int layer_id : paged_group.layer_ids) {
+  for (size_t layer_index = 0; layer_index < paged_group.layer_ids.size(); ++layer_index) {
+    const int layer_id = paged_group.layer_ids[layer_index];
     const auto blocks = windowed.count(layer_id) != 0 ? num_window_blocks : num_blocks;
     const auto key_name = ComposeKeyValueName(decoder.inputs.past_key_names, layer_id);
     const auto value_name = ComposeKeyValueName(decoder.inputs.past_value_names, layer_id);
@@ -615,10 +698,12 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
                                                    static_cast<int64_t>(CacheHeadSize(model, key_name))};
     auto value_shape_per_layer = key_shape_per_layer;
     value_shape_per_layer.back() = static_cast<int64_t>(CacheHeadSize(model, value_name));
-    std::unique_ptr<void, Ort::AllocatorDeleter> key_storage(nullptr, Ort::AllocatorDeleter(&allocator));
-    std::unique_ptr<void, Ort::AllocatorDeleter> value_storage(nullptr, Ort::AllocatorDeleter(&allocator));
-    auto key_cache = create_payload(key_shape_per_layer, key_storage);
-    auto value_cache = create_payload(value_shape_per_layer, value_storage);
+    auto& key_allocator = CacheAllocator(layer_index * 2);
+    auto& value_allocator = CacheAllocator(layer_index * 2 + 1);
+    std::unique_ptr<void, Ort::AllocatorDeleter> key_storage(nullptr, Ort::AllocatorDeleter(&key_allocator));
+    std::unique_ptr<void, Ort::AllocatorDeleter> value_storage(nullptr, Ort::AllocatorDeleter(&value_allocator));
+    auto key_cache = create_payload(key_allocator, key_shape_per_layer, key_storage);
+    auto value_cache = create_payload(value_allocator, value_shape_per_layer, value_storage);
     cache_.push_back(LayerCache{
         std::move(key_storage),
         std::move(value_storage),
@@ -637,6 +722,8 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
       }
       const auto input_name = ComposeKeyValueName(input_template, layer_id);
       const auto output_name = ComposeKeyValueName(output_template, layer_id);
+      const size_t allocation_index = paged_group.layer_ids.size() * 2 + scale_cache_.size();
+      auto& allocator = CacheAllocator(allocation_index);
       const auto scale_type = ScaleCacheType(model, input_name, output_name);
       auto scale_shape = key_shape_per_layer;
       scale_shape.pop_back();
@@ -655,7 +742,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
         throw std::bad_alloc();
       }
       auto scale_value = OrtValue::CreateTensor(allocator.GetInfo(), storage.get(), scale_bytes, scale_shape, scale_type);
-      ByteWrapTensor(*model->p_device_kvcache_, *scale_value).Zero();
+      ByteWrapTensor(CacheDevice(allocation_index), *scale_value).Zero();
       scale_cache_.push_back({std::move(storage), std::move(scale_value), input_name, output_name});
     }
   }
@@ -1443,6 +1530,27 @@ std::vector<std::pair<const char*, const char*>> PagedKeyValueCache::OutputNames
   return output_names;
 }
 
+std::pair<OrtValue*, const char*> PagedKeyValueCache::PublishBlockTables(DeviceSpan<int32_t>& data) {
+  if (!block_table_bindings_.empty()) {
+    const auto host = data.CpuSpan();
+    const auto shape = block_table_bindings_.front().tensor->GetOrtTensor()->GetTensorTypeAndShapeInfo()->GetShape();
+    data.CopyCpuToDevice();
+    for (size_t i = 1; i < block_table_bindings_.size(); ++i) {
+      auto& tensor = *block_table_bindings_[i].tensor;
+      tensor.CreateTensor(shape);
+      auto mirror = tensor.GetDeviceSpan<int32_t>();
+      std::copy(host.begin(), host.end(), mirror.CpuSpan().begin());
+      mirror.CopyCpuToDevice();
+    }
+    return {block_table_bindings_.front().tensor->GetOrtTensor(), block_table_bindings_.front().name.c_str()};
+  }
+  if (graph_capture_) {
+    data.CopyCpuToDevice();
+    return {block_tables_tensor_->GetOrtTensor(), model_->config_->model.decoder.inputs.block_table.c_str()};
+  }
+  return {block_tables_value_.get(), model_->config_->model.decoder.inputs.block_table.c_str()};
+}
+
 void PagedKeyValueCache::FillBlockTables(const std::vector<std::shared_ptr<Request>>& requests,
                                          bool windowed, int32_t* data, size_t columns) {
   constexpr int32_t block_tables_pad_value = -1;
@@ -1492,7 +1600,13 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vec
   std::vector<int64_t> shape = {static_cast<int64_t>(requests.size()), static_cast<int64_t>(max_blocks)};
   int32_t* block_table_data = nullptr;
   DeviceSpan<int32_t> device_span;
-  if (graph_capture_) {
+  if (!block_table_bindings_.empty()) {
+    block_table_columns_ = max_blocks;
+    auto& tensor = *block_table_bindings_.front().tensor;
+    tensor.CreateTensor(shape);
+    device_span = tensor.GetDeviceSpan<int32_t>();
+    block_table_data = device_span.CpuSpan().data();
+  } else if (graph_capture_) {
     // Round the column count up to a power of two so that a run producing steadily longer sequences
     // settles on a handful of distinct shapes instead of a new one every time a block is appended.
     // Each distinct shape is captured under its own annotation id.
@@ -1516,12 +1630,7 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vec
 
   FillBlockTables(requests, /*windowed=*/false, block_table_data, max_blocks);
 
-  if (graph_capture_) {
-    device_span.CopyCpuToDevice();
-    return {block_tables_tensor_->GetOrtTensor(), model_->config_->model.decoder.inputs.block_table.c_str()};
-  }
-
-  return {block_tables_value_.get(), model_->config_->model.decoder.inputs.block_table.c_str()};
+  return PublishBlockTables(device_span);
 }
 
 std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(
@@ -1538,7 +1647,12 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(
   };
   int32_t* block_table_data = nullptr;
   DeviceSpan<int32_t> device_span;
-  if (graph_capture_) {
+  if (!block_table_bindings_.empty()) {
+    auto& tensor = *block_table_bindings_.front().tensor;
+    tensor.CreateTensor(shape);
+    device_span = tensor.GetDeviceSpan<int32_t>();
+    block_table_data = device_span.CpuSpan().data();
+  } else if (graph_capture_) {
     if (columns > max_block_table_columns_ ||
         requests.size() > max_block_table_rows_) {
       throw std::runtime_error("Proposed block table exceeds the graph capture buffer.");
@@ -1564,13 +1678,7 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(
       std::span<int32_t>{block_table_data, requests.size() * columns});
   block_table_columns_ = columns;
 
-  if (graph_capture_) {
-    device_span.CopyCpuToDevice();
-    return {block_tables_tensor_->GetOrtTensor(),
-            model_->config_->model.decoder.inputs.block_table.c_str()};
-  }
-  return {block_tables_value_.get(),
-          model_->config_->model.decoder.inputs.block_table.c_str()};
+  return PublishBlockTables(device_span);
 }
 
 std::pair<OrtValue*, const char*> PagedKeyValueCache::WindowBlockTables(const std::vector<std::shared_ptr<Request>>& requests) {
@@ -1649,7 +1757,9 @@ void PagedKeyValueCache::BindCache(State& state) {
   auto cache_names = Names();
   auto cache_output_names = OutputNames();
 
-  const size_t num_block_tables = window_block_table_required_ ? 2 : 1;
+  const size_t num_block_tables = block_table_bindings_.empty()
+                                      ? (window_block_table_required_ ? 2 : 1)
+                                      : block_table_bindings_.size();
   // Every scale cache is bound on both sides, so the output layout mirrors the input layout minus
   // the block tables. Sizing both up front keeps the indices below stable across steps.
   const size_t num_state_outputs = cache.size() * 2 + scale_cache_.size();
@@ -1699,6 +1809,10 @@ void PagedKeyValueCache::UpdateState(State& state, const std::vector<std::shared
   const size_t block_table_index = cache_.size() * 2 + scale_cache_.size();
   state.inputs_[block_table_index] = block_tables.first;
   state.input_names_[block_table_index] = block_tables.second;
+  for (size_t i = 1; i < block_table_bindings_.size(); ++i) {
+    state.inputs_[block_table_index + i] = block_table_bindings_[i].tensor->GetOrtTensor();
+    state.input_names_[block_table_index + i] = block_table_bindings_[i].name.c_str();
+  }
 
   if (window_block_table_required_) {
     // Depends on the column count BlockTables() just settled, so it has to follow it.
@@ -1718,6 +1832,10 @@ void PagedKeyValueCache::UpdateState(
   const size_t block_table_index = cache_.size() * 2 + scale_cache_.size();
   state.inputs_[block_table_index] = block_tables.first;
   state.input_names_[block_table_index] = block_tables.second;
+  for (size_t i = 1; i < block_table_bindings_.size(); ++i) {
+    state.inputs_[block_table_index + i] = block_table_bindings_[i].tensor->GetOrtTensor();
+    state.input_names_[block_table_index + i] = block_table_bindings_[i].name.c_str();
+  }
   if (window_block_table_required_) {
     auto window_block_tables = WindowBlockTables(requests, reservation, columns);
     state.inputs_[block_table_index + 1] = window_block_tables.first;

@@ -464,6 +464,111 @@ TEST(PagedKeyValueCacheManifestTest, AllocationUsesPhysicalHeadWidth) {
   }
 }
 
+TEST(PagedKeyValueCacheManifestTest, PoolsFollowSessionLocationsAndRemainAliased) {
+  auto model = LoadSyntheticPagedModel();
+  auto cache = MakePagedCache(model);
+  auto params = CreateGeneratorParams(*model);
+  ModelIO state(*params, *model);
+  cache->UpdateState(state, {});
+  const auto original = state.outputs_;
+  const auto& session = model->session_info_.GetInputSession(state.input_names_.front());
+  const auto output_names = session.GetOutputNames();
+  const auto output_locations = session.GetMemoryInfoForOutputs();
+  for (size_t i = 0; i < state.outputs_.size(); ++i) {
+    const auto found = std::find(output_names.begin(), output_names.end(), state.output_names_[i]);
+    ASSERT_NE(found, output_names.end());
+    EXPECT_EQ(state.inputs_[i], state.outputs_[i]);
+    EXPECT_TRUE(state.inputs_[i]->GetTensorMemoryInfo() ==
+                model->session_info_.GetInputMemoryInfo(state.input_names_[i]));
+    EXPECT_TRUE(state.outputs_[i]->GetTensorMemoryInfo() ==
+                *output_locations[static_cast<size_t>(found - output_names.begin())]);
+  }
+  cache->UpdateState(state, {});
+  EXPECT_EQ(state.outputs_, original);
+}
+
+TEST(PagedKeyValueCacheManifestTest, PerLayerTablesMirrorReservationsAndKeepPoolBindings) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-layer-tables");
+  auto cache = MakePagedCache(model);
+  auto engine = MakeDoublesEngine(model, 2, EosToken(*model)).engine;
+  auto request = CreateRequestWithPrompt(engine, std::array<int32_t, 4>{2, 3, 4, 5});
+  auto params = CreateGeneratorParams(*model);
+  ModelIO state(*params, *model);
+  const auto expect_tables = [&](size_t columns) {
+    ASSERT_EQ(state.inputs_.size(), 6u);
+    EXPECT_STREQ(state.input_names_[4], "block_table.1");
+    EXPECT_STREQ(state.input_names_[5], "block_table.4");
+    for (size_t i = 4; i < 6; ++i) {
+      EXPECT_TRUE(state.inputs_[i]->GetTensorMemoryInfo() ==
+                  model->session_info_.GetInputMemoryInfo(state.input_names_[i]));
+      EXPECT_EQ(state.inputs_[i]->GetTensorTypeAndShapeInfo()->GetShape(),
+                std::vector<int64_t>({1, static_cast<int64_t>(columns)}));
+      for (size_t column = 0; column < columns; ++column)
+        EXPECT_EQ(state.inputs_[i]->GetTensorData<int32_t>()[column],
+                  state.inputs_[4]->GetTensorData<int32_t>()[column]);
+    }
+  };
+  {
+    auto rollback = cache->Reserve(std::array{PagedCacheReservationRequest{request.get(), 4, true}});
+    cache->UpdateState(state, {request}, rollback, 1);
+    expect_tables(1);
+  }
+  EXPECT_EQ(cache->Snapshot().free_blocks, 128u);
+  auto admission = cache->Reserve(std::array{PagedCacheReservationRequest{request.get(), 4, true}});
+  cache->UpdateState(state, {request}, admission, 1);
+  expect_tables(1);
+  admission.Commit();
+  const auto pools = state.outputs_;
+  auto growth = cache->Reserve(std::array{PagedCacheReservationRequest{request.get(), 5, false}});
+  cache->UpdateState(state, {request}, growth, 2);
+  expect_tables(2);
+  EXPECT_EQ(state.outputs_, pools);
+  growth.Commit();
+  cache->Remove(request);
+  EXPECT_EQ(cache->Snapshot().free_blocks, 128u);
+}
+
+TEST(PagedKeyValueCacheManifestTest, PerLayerTablesRunPrefillAndDecode) {
+  std::vector<std::vector<int32_t>> results;
+  for (const char* path : {"engine/synthetic-paged", "engine/synthetic-paged-layer-tables"}) {
+    auto model = CreateModel(GetOrtEnv(), std::string{MODEL_PATH} + path);
+    auto engine = std::make_shared<Engine>(model);
+    auto request = CreateEngineRequest(engine);
+    TurnOptions options;
+    options.max_generated_tokens = 4;
+    options.min_generated_tokens = 4;
+    request->BeginTurn(std::array<int32_t, 3>{2, 3, 4}, options);
+    auto& generated = results.emplace_back();
+    std::array<EngineEvent, 8> events;
+    for (int step = 0; step < 32 && !request->IsTurnComplete(); ++step) {
+      const auto count = engine->Run(events);
+      for (size_t i = 0; i < count; ++i) {
+        EXPECT_EQ(events[i].flags & EngineEventFlagFailed, 0u);
+        if (events[i].flags & EngineEventFlagToken)
+          generated.push_back(events[i].token);
+      }
+    }
+    EXPECT_TRUE(request->IsTurnComplete());
+    ASSERT_EQ(generated.size(), 4u);
+  }
+  EXPECT_EQ(results[0], results[1]);
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsUnsupportedPerLayerTableConfigurations) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-layer-tables");
+  for (const char* name : {"block_table.%s", "block_table.%d.%d", "missing.%d"}) {
+    model->config_->model.decoder.inputs.block_table = name;
+    EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+  }
+  model->config_->model.decoder.inputs.block_table = "block_table.%d";
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+  batching.prefix_caching = false;
+  batching.num_blocks.reset();
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+}
+
 TEST(PagedKeyValueCacheManifestTest, PackedScaleCapacityUsesExactBytes) {
   constexpr size_t payload = 16 * 2 * 256 * 4 * 128;
   constexpr size_t scales = 16 * 2 * 256 * 4 * 2;
