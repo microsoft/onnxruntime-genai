@@ -345,7 +345,7 @@ TEST_P(K1EnvelopeTests, RejectsUndeclaredLayerCaches) {
 INSTANTIATE_TEST_SUITE_P(SharedAndSeparateBuffers, K1EnvelopeTests, testing::Bool());
 
 std::unique_ptr<Generators::Config> MakePagedK1Config() {
-  auto config = std::make_unique<Generators::Config>(MODEL_PATH "paged-k1", std::string_view{});
+  auto config = std::make_unique<Generators::Config>(fs::path{MODEL_PATH "paged-k1"}, std::string_view{});
   Generators::OverlayConfig(*config,
                             R"({"model":{"decoder":{"declared_state":{"max_batch_size":2,"max_sequence_length":32}}}})");
   return config;
@@ -361,8 +361,8 @@ TEST(K1PagedConfigTests, ProducesSessionPoolsAndEscapedSharedOrLayerTables) {
   EXPECT_NE(json.find(R"("paging":{"block_size":16,"num_blocks":4,"block_table":"block_table.{layer}"})"),
             std::string::npos);
   config->model.decoder.inputs.block_table = "table\"\\.shared";
-  EXPECT_NE(Generators::BuildDeclaredStateContract(*config).find(R"("block_table":"table\"\\.shared")"),
-            std::string::npos);
+  const auto expected_table = R"("block_table":"table\"\\.shared")";
+  EXPECT_NE(Generators::BuildDeclaredStateContract(*config).find(expected_table), std::string::npos);
 }
 
 TEST(K1PagedConfigTests, RejectsInvalidGeometryAndFeaturesAtomically) {
@@ -536,7 +536,7 @@ TEST_F(K1PagedEnvelopeTests, RejectsReservationsAndTableGrowthBeforeMutatingOwne
 TEST_F(K1PagedEnvelopeTests, MatchesNativePrefillAndDecodeAcrossBlocksAtARoundedSequenceBound) {
   std::array<std::vector<std::vector<int32_t>>, 2> results;
   for (size_t declared = 0; declared < results.size(); ++declared) {
-    auto config = std::make_unique<Generators::Config>(MODEL_PATH "paged-k1", std::string_view{});
+    auto config = std::make_unique<Generators::Config>(fs::path{MODEL_PATH "paged-k1"}, std::string_view{});
     config->search.max_length = 18;
     if (declared)
       Generators::OverlayConfig(*config,
