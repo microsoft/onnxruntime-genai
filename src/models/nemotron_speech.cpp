@@ -196,6 +196,7 @@ NemotronSpeechModel::NemotronSpeechModel(std::unique_ptr<Config> config, OrtEnv&
   }
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
                                  *decoder_session_options_, true);
+  AddGgufInitializers(*decoder_session_options_);
   if (config_->model.joiner.session_options.has_value()) {
     CreateSessionOptionsFromConfig(config_->model.joiner.session_options.value(),
                                    *joiner_session_options_, true, /*disable_graph_capture=*/disable_subsession_graph_capture);

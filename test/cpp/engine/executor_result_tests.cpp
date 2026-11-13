@@ -82,8 +82,9 @@ TEST_F(ExecutorResultTest, MalformedSecondRowCannotMutateFirstRequest) {
   auto first = ActiveRequest();
   auto second = ActiveRequest();
   auto a = Plan(first);
-  auto b = Plan(second, 1);
-  for (int violation = 0; violation < 7; ++violation) {
+  for (int violation = 0; violation < 9; ++violation) {
+    auto b = Plan(second, 1);
+    if (violation == 8) b.max_prompt_tokens = 3;
     ScheduledRequests batch{{first, second}, model_, nullptr, nullptr};
     batch.BeginBackendStep({a, b});
     batch.StageBackendRow(0, Tokens(a, {4}));
@@ -109,6 +110,12 @@ TEST_F(ExecutorResultTest, MalformedSecondRowCannotMutateFirstRequest) {
         break;
       case 6:
         bad.prefill = PrefillProgress{0, false};
+        break;
+      case 7:
+        bad.prefill = PrefillProgress{1, false, 2};
+        break;
+      case 8:
+        bad.prefill = PrefillProgress{3, true, 3};
         break;
     }
     batch.StageBackendRow(1, std::move(bad));

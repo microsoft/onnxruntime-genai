@@ -54,14 +54,29 @@ Config::ProviderOptions ResolveStreamBindingOptions(const Config::ProviderOption
   return resolved;
 }
 
+bool IsProviderBridgeAvailable() {
+  try {
+    // Updating a real option forces provider loading; creating options alone does not.
+    auto options = OrtCUDAProviderOptionsV2::Create();
+    const char* keys[] = {"device_id"};
+    const char* values[] = {"0"};
+    options->Update(keys, values, 1);
+    return true;
+  } catch (const Ort::Exception&) {
+    return false;
+  }
+}
+
 namespace {
 
-void EnsureCudaPluginEpRegistered() {
+void EnsureCudaPluginEpRegistered(bool require_plugin) {
   if (!FindRegisteredEpDevices("CUDAExecutionProvider").empty()) {
     return;
   }
   std::error_code ec;
   std::filesystem::path ep_path = GetEnv("ORT_CUDA_PLUGIN_EP_PATH");
+  if (ep_path.empty() && !require_plugin && IsProviderBridgeAvailable())
+    return;
 #if !defined(_WIN32)
   if (ep_path.empty()) {
     Dl_info info{};
@@ -156,7 +171,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // so the CUDA runtime device, stream, and OrtMemoryInfo agree with the selected EP device.
   // The process-wide stream cannot be rebound after creation. Discover adjacent plugin libraries
   // before selecting a device, including when the provider bridge is unavailable.
-  EnsureCudaPluginEpRegistered();
+  EnsureCudaPluginEpRegistered(HasDeviceFiltering(provider_options));
   std::optional<std::string> selected_plugin_device_id;
   auto ep_devices_ptrs = FindRegisteredEpDevices("CUDAExecutionProvider");
   if (!ep_devices_ptrs.empty()) {

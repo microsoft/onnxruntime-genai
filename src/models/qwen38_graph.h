@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "engine/backend_capabilities.h"
+#include "engine/prefix_snapshot_cache.h"
 #include "model.h"
 #include "../dflash2_drafter.h"
 #include "qwen38_decode_device.h"
@@ -35,6 +36,18 @@
 namespace Generators {
 
 struct Qwen38GraphModel;
+
+std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Config& config);
+
+bool Qwen38PrefixCheckpointEligible(bool dflash, const std::optional<Qwen38DflashPromptFeatures::Chunk>& saved,
+                                    size_t context_window);
+bool ShouldCaptureQwen38Prefix(size_t remaining, size_t chunk_tokens, bool dflash,
+                               const std::optional<Qwen38DflashPromptFeatures::Chunk>& saved, size_t context_window);
+
+// Packed ranges for fixed-capacity KV/index rows, positions, hidden features, or a full recurrent/dense tensor.
+std::vector<PrefixSnapshotCache::Entry::Range> PlanQwen38PrefixRanges(
+    const std::string& name, const std::vector<int64_t>& shape, size_t element_bytes,
+    size_t tensor_bytes, size_t length, bool index = false);
 
 // A fixed-address device tensor plus the OrtValue that names it in IO bindings.
 struct DevTensor {
@@ -226,8 +239,9 @@ struct Qwen38GraphContext {
 Qwen38GraphContext SyncQwen38GraphContext(int64_t graph_positions, int configured_max_length, bool context_requested);
 
 // Checks a model package against the plane library it names, when the model is loaded, before its weights are uploaded and
-// before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with a negative scale) needs the int8_ple
-// plane capability, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
+// before any session is created: an INT8 PLE table (model.qwen38_graph.ple_table with `format int8`, or a negative scale
+// and no format line) needs the int8_ple plane capability, an IQ4_NL or Q8_0 one (`format iq4_nl`, `format q8_0`) needs
+// iq4_nl_ple or q8_0_ple, an INT8 embedding table (<model.embedding.filename>.data of vocab_size x hidden_size INT8 rows and
 // one float scale per row) needs int8_embedding, the folded MTP verify path (model.qwen38_graph.fold.enabled), which
 // prepares all the rows of a verify step with one call, needs negative_pos_add_batch, and a configuration with several request
 // slots (ResolveQwen38MaxBatchSize > 1), which prepares the rows of every slot with one call too, needs batched_prep and
@@ -414,9 +428,21 @@ struct Qwen38MoeOffloadSettings {
 
 Qwen38MoeOffloadSettings ParseQwen38MoeOffloadSettings(const std::vector<Config::NamedString>& config_entries);
 
-// Offloaded target warmup must stay eager: CUDA graph replays bypass ORT's per-run warmup control. Live runs keep their
-// own graph ids and capture normally. Null when offload is disabled, so other packages keep capturing during warmup.
+// Offloaded target warmup must stay eager after the first capture pass: CUDA graph replays bypass ORT's per-run warmup
+// control. Live runs reuse the graph ids captured during warmup on their execution thread. Null when offload is disabled,
+// so other packages keep capturing during warmup.
 std::unique_ptr<OrtRunOptions> CreateQwen38OffloadWarmupRunOptions(const Qwen38MoeOffloadSettings& settings);
+
+// Selects and stamps the OrtRunOptions for one target Run of a Direction:
+//  - On the first warmup run of an offloaded target direction (`hints.InWarmup()`, `offload_warmup_options != nullptr`,
+//    `!warmup_captured`), marks `warmup_captured = true` and uses `direction_options` so ORT captures the direction's
+//    CUDA graph while warmup (`ep.cuda.qmoe_in_warmup=1` and `MutedPrefill(true)`) is active instead of deferring
+//    capture to the first live decode step.
+//  - On subsequent warmup runs of that direction (`warmup_captured` already true), uses `offload_warmup_options`
+//    (`gpu_graph_id=-1`) so synthetic warmup iterations run eagerly without replaying a captured graph.
+//  - On live runs or non-offloaded targets, uses `direction_options` and stamps the current warmup flag (0 on live runs).
+OrtRunOptions* SelectQwen38TargetRunOptions(const Qwen38OrtRunHints& hints, OrtRunOptions* direction_options,
+                                            OrtRunOptions* offload_warmup_options, bool& warmup_captured);
 
 // Estimated KV capacity of the Flash-Next package's tier-named target graphs (2k, 8k, 16k, 32k, 64k, 128k), available
 // before the session exists. These fixed padded capacities are not read from the graph. Other file names fall back to
@@ -596,6 +622,10 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   void Drain() noexcept override;
   void MarkContextFailed() noexcept override;
   bool ContextIsHealthy() const noexcept override;
+  bool PrefixCachingEnabled() const override;
+  bool ShouldCapturePrefix(size_t remaining) const override;
+  std::shared_ptr<const Qwen38PrefixState> CapturePrefix() override;
+  void RestorePrefix(const Qwen38PrefixState& state, std::span<const int32_t> tokens) override;
 
   // Ingests prompt tokens: by the dense chunked prefill session when prefill.enabled (FastAppend: the dense state continues
   // across chunks and is handed over to the decode state in BeginDecode), otherwise by S=2 graph steps (StepPrefill; the
@@ -631,6 +661,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   double ple_register_seconds{};
 
  private:
+  struct PrefixState;
   static constexpr int kMaxBatch = Config::Model::Qwen38Graph::kMaxBatchSize;
   // The int64 control words of one request slot in ctl_ (the `state` of the plane's prep): the slots lie this far apart for
   // the plane, for the batched fold.ctl views and for every host access.
@@ -648,6 +679,7 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
     uint8_t* hidden{};
     size_t status_count{};
     uint8_t* auxiliary{};
+    bool warmup_captured{};
   };
   struct RowInputs {  // fixed-address per-row-count inputs of the target
     std::map<std::string, std::unique_ptr<DevTensor>> tensors;
@@ -946,6 +978,7 @@ struct Qwen38GraphModel : Model {
   std::unique_ptr<OrtSession> session_head_r2_, session_dense_, session_head_kv_;
   std::optional<int64_t> target_head_rows_;
   std::unique_ptr<Qwen38GraphEngine> engine_;
+  std::shared_ptr<PrefixSnapshotCache> prefix_snapshot_cache_;
   std::shared_ptr<const std::thread::id> engine_thread_;
 
   void RunCpuEmbedding(const int64_t* ids_host, size_t num_tokens, void* dst_host) const;

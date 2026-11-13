@@ -358,6 +358,8 @@ void GenAiTelemetry::Initialize() {
     pending_impl->logger->SetContext("LibraryVersion", BoundTelemetryString(ORTGENAI_VERSION));
 
     const auto& device = GetDeviceInfo();
+    TelemetryInternal::SetApplicationNameFromProcessName(
+        *pending_impl->logger->GetSemanticContext(), device.process_name);
     // Desktop builds override the 1DS SDK's device id with a privacy-preserving generated-id hash.
     // Android/iOS leave this empty so the SDK uses its platform device id.
     if (!device.device_id.empty()) {
@@ -492,6 +494,7 @@ void GenAiTelemetry::LogProcessInfo() {
     event.SetProperty("processorCount", static_cast<int64_t>(device.processor_count));
     event.SetProperty("totalMemoryMB", static_cast<int64_t>(device.total_memory_mb));
     SetTelemetryStringProperty(event, "cpuModel", device.cpu_model);
+    SetTelemetryStringProperty(event, "processName", device.process_name);
     SetTelemetryStringProperty(event, "deviceIdStatus", device.device_id_status);
     event.SetProperty("isContainer", device.is_container);
     SetTelemetryStringProperty(event, "containerType", device.container_type);

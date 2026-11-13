@@ -39,6 +39,20 @@ def test_default_layer_type(config, expected):
     assert base.Model.__new__(base.Model).default_layer_type(config) == expected
 
 
+@pytest.mark.parametrize(
+    "sliding_window, context_length, expected",
+    [
+        (2047, 4096, "sliding_attention"),  # Phi-3-mini-4k-instruct
+        (4096, 4096, "full_attention"),
+        (262144, 131072, "full_attention"),  # Phi-4-mini-instruct
+    ],
+)
+def test_default_layer_type_ignores_windows_that_cover_the_context(sliding_window, context_length, expected):
+    model = base.Model.__new__(base.Model)
+    model.context_length = context_length
+    assert model.default_layer_type(SimpleNamespace(sliding_window=sliding_window)) == expected
+
+
 def transformers_config(class_name, architecture, **kwargs):
     transformers = pytest.importorskip("transformers")
     # _builder_test_utils installs an importable transformers stub when the package is absent.
@@ -93,6 +107,15 @@ def test_phi3_sliding_window_applies_to_every_layer(tmp_path):
 def test_qwen2_with_sliding_window_disabled_uses_full_attention(tmp_path):
     config = transformers_config("Qwen2Config", "Qwen2ForCausalLM", sliding_window=4, use_sliding_window=False)
     model = build(qwen.QwenModel, config, tmp_path)
+
+    assert model.layer_types == ["full_attention", "full_attention"]
+    assert local_window_sizes(model) == [-1, -1]
+
+
+def test_phi3_window_longer_than_the_context_uses_full_attention(tmp_path):
+    # Phi-4-mini sets sliding_window=262144 with max_position_embeddings=131072.
+    config = transformers_config("Phi3Config", "Phi3ForCausalLM", sliding_window=128)
+    model = build(phi.Phi3MiniModel, config, tmp_path)
 
     assert model.layer_types == ["full_attention", "full_attention"]
     assert local_window_sizes(model) == [-1, -1]
