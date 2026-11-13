@@ -89,7 +89,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
-        public (double Start, double Stop) TimeInterval
+        public (long Start, long Stop) TimeInterval
         {
             get
             {

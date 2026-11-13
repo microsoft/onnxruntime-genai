@@ -1,15 +1,21 @@
 #include "metadata_core_state.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cctype>
+#include <limits>
 #include <stdexcept>
 
 namespace Generators {
 
 namespace {
-double RoundTimestamp(double value) {
-  return std::round(value * 100.0) / 100.0;
+int64_t TimestampMilliseconds(int64_t frame, const MetadataCoreConfig& config) {
+  const auto fractional = (frame / config.sample_rate) * config.millisecond_remainder +
+                          ((frame % config.sample_rate) * config.millisecond_remainder + config.sample_rate / 2) / config.sample_rate;
+  if (config.milliseconds_per_frame != 0 &&
+      frame > (std::numeric_limits<int64_t>::max() - fractional) / config.milliseconds_per_frame) {
+    throw std::overflow_error("Timestamp interval exceeds the signed 64-bit millisecond range");
+  }
+  return frame * config.milliseconds_per_frame + fractional;
 }
 
 bool EndsWithSeparator(std::string_view text, std::string_view separator) {
@@ -31,9 +37,10 @@ MetadataCoreState::MetadataCoreState(const MetadataCoreConfig& config) : config_
       segment_gap_threshold_frames_ = config_.timestamps.segment_gap_threshold_frames;
       if (segment_gap_threshold_frames_ && *segment_gap_threshold_frames_ < 0)
         throw std::runtime_error("Timestamp segment gap must not be negative");
-      if (!config_.seconds_per_frame || !std::isfinite(*config_.seconds_per_frame) || *config_.seconds_per_frame <= 0)
-        throw std::runtime_error("Timestamp decoding requires a positive finite seconds_per_frame timebase");
-      seconds_per_frame_ = *config_.seconds_per_frame;
+      if (config_.sample_rate <= 0 || config_.milliseconds_per_frame < 0 ||
+          config_.millisecond_remainder < 0 || config_.millisecond_remainder >= config_.sample_rate ||
+          (config_.milliseconds_per_frame == 0 && config_.millisecond_remainder == 0))
+        throw std::runtime_error("Timestamp decoding requires a positive millisecond timebase");
       break;
     default:
       throw std::runtime_error("Invalid timestamp level in metadata configuration");
@@ -52,7 +59,7 @@ void MetadataCoreState::ValidateInput(const TokenMetadataInput& token) const {
 
 void MetadataCoreState::AddRecord(std::vector<TimestampRecord>& records, std::string_view text,
                                   std::pair<int64_t, int64_t> interval) {
-  records.push_back({std::string(text), interval, {RoundTimestamp(interval.first * seconds_per_frame_), RoundTimestamp(interval.second * seconds_per_frame_)}});
+  records.push_back({std::string(text), interval, {TimestampMilliseconds(interval.first, config_), TimestampMilliseconds(interval.second, config_)}});
 }
 
 void MetadataCoreState::CompleteSegment(TimestampResult& result) {

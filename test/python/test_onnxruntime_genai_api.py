@@ -176,12 +176,14 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
             return
         word_records = timestamps.words
         segment_records = timestamps.segments
+        for record in [*word_records, *segment_records]:
+            assert all(isinstance(bound, int) for bound in record.time_interval)
         assert asr_example.format_timestamp_records(result, False) == "".join(
-            f"[{word.time_interval[0]:.2f} - {word.time_interval[1]:.2f}]{word.text.strip()} "
+            f"[{word.time_interval[0]} - {word.time_interval[1]}]{word.text.strip()} "
             for word in word_records
         )
         assert asr_example.format_timestamp_records(result, True) == "".join(
-            f"[{segment.time_interval[0]:.2f} - {segment.time_interval[1]:.2f}]"
+            f"[{segment.time_interval[0]} - {segment.time_interval[1]}]"
             f"{'' if segment.text[:1].isspace() else ' '}{segment.text}"
             for segment in segment_records
         )
@@ -224,7 +226,7 @@ def test_asr_example_formats_speech_timestamps(test_data_path, asr_example, time
         assert "".join(segments) == transcript
     if use_vad:
         assert skipped_chunks > 0
-        assert word_start_times[0] >= 3.0
+        assert word_start_times[0] >= 3000
     postprocessor.finalize()
     for result in postprocessor.get_next_results():
         assert asr_example.format_timestamp_records(result, False) == ""

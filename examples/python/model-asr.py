@@ -149,7 +149,7 @@ def format_timestamp_records(result, use_segments):
         separator = " " if use_segments and not text[:1].isspace() else ""
         suffix = "" if use_segments else " "
         start, stop = record.time_interval
-        formatted.append(f"[{start:.2f} - {stop:.2f}]{separator}{text}{suffix}")
+        formatted.append(f"[{start} - {stop}]{separator}{text}{suffix}")
     return "".join(formatted)
 
 
