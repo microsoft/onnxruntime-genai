@@ -1122,7 +1122,7 @@ std::vector<CacheAllocation> Model::GetCacheAllocations(std::span<const std::str
                                                         std::span<const std::string> output_names) const {
   if (input_names.empty() || input_names.size() != output_names.size())
     throw std::runtime_error("Cache location queries require nonempty, paired input/output names.");
-  const auto& session = session_info_.GetInputSession(input_names.front());
+  const auto& session = session_info_.GetInputSession(input_names[0]);
   const auto session_inputs = session.GetInputNames();
   const auto session_outputs = session.GetOutputNames();
   const auto input_locations = session.GetMemoryInfoForInputs();
