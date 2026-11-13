@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <cstring>
 #include <cmath>
 #include <limits>
@@ -13,6 +14,9 @@
 #include <nlohmann/json.hpp>
 
 #include "dflash2_drafter.h"
+#include "engine/engine.h"
+#include "engine/nemotron_bolt_executor.h"
+#include "engine_test_helpers.h"
 #include "models/nemotron_bolt.h"
 #include "search.h"
 
@@ -35,6 +39,23 @@ struct NemotronBoltTestAccess {
 
   static size_t Length(const NemotronBoltState& state) { return state.length_; }
   static size_t SelectedRow(const NemotronBoltState& state) { return static_cast<size_t>(state.state_row_); }
+
+  static void CheckResetClearsRestoredPrefix(Generator& generator, size_t length) {
+    auto& state = dynamic_cast<NemotronBoltState&>(*generator.state_);
+    EXPECT_GE(state.touched_kv_rows_, length);
+    generator.RewindToLength(0);
+    for (auto* tensor : state.kv_caches_) {
+      const auto shape = tensor->GetShape();
+      auto span = tensor->GetByteSpan();
+      const size_t head_bytes = span.size() / static_cast<size_t>(shape[1]);
+      const size_t valid_bytes = length * static_cast<size_t>(shape[3]) * sizeof(uint16_t);
+      for (size_t head = 0; head < static_cast<size_t>(shape[1]); ++head) {
+        auto prefix = span.subspan(head * head_bytes, valid_bytes);
+        const auto bytes = prefix.CopyDeviceToCpu();
+        EXPECT_TRUE(std::all_of(bytes.begin(), bytes.end(), [](uint8_t value) { return value == 0; }));
+      }
+    }
+  }
 
   static void CheckCommittedRound(const NemotronBoltState& state, size_t public_length) {
     EXPECT_EQ(state.length_ + 1, public_length + state.pending_.size());
@@ -266,6 +287,21 @@ struct NemotronBoltTestAccess {
 };
 
 namespace {
+
+std::vector<int32_t> TargetOnly(Model& model, std::span<const int32_t> prompt, size_t count) {
+  std::vector<int32_t> history(prompt.begin(), prompt.end());
+  auto params = std::make_shared<GeneratorParams>(model);
+  params->search.max_length = static_cast<int>(history.size() + count);
+  Generator generator{model, *params};
+  for (size_t i = 0; i < count; ++i) {
+    // The first generated token is the target's prefill prediction, before speculative verification.
+    generator.AppendTokens(history);
+    generator.GenerateNextToken();
+    history.push_back(generator.GetSequence(0).CopyDeviceToCpu().back());
+    generator.RewindToLength(0);
+  }
+  return {history.begin() + prompt.size(), history.end()};
+}
 
 std::unique_ptr<Config> BoltTestConfig(const char* path);
 
@@ -587,6 +623,49 @@ TEST(NemotronBolt, RejectsInvalidVerificationGeometry) {
                std::runtime_error);
   EXPECT_THROW(NemotronBoltAcceptedPrefix(std::vector<int32_t>(7), std::vector<int64_t>(7)),
                std::runtime_error);
+}
+
+TEST(NemotronBolt, PrefillPlanningPreservesCheckpointAndAuxiliaryBoundariesAcrossTargetWidths) {
+  const NemotronBoltPrefillPlan plan{8207, 1025, true};
+  EXPECT_EQ(plan.checkpoint, 8200u);
+  EXPECT_EQ(plan.draft_start, 7176u);
+  EXPECT_EQ(plan.auxiliary_start, 7168u);
+  for (size_t rows : {size_t{1}, size_t{8}, size_t{9}, size_t{1024}, size_t{4095}, size_t{4096}}) {
+    for (size_t restored : {size_t{0}, size_t{4096}, size_t{8200}}) {
+      SCOPED_TRACE(::testing::Message() << "rows=" << rows << ", restored=" << restored);
+      size_t position = restored;
+      size_t captures = 0;
+      while (position < plan.token_count) {
+        const size_t count = plan.NextRows(position, rows);
+        EXPECT_GT(count, 0u);
+        EXPECT_LE(count, rows);
+        if (position < plan.checkpoint) EXPECT_LE(position + count, plan.checkpoint);
+        position += count;
+        if (position == plan.checkpoint) ++captures;
+      }
+      EXPECT_EQ(position, plan.token_count);
+      EXPECT_EQ(captures, restored == plan.checkpoint ? 0u : 1u);
+    }
+  }
+  EXPECT_EQ(plan.NextRows(8192, 4096), 8u);
+  EXPECT_EQ(plan.NextRows(8200, 4096), 7u);
+  const NemotronBoltPrefillPlan uncached{8207, 1025, false};
+  EXPECT_EQ(uncached.auxiliary_start, uncached.draft_start);
+  EXPECT_EQ(uncached.NextRows(8192, 4096), 15u);
+}
+
+TEST(NemotronBolt, PrefillPlanningHandlesShortPromptsAndRejectsNonprogressingChunks) {
+  for (size_t length : {size_t{1}, size_t{7}, size_t{8}, size_t{9}}) {
+    const NemotronBoltPrefillPlan plan{length, 1024, true};
+    EXPECT_EQ(plan.draft_start, 0u);
+    EXPECT_EQ(plan.auxiliary_start, 0u);
+    EXPECT_EQ(plan.NextRows(0, std::numeric_limits<size_t>::max()),
+              plan.checkpoint != 0 ? plan.checkpoint : length);
+    EXPECT_THROW(plan.NextRows(0, 0), std::runtime_error);
+    EXPECT_THROW(plan.NextRows(length, 8), std::runtime_error);
+    EXPECT_THROW(plan.NextRows(std::numeric_limits<size_t>::max(), 8), std::runtime_error);
+  }
+  EXPECT_THROW((NemotronBoltPrefillPlan{0, 1024, true}), std::runtime_error);
 }
 
 TEST(NemotronBolt, HonorsGreedyEquivalentSamplingOptions) {
@@ -1002,6 +1081,188 @@ TEST(NemotronBolt, PromptAtBudgetIsImmediatelyDone) {
   EXPECT_THROW(search->CommitToken(21), std::runtime_error);
 }
 
+struct ScriptedBoltExecution final : NemotronBoltExecutionState {
+  bool PrefixCachingEnabled() const override { return true; }
+  size_t Prefill(std::span<const int32_t> tokens, int, PrefixCacheMetrics& events) override {
+    ++prefills;
+    ++events.lookups;
+    events.queried_tokens += tokens.size();
+    events.matches += cached != 0;
+    events.evictions += cache_events.evictions;
+    events.retention_refusals += cache_events.retention_refusals;
+    events.publication_refusals += cache_events.publication_refusals;
+    return cached;
+  }
+  int32_t NextToken(size_t) override {
+    if (fail_next) throw std::runtime_error("injected post-restore token failure");
+    ++stats.rounds;
+    return token;
+  }
+  void Reset() override {
+    ++resets;
+    if (std::exchange(fail_reset, false)) throw std::runtime_error("injected reset failure");
+    stats = {};
+  }
+  SpeculativeStats Stats() const override { return stats; }
+  size_t cached{8};
+  int32_t token{7};
+  size_t prefills{};
+  size_t resets{};
+  bool fail_next{};
+  bool fail_reset{};
+  PrefixCacheMetrics cache_events;
+  SpeculativeStats stats;
+};
+
+TEST(NemotronBoltEngine, CreditsPrefixAdoptionOnlyAfterAcknowledgementIncludingEos) {
+  for (int scenario = 0; scenario < 3; ++scenario) {
+    SCOPED_TRACE(scenario);
+    auto model = LoadDummyDecoderModel();
+    auto execution = std::make_unique<ScriptedBoltExecution>();
+    auto* state = execution.get();
+    state->fail_next = scenario == 1;
+    if (scenario == 2) state->token = EosToken(*model);
+    auto engine = std::make_shared<Engine>(
+        model, CreateNemotronBoltDependencies(model, std::move(execution)));
+    auto request = engine->CreateRequest();
+    TurnOptions options;
+    options.max_generated_tokens = 1;
+    options.do_sample = false;
+    const std::vector<int32_t> prompt(8, 3);
+    request->BeginTurn(prompt, options);
+    EXPECT_EQ(engine->PrefixCacheStats()->hits, 0u);
+    std::array<EngineEvent, 8> events;
+    engine->Run(events);
+    EXPECT_EQ(engine->PrefixCacheStats()->matches, 1u);
+    EXPECT_EQ(engine->PrefixCacheStats()->hits, scenario == 1 ? 0u : 1u);
+    EXPECT_EQ(engine->PrefixCacheStats()->matched_tokens, scenario == 1 ? 0u : 8u);
+    if (scenario == 2) EXPECT_EQ(request->TokensCpu().size(), prompt.size());
+  }
+}
+
+TEST(NemotronBoltEngine, PreservesCacheEventsWithoutAttributingAnotherEngine) {
+  auto model = LoadDummyDecoderModel();
+  std::array<std::shared_ptr<Engine>, 2> engines;
+  for (size_t i = 0; i < engines.size(); ++i) {
+    auto execution = std::make_unique<ScriptedBoltExecution>();
+    execution->cache_events.evictions = i + 1;
+    execution->cache_events.retention_refusals = i + 2;
+    execution->cache_events.publication_refusals = i + 3;
+    engines[i] = std::make_shared<Engine>(
+        model, CreateNemotronBoltDependencies(model, std::move(execution)));
+    auto request = engines[i]->CreateRequest();
+    TurnOptions options;
+    options.max_generated_tokens = 1;
+    options.do_sample = false;
+    request->BeginTurn(std::vector<int32_t>(8, 3), options);
+    std::array<EngineEvent, 8> events;
+    engines[i]->Run(events);
+    request->Close();
+  }
+  for (size_t i = 0; i < engines.size(); ++i) {
+    EXPECT_EQ(engines[i]->PrefixCacheStats()->evictions, i + 1);
+    EXPECT_EQ(engines[i]->PrefixCacheStats()->retention_refusals, i + 2);
+    EXPECT_EQ(engines[i]->PrefixCacheStats()->publication_refusals, i + 3);
+  }
+}
+
+TEST(NemotronBoltEngine, ResetFailureCannotDisappearOnRetirementRetryOrReplacement) {
+  for (bool rewind : {false, true}) {
+    SCOPED_TRACE(rewind);
+    auto model = LoadDummyDecoderModel();
+    auto execution = std::make_unique<ScriptedBoltExecution>();
+    auto* state = execution.get();
+    auto engine = std::make_shared<Engine>(
+        model, CreateNemotronBoltDependencies(model, std::move(execution)));
+    auto request = engine->CreateRequest();
+    TurnOptions options;
+    options.max_generated_tokens = 1;
+    options.do_sample = false;
+    request->BeginTurn(std::vector<int32_t>(8, 3), options);
+    std::array<EngineEvent, 8> events;
+    engine->Run(events);
+    state->fail_reset = true;
+    for (int retry = 0; retry < 2; ++retry) {
+      if (rewind)
+        EXPECT_THROW(request->RewindToStartOfTurn(request->CurrentTurnId()), std::runtime_error);
+      else
+        EXPECT_THROW(request->Close(), std::runtime_error);
+      EXPECT_EQ(state->resets, 1u);
+      EXPECT_EQ(engine->GetSpeculativeStats().rounds, 1u);
+    }
+    const size_t prefills = state->prefills;
+    auto replacement = engine->CreateRequest();
+    replacement->BeginTurn(std::vector<int32_t>(8, 4), options);
+    engine->Run(events);
+    EXPECT_EQ(state->prefills, prefills);
+  }
+}
+
+TEST(NemotronBoltEngine, ResolvedGreedyOverridesDoNotMutateSampledModelDefaults) {
+  auto model = LoadDummyDecoderModel();
+  auto& defaults = model->config_->search;
+  defaults.do_sample = true;
+  defaults.temperature = 1.0f;
+  defaults.top_k = 50;
+  defaults.repetition_penalty = 1.1f;
+  defaults.no_repeat_ngram_size = 2;
+  auto execution = std::make_unique<ScriptedBoltExecution>();
+  auto* state = execution.get();
+  auto engine = std::make_shared<Engine>(
+      model, CreateNemotronBoltDependencies(model, std::move(execution)));
+  auto request = engine->CreateRequest();
+  const std::vector<int32_t> prompt(8, 3);
+  EXPECT_THROW(request->BeginTurn(prompt), std::runtime_error);
+  EXPECT_TRUE(request->TokensCpu().empty());
+  EXPECT_EQ(state->prefills, 0u);
+  TurnOptions options;
+  options.max_generated_tokens = 1;
+  options.do_sample = false;
+  options.repetition_penalty = 1.0f;
+  options.no_repeat_ngram_size = 0;
+  EXPECT_NO_THROW(request->BeginTurn(prompt, options));
+  std::array<EngineEvent, 8> events;
+  engine->Run(events);
+  EXPECT_EQ(state->prefills, 1u);
+  EXPECT_TRUE(defaults.do_sample);
+  EXPECT_FLOAT_EQ(defaults.repetition_penalty, 1.1f);
+  EXPECT_EQ(defaults.no_repeat_ngram_size, 2);
+}
+
+// Optional real-graph correctness coverage. No models or GPU are needed for the tests above.
+TEST(NemotronBoltGPU, DestructionWaitsForSharedSessionExecution) {
+  const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
+  if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_TEST_MODEL to a native Bolt package";
+  auto model = std::dynamic_pointer_cast<NemotronBoltModel>(CreateModel(GetOrtEnv(), path));
+  ASSERT_NE(model, nullptr);
+  auto params = std::make_shared<GeneratorParams>(*model);
+  params->search.max_length = 16;
+  const std::vector<int32_t> prompt(8, 1010);
+  Generator survivor{*model, *params};
+  survivor.AppendTokens(prompt);
+  auto retiring = std::make_unique<Generator>(*model, *params);
+  retiring->AppendTokens(prompt);
+  std::promise<void> started;
+  auto ready = started.get_future();
+  std::unique_lock execution{model->execution_mutex_};
+  auto destroyed = std::async(std::launch::async, [generator = std::move(retiring), &started]() mutable {
+    started.set_value();
+    generator.reset();
+  });
+  ready.wait();
+  EXPECT_EQ(destroyed.wait_for(std::chrono::milliseconds{100}), std::future_status::timeout);
+  execution.unlock();
+  destroyed.get();
+  survivor.GenerateNextToken();
+  const auto sequence = survivor.GetSequence(0).CopyDeviceToCpu();
+  const std::vector<int32_t> expected(sequence.begin(), sequence.end());
+  Generator reference{*model, *params};
+  reference.AppendTokens(prompt);
+  reference.GenerateNextToken();
+  const auto actual = reference.GetSequence(0).CopyDeviceToCpu();
+  EXPECT_EQ((std::vector<int32_t>{actual.begin(), actual.end()}), expected);
+}
+
 std::unique_ptr<Config> BoltTestConfig(const char* path) {
   auto config = std::make_unique<Config>(fs::path{path}, "{}");
   for (auto* session : {&config->model.decoder.session_options,
@@ -1274,12 +1535,7 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
     EXPECT_TRUE(std::equal(sequence.begin(), sequence.end(), baseline.begin()));
     EXPECT_THROW(generator.GenerateNextToken(), std::runtime_error);
   }
-  auto params = std::make_shared<GeneratorParams>(*model);
-  params->search.max_length = static_cast<int>(prompt.size()) + 32;
-  Generator serial{*model, *params};
-  serial.AppendTokens(prompt);
-  const auto target_only = NemotronBoltTestAccess::TargetOnly(
-      dynamic_cast<NemotronBoltState&>(*serial.state_), 32);
+  const auto target_only = TargetOnly(*model, prompt, 32);
   EXPECT_TRUE(std::equal(target_only.begin(), target_only.end(), baseline.begin() + prompt.size()));
   for (bool capture : {false, true}) {
     auto ordinary_params = std::make_shared<GeneratorParams>(*model);
@@ -1302,6 +1558,8 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
     }
   }
   {
+    auto params = std::make_shared<GeneratorParams>(*model);
+    params->search.max_length = static_cast<int>(prompt.size()) + 32;
     Generator generator{*model, *params};
     generator.AppendTokens(prompt);
     generator.GenerateNextToken();
@@ -1332,10 +1590,7 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
   }
   ASSERT_FALSE(long_result.empty());
   {
-    Generator generator{*model, *long_params};
-    generator.AppendTokens(long_prompt);
-    const auto expected = NemotronBoltTestAccess::TargetOnly(
-        dynamic_cast<NemotronBoltState&>(*generator.state_), long_result.size());
+    const auto expected = TargetOnly(*model, long_prompt, long_result.size());
     EXPECT_EQ(long_result, expected);
   }
 #if defined(__linux__)
@@ -1433,6 +1688,334 @@ TEST(NemotronBoltGPU, RealPromptOrdinaryAndSpeculative) {
     EXPECT_EQ(libraries.find("libbolt"), std::string::npos);
   }
 #endif
+}
+
+TEST(NemotronBoltGPU, PrefixCacheAcrossGeneratorsAndEngineRequests) {
+  const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
+  if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_TEST_MODEL to a native Bolt package";
+  auto config = CreateConfig(GetOrtEnv(), path);
+  config->search.chunk_size = kBoltVerifyRows;
+  config->engine.dynamic_batching.emplace();
+  config->engine.dynamic_batching->max_batch_size = 1;
+  config->engine.dynamic_batching->max_snapshots = 2;
+  config->engine.dynamic_batching->snapshot_cache.ram_bytes = size_t{4} * 1024 * 1024 * 1024;
+  auto model = std::dynamic_pointer_cast<NemotronBoltModel>(CreateModel(GetOrtEnv(), std::move(config)));
+  ASSERT_NE(model, nullptr);
+  ASSERT_NE(model->prefix_cache_, nullptr);
+  std::vector<int32_t> seed{10, 25708, 1010, 11, 1010, 10, 3263, 1010, 18746, 1261, 17616, 2254,
+                            1455, 29196, 5627, 1261, 3310, 1395, 1261, 5796, 92145, 1044, 1454, 1261,
+                            4958, 17984, 1046, 11, 1010, 10, 1503, 19464, 1010, 12, 13};
+  const auto generate = [&](const std::vector<int32_t>& prompt) {
+    auto params = std::make_shared<GeneratorParams>(*model);
+    params->search.max_length = static_cast<int>(prompt.size() + 32);
+    Generator generator{*model, *params};
+    generator.AppendTokens(prompt);
+    const auto cached = dynamic_cast<NemotronBoltState&>(*generator.state_).CachedPromptTokens();
+    const auto forwards = generator.GetSpeculativeStats().target_forward_passes;
+    while (!generator.IsDone()) generator.GenerateNextToken();
+    const auto sequence = generator.GetSequence(0).CopyDeviceToCpu();
+    return std::tuple{std::vector<int32_t>{sequence.begin() + prompt.size(), sequence.end()}, cached, forwards};
+  };
+  for (size_t length : std::array<size_t, 7>{7, 8, 9, 1031, 1032, 1033, 1040}) {
+    SCOPED_TRACE(length);
+    std::vector<int32_t> prompt;
+    while (prompt.size() < length) prompt.insert(prompt.end(), seed.begin(), seed.end());
+    prompt.resize(length);
+    auto policy = std::move(model->prefix_cache_);
+    const auto [cold, unused, cold_forwards] = generate(prompt);
+    model->prefix_cache_ = std::move(policy);
+    const auto [published, first_cached, unused_forwards] = generate(prompt);
+    const auto [warm, cached, warm_forwards] = generate(prompt);
+    EXPECT_EQ(published, cold);
+    EXPECT_EQ(warm, cold);
+    EXPECT_EQ(cached, length / 8 * 8);
+    EXPECT_EQ(warm_forwards + cached / 8, cold_forwards);
+    for (bool capture : {false, true}) {
+      auto params = std::make_shared<GeneratorParams>(*model);
+      params->speculative.max_draft_tokens = 0;
+      params->use_graph_capture = capture;
+      params->search.max_length = static_cast<int>(prompt.size() + 32);
+      Generator ordinary{*model, *params};
+      for (int reset = 0; reset < 2; ++reset) {
+        ordinary.AppendTokens(prompt);
+        EXPECT_EQ(dynamic_cast<NemotronBoltState&>(*ordinary.state_).CachedPromptTokens(), 0u);
+        while (!ordinary.IsDone()) ordinary.GenerateNextToken();
+        const auto sequence = ordinary.GetSequence(0).CopyDeviceToCpu();
+        EXPECT_EQ((std::vector<int32_t>{sequence.begin() + prompt.size(), sequence.end()}), cold);
+        EXPECT_EQ(ordinary.GetSpeculativeStats().draft_forward_passes, 0u);
+        ordinary.RewindToLength(0);
+      }
+    }
+    const auto [after_ordinary, preserved_cached, after_ordinary_forwards] = generate(prompt);
+    EXPECT_EQ(after_ordinary, cold);
+    EXPECT_EQ(preserved_cached, cached);
+    EXPECT_EQ(after_ordinary_forwards, warm_forwards);
+    // Divergence after a resident aligned checkpoint must not consume the old speculative tail.
+    prompt.push_back(1010);
+    auto engine = std::make_shared<Engine>(model);
+    std::vector<int32_t> baseline;
+    for (int repeat = 0; repeat < 2; ++repeat) {
+      auto request = engine->CreateRequest();
+      TurnOptions options;
+      options.max_generated_tokens = 32;
+      options.do_sample = false;
+      request->BeginTurn(prompt, options);
+      for (size_t runs = 0; !request->IsTurnComplete() && runs < 100; ++runs) {
+        std::array<EngineEvent, 16> events;
+        const auto count = engine->Run(events);
+        for (size_t i = 0; i < count; ++i) EXPECT_EQ(events[i].flags & EngineEventFlagFailed, 0u);
+      }
+      ASSERT_TRUE(request->IsTurnComplete());
+      const auto sequence = request->TokensCpu();
+      const std::vector<int32_t> output(sequence.begin() + prompt.size(), sequence.end());
+      if (repeat == 0) baseline = output;
+      EXPECT_EQ(output, baseline);
+      EXPECT_GE(request->TurnCachedPromptTokens(), length / 8 * 8);
+      if (length == 1033 && repeat == 0) {
+        const size_t old_history = request->TokensCpu().size();
+        std::vector<int32_t> history(request->TokensCpu().begin(), request->TokensCpu().end());
+        const std::vector<int32_t> appended(9, 1010);
+        history.insert(history.end(), appended.begin(), appended.end());
+        auto [reference, reused, forwards] = generate(history);
+        if (!reference.empty() && std::find(model->config_->model.eos_token_id.begin(),
+                                            model->config_->model.eos_token_id.end(), reference.back()) !=
+                                      model->config_->model.eos_token_id.end())
+          reference.pop_back();
+        request->BeginTurn(appended, options);
+        for (size_t runs = 0; !request->IsTurnComplete() && runs < 100; ++runs) {
+          std::array<EngineEvent, 16> events;
+          engine->Run(events);
+        }
+        ASSERT_TRUE(request->IsTurnComplete());
+        EXPECT_EQ(request->TurnCachedPromptTokens(), history.size() / 8 * 8 - old_history);
+        const auto continued = request->TokensCpu();
+        EXPECT_EQ((std::vector<int32_t>{continued.begin() + history.size(), continued.end()}), reference);
+      }
+      request->Close();
+    }
+    const auto [expected, ignored, ignored_forwards] = generate(prompt);
+    // Request deliberately excludes terminal EOS, unlike the classic Bolt Generator.
+    if (!expected.empty() && std::find(model->config_->model.eos_token_id.begin(),
+                                       model->config_->model.eos_token_id.end(), expected.back()) !=
+                                 model->config_->model.eos_token_id.end())
+      EXPECT_EQ(baseline, (std::vector<int32_t>{expected.begin(), expected.end() - 1}));
+    else
+      EXPECT_EQ(baseline, expected);
+  }
+
+  auto engine = std::make_shared<Engine>(model);
+  auto request = engine->CreateRequest();
+  TurnOptions options;
+  options.max_generated_tokens = 32;
+  options.do_sample = false;
+  request->BeginTurn(seed, options);
+  std::array<EngineEvent, 16> events;
+  engine->Run(events);
+  engine->Run(events);
+  ASSERT_FALSE(request->IsTurnComplete());
+  ASSERT_GT(engine->GetSpeculativeStats().tokens_buffered, 0u);
+  EXPECT_EQ(engine->GetSpeculativeStats().effective_k, 7u);
+  ASSERT_TRUE(engine->CancelRequest(request, request->CurrentTurnId()));
+  for (size_t runs = 0; engine->HasPendingRequests() && runs < 10; ++runs) engine->Run(events);
+  const size_t old_history = request->TokensCpu().size();
+  const std::vector<int32_t> appended(9, 1010);
+  std::vector<int32_t> history(request->TokensCpu().begin(), request->TokensCpu().end());
+  history.insert(history.end(), appended.begin(), appended.end());
+  auto [reference, reused, forwards] = generate(history);
+  if (!reference.empty() && std::find(model->config_->model.eos_token_id.begin(),
+                                      model->config_->model.eos_token_id.end(), reference.back()) !=
+                                model->config_->model.eos_token_id.end())
+    reference.pop_back();
+  request->BeginTurn(appended, options);
+  for (size_t runs = 0; !request->IsTurnComplete() && runs < 100; ++runs) engine->Run(events);
+  ASSERT_TRUE(request->IsTurnComplete());
+  EXPECT_EQ(request->TurnCachedPromptTokens(), history.size() / 8 * 8 - old_history);
+  const auto continued = request->TokensCpu();
+  EXPECT_EQ((std::vector<int32_t>{continued.begin() + history.size(), continued.end()}), reference);
+  const auto live = engine->GetSpeculativeStats();
+  EXPECT_GT(live.tokens_discarded, 0u);
+  EXPECT_EQ(live.tokens_emitted, 2u + reference.size());
+  EXPECT_EQ(live.effective_k, 7u);
+  ASSERT_GT(live.rounds, 0u);
+  EXPECT_FLOAT_EQ(live.mean_emitted_tokens_per_round, static_cast<float>(live.tokens_emitted) / live.rounds);
+  request->Close();
+  const auto completed = engine->GetSpeculativeStats();
+  EXPECT_EQ(completed.effective_k, 0u);
+  EXPECT_EQ(completed.rounds, live.rounds);
+  EXPECT_EQ(completed.tokens_emitted, live.tokens_emitted);
+  EXPECT_FLOAT_EQ(completed.mean_emitted_tokens_per_round, live.mean_emitted_tokens_per_round);
+}
+
+TEST(NemotronBoltGPU, DynamicPrefillCheckpointsPreserveSelectedRowsAndResetRestoredKv) {
+  const char* path = std::getenv("ORTGENAI_BOLT_DYNAMIC_TEST_MODEL");
+  if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_DYNAMIC_TEST_MODEL to a dynamic-prefill Bolt package";
+  auto config = CreateConfig(GetOrtEnv(), path);
+  config->engine.dynamic_batching.emplace();
+  config->engine.dynamic_batching->max_batch_size = 1;
+  config->engine.dynamic_batching->max_snapshots = 2;
+  config->engine.dynamic_batching->snapshot_cache.ram_bytes = size_t{4} * 1024 * 1024 * 1024;
+  auto model = std::dynamic_pointer_cast<NemotronBoltModel>(CreateModel(GetOrtEnv(), std::move(config)));
+  ASSERT_NE(model, nullptr);
+  ASSERT_TRUE(model->dynamic_prefill_);
+  ASSERT_NE(model->prefix_cache_, nullptr);
+  for (const auto chunk : {std::optional<size_t>{}, std::optional<size_t>{8}, std::optional<size_t>{9},
+                           std::optional<size_t>{1024}, std::optional<size_t>{4095}, std::optional<size_t>{4096}}) {
+    for (size_t length : {size_t{8}, size_t{9}, size_t{1033}, size_t{4103}}) {
+      SCOPED_TRACE(::testing::Message() << "chunk=" << chunk.value_or(0) << ", length=" << length);
+      const NemotronBoltPrefillPlan plan{length, 1024, true};
+      const std::vector<int32_t> prompt(length, 1010);
+      auto storage = std::make_shared<PrefixSnapshotCache>(
+          std::array<size_t, 3>{0, size_t{4} * 1024 * 1024 * 1024, 0}, 2);
+      model->prefix_cache_ = std::make_unique<StateCheckpointCache>(storage, kBoltVerifyRows);
+      const auto generate = [&](bool warm) {
+        auto params = std::make_shared<GeneratorParams>(*model);
+        params->search.chunk_size = chunk;
+        params->search.max_length = static_cast<int>(length + 9);
+        Generator generator{*model, *params};
+        generator.AppendTokens(prompt);
+        auto& state = dynamic_cast<NemotronBoltState&>(*generator.state_);
+        EXPECT_EQ(state.CachedPromptTokens(), warm ? plan.checkpoint : 0u);
+        const size_t max_rows = NemotronBoltPrefillChunkRows(chunk, model->capacity_);
+        size_t position = warm ? plan.checkpoint : 0;
+        size_t forwards = 0;
+        size_t selected_row = 7;
+        while (position < length) {
+          const size_t rows = plan.NextRows(position, max_rows);
+          selected_row = rows > kBoltVerifyRows ? 7 : rows - 1;
+          position += rows;
+          ++forwards;
+        }
+        EXPECT_EQ(generator.GetSpeculativeStats().target_forward_passes, forwards);
+        EXPECT_EQ(NemotronBoltTestAccess::SelectedRow(state), selected_row);
+        if (warm) {
+          NemotronBoltTestAccess::CheckResetClearsRestoredPrefix(generator, plan.checkpoint);
+          generator.AppendTokens(prompt);
+          EXPECT_EQ(state.CachedPromptTokens(), plan.checkpoint);
+          EXPECT_EQ(generator.GetSpeculativeStats().target_forward_passes, forwards);
+        }
+        while (!generator.IsDone()) generator.GenerateNextToken();
+        const auto sequence = generator.GetSequence(0).CopyDeviceToCpu();
+        const std::vector<int32_t> output(sequence.begin() + length, sequence.end());
+        return output;
+      };
+      const auto cold = generate(false);
+      EXPECT_EQ(generate(true), cold);
+      EXPECT_EQ(generate(true), cold);
+    }
+  }
+}
+
+TEST(NemotronBoltGPU, EngineAcceptsGreedyTurnOverSampledAndPenalizedModelDefaults) {
+  const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
+  if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_TEST_MODEL to a native Bolt package";
+  auto config = CreateConfig(GetOrtEnv(), path);
+  config->search.do_sample = true;
+  config->search.temperature = 1.0f;
+  config->search.top_k = 50;
+  config->search.repetition_penalty = 1.1f;
+  config->search.no_repeat_ngram_size = 2;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto engine = std::make_shared<Engine>(model);
+  auto request = engine->CreateRequest();
+  const std::vector<int32_t> prompt{
+      10, 25708, 1010, 11, 1010, 10, 3263, 1010, 18746, 1261, 17616, 2254, 1455,
+      29196, 5627, 1261, 3310, 1395, 1261, 5796, 92145, 1044, 1454, 1261, 4958,
+      17984, 1046, 11, 1010, 10, 1503, 19464, 1010, 12, 13};
+  EXPECT_THROW(request->BeginTurn(prompt), std::runtime_error);
+  EXPECT_TRUE(request->TokensCpu().empty());
+  TurnOptions options;
+  options.max_generated_tokens = 1;
+  options.do_sample = false;
+  options.repetition_penalty = 1.0f;
+  options.no_repeat_ngram_size = 0;
+  request->BeginTurn(prompt, options);
+  std::array<EngineEvent, 8> events;
+  engine->Run(events);
+  EXPECT_TRUE(request->IsTurnComplete());
+  EXPECT_EQ(request->TokensCpu().size(), prompt.size() + 1);
+  EXPECT_TRUE(model->config_->search.do_sample);
+  EXPECT_FLOAT_EQ(model->config_->search.repetition_penalty, 1.1f);
+}
+
+TEST(NemotronBoltGPU, AttributesRealRetentionRefusalsAndEvictionsToInitiatingEngine) {
+  const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
+  if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_TEST_MODEL to a native Bolt package";
+  auto config = CreateConfig(GetOrtEnv(), path);
+  config->engine.dynamic_batching.emplace();
+  config->engine.dynamic_batching->max_batch_size = 1;
+  config->engine.dynamic_batching->snapshot_cache.ram_bytes = 1;
+  auto model = std::dynamic_pointer_cast<NemotronBoltModel>(CreateModel(GetOrtEnv(), std::move(config)));
+  ASSERT_NE(model, nullptr);
+  ASSERT_NE(model->prefix_cache_, nullptr);
+  std::array<std::shared_ptr<Engine>, 2> engines{
+      std::make_shared<Engine>(model), std::make_shared<Engine>(model)};
+  constexpr uint64_t PrefixCacheMetrics::* fields[]{
+      &PrefixCacheMetrics::lookups, &PrefixCacheMetrics::queried_tokens,
+      &PrefixCacheMetrics::matches, &PrefixCacheMetrics::registered_blocks,
+      &PrefixCacheMetrics::evictions, &PrefixCacheMetrics::retention_refusals,
+      &PrefixCacheMetrics::publication_refusals};
+  const auto run = [&](Engine& engine, const std::vector<int32_t>& prompt) {
+    const auto before = *engine.PrefixCacheStats();
+    const auto native_before = model->prefix_cache_->Metrics();
+    auto request = engine.CreateRequest();
+    TurnOptions options;
+    options.max_generated_tokens = 1;
+    options.do_sample = false;
+    request->BeginTurn(prompt, options);
+    std::array<EngineEvent, 8> events;
+    engine.Run(events);
+    EXPECT_TRUE(request->IsTurnComplete());
+    request->Close();
+    const auto after = *engine.PrefixCacheStats();
+    const auto& native_after = model->prefix_cache_->Metrics();
+    for (auto field : fields) EXPECT_EQ(after.*field - before.*field, native_after.*field - native_before.*field);
+  };
+  for (size_t ram_bytes : {size_t{1}, size_t{4} * 1024 * 1024 * 1024}) {
+    SCOPED_TRACE(ram_bytes);
+    Config::Engine::DynamicBatching settings;
+    settings.snapshot_cache.ram_bytes = ram_bytes;
+    auto storage = std::make_shared<PrefixSnapshotCache>(
+        std::array<size_t, 3>{0, ram_bytes, 0}, 1);
+    model->memory_budget_.Configure(settings, storage);
+    model->prefix_cache_ = std::make_unique<StateCheckpointCache>(storage, kBoltVerifyRows);
+    const auto before = *engines[0]->PrefixCacheStats();
+    run(*engines[0], std::vector<int32_t>(8, 1010));
+    if (ram_bytes == 1) {
+      EXPECT_EQ(engines[0]->PrefixCacheStats()->retention_refusals, before.retention_refusals + 1);
+    } else {
+      run(*engines[0], std::vector<int32_t>(8, 1011));
+      EXPECT_GT(engines[0]->PrefixCacheStats()->evictions, before.evictions);
+    }
+    const auto first_engine = *engines[0]->PrefixCacheStats();
+    {
+      auto params = std::make_shared<GeneratorParams>(*model);
+      params->search.max_length = 9;
+      Generator generator{*model, *params};
+      generator.AppendTokens(std::vector<int32_t>(8, 1012));
+      generator.GenerateNextToken();
+    }
+    run(*engines[1], std::vector<int32_t>(8, 1013));
+    const auto after = *engines[0]->PrefixCacheStats();
+    for (auto field : fields) EXPECT_EQ(after.*field, first_engine.*field);
+  }
+  constexpr size_t vram_bytes = size_t{4} * 1024 * 1024 * 1024;
+  Config::Engine::DynamicBatching settings;
+  settings.snapshot_cache.vram_bytes = vram_bytes;
+  auto storage = std::make_shared<PrefixSnapshotCache>(
+      std::array<size_t, 3>{vram_bytes, 0, 0}, 1);
+  model->memory_budget_.Configure(settings, storage);
+  model->prefix_cache_ = std::make_unique<StateCheckpointCache>(storage, kBoltVerifyRows);
+  auto& allocator = model->p_device_->GetAllocator();
+  struct RestoreReserve {
+    ~RestoreReserve() { allocator.Reserve = original; }
+    Ort::Allocator& allocator;
+    decltype(OrtAllocator::Reserve) original;
+  } restore{allocator, allocator.Reserve};
+  allocator.Reserve = [](OrtAllocator*, size_t) -> void* { throw std::bad_alloc{}; };
+  const auto before = *engines[0]->PrefixCacheStats();
+  run(*engines[0], std::vector<int32_t>(8, 1014));
+  EXPECT_EQ(engines[0]->PrefixCacheStats()->publication_refusals, before.publication_refusals + 1);
+  EXPECT_EQ(engines[0]->PrefixCacheStats()->retention_refusals, before.retention_refusals);
 }
 
 TEST(NemotronBolt, GgufInitializersConfigParsingAndPathValidation) {

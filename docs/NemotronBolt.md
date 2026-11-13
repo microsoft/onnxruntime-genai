@@ -1,8 +1,9 @@
 # Native Nemotron-3.5 Bolt / LiLiCorr
 
 `nemotron_bolt` implements batch-one, single-CUDA-device greedy generation through
-the ordinary Model / Generator API. It does **not** use the paged target Engine or
-support dynamic batching. The implementation runs the fixed-R8 target and the
+the ordinary Model / Generator API and a single-slot Engine adapter. Both use the same
+native execution state. This is not a paged target or dynamically batched backend.
+The implementation runs the fixed-R8 or dynamic-prefill target and the
 LiLiCorr DFlash2 drafter directly in C++ with ORT. No Python inference bridge or
 synthetic logits are involved.
 
@@ -50,8 +51,13 @@ layer counts are not used: the native state validates the actual graph metadata.
 The standard decoder input keys `past_sequence_length: "seqlens_k"` and
 `total_sequence_length: "total_sequence_length"` are accepted, but do not
 override these native bindings. No decoder `state_groups`, `sliding_window`, or
-Engine settings are needed; decoder `sliding_window` and enabled static/dynamic
-batching are rejected. The drafter's internal paged cache and sliding window do
+Engine settings are needed for Generator execution. Decoder `sliding_window` and
+multi-slot batching are rejected. Optional `engine.dynamic_batching` settings with
+`max_batch_size: 1` configure native snapshot and memory policy for both APIs, not
+paged execution; `num_blocks` is unsupported. See
+[native Bolt prefix caching](paged_attention_engine.md#native-bolt-prefix-caching)
+for checkpoint retention, enablement, and memory limits.
+The drafter's internal paged cache and sliding window do
 not make the target paged or windowed.
 There are no Bolt-specific JSON fields.
 Set `speculative.max_draft_tokens: 7` for speculative decoding; the verify width

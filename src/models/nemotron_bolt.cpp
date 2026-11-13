@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <cstdlib>
 #include <limits>
 #include <set>
@@ -71,6 +72,26 @@ struct BoltSearch : GreedySearch_Cpu {
 };
 
 }  // namespace
+
+NemotronBoltPrefillPlan::NemotronBoltPrefillPlan(
+    size_t token_count, size_t context_window, bool checkpointing)
+    : token_count{token_count},
+      checkpoint{checkpointing ? token_count / kBoltVerifyRows * kBoltVerifyRows : 0} {
+  Require(token_count != 0, "prefill requires at least one token");
+  const auto context_start = [context_window](size_t length) {
+    return context_window != 0 && length > context_window
+               ? (length - context_window) / kBoltVerifyRows * kBoltVerifyRows
+               : 0;
+  };
+  draft_start = context_start(token_count);
+  auxiliary_start = checkpoint != 0 ? context_start(checkpoint) : draft_start;
+}
+
+size_t NemotronBoltPrefillPlan::NextRows(size_t position, size_t max_rows) const {
+  Require(position < token_count && max_rows != 0, "invalid prefill chunk");
+  const size_t endpoint = position < checkpoint ? checkpoint : token_count;
+  return std::min(max_rows, endpoint - position);
+}
 
 void ValidateNemotronBoltSearch(const GeneratorParams& params) {
   const auto& s = params.search;
@@ -210,7 +231,7 @@ void ValidateNemotronBoltGraphCapture(const Config::SessionOptions& options, boo
 }
 
 NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env)
-    : Model{std::move(config)} {
+    : Model{std::move(config)}, memory_budget_{*this} {
   Require(config_->speculative.max_draft_tokens == 0 ||
               config_->speculative.max_draft_tokens == 7,
           "speculative.max_draft_tokens must be 0 or 7");
@@ -218,10 +239,27 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
                                    config_->speculative.max_draft_tokens != 0);
   Require(p_device_->GetType() == DeviceType::CUDA, "a CUDA execution provider is required");
   p_device_scoring_ = GetDeviceInterface(DeviceType::CPU);
-  Require(!config_->engine.dynamic_batching && !config_->engine.static_batching &&
+  const auto batching = config_->engine.dynamic_batching;
+  std::shared_ptr<PrefixSnapshotCache> storage;
+  if (batching) {
+    Require(batching->max_batch_size == 1 && !batching->num_blocks,
+            "native Bolt requires max_batch_size=1 and does not support num_blocks for its fixed target caches");
+    if (IsPrefixCachingRequested(*config_) && batching->max_snapshots.value_or(1) != 0) {
+      if (config_->model.dflash2.sliding_window > 0) {
+        storage = CreateNativePrefixSnapshotCache(*config_);
+        if (storage) prefix_cache_ = std::make_unique<StateCheckpointCache>(storage, kBoltVerifyRows, "nemotron_bolt");
+      } else {
+        Require(!batching->prefix_caching.value_or(false), "prefix caching requires a windowed drafter");
+      }
+    }
+    memory_budget_.Configure(batching, storage);
+    config_->engine.dynamic_batching.reset();
+  }
+  Require((!config_->engine.static_batching || config_->engine.static_batching->max_batch_size == 1) &&
               !config_->model.draft && !config_->model.mtp.IsEnabled() &&
               !config_->model.decoder.sliding_window,
-          "Engine batching, decoder draft, MTP, and decoder sliding_window are unsupported");
+          "multi-slot Engine batching, decoder draft, MTP, and decoder sliding_window are unsupported");
+  config_->engine.static_batching = Config::Engine::StaticBatching{1};
   session_ = CreateSession(env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_);
   const auto& info = session_info_;
@@ -295,8 +333,10 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
               capacity_ <= static_cast<size_t>(std::numeric_limits<int32_t>::max()) &&
               static_cast<size_t>(config_->model.context_length) <= capacity_ - kBoltVerifyRows,
           "context_length must leave eight scratch slots in the fixed KV capacity");
-  if (config_->speculative.max_draft_tokens == 0)
+  if (config_->speculative.max_draft_tokens == 0) {
+    memory_budget_.Refresh();
     return;
+  }
   const auto& d = config_->model.dflash2;
   Require(d.block_size == 8 && d.num_draft_tokens == 7 && !d.is_dspark &&
               !d.independent_sampling && !d.inputs.anchor_row_index.empty() &&
@@ -322,9 +362,14 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
     const SessionInfo& info_;
   } packed{info};
   ValidateDflash2ModelCompatibility(*config_, packed, drafter_model_->session_info_, 256);
+  memory_budget_.Refresh();
 }
 
 std::unique_ptr<State> NemotronBoltModel::CreateState(DeviceSpan<int32_t>, const GeneratorParams& params) const {
+  return CreateNativeState(params);
+}
+
+std::unique_ptr<NemotronBoltState> NemotronBoltModel::CreateNativeState(const GeneratorParams& params) const {
   ValidateNemotronBoltSearch(params);
   Require(!params.use_graph_capture || IsGraphCaptureEnabled(config_->model.decoder.session_options),
           "graph capture is disabled in the target session");
@@ -352,7 +397,11 @@ Tensor& NemotronBoltState::AddTensor(const std::string& name, bool input, Device
 }
 
 NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const GeneratorParams& params)
-    : State{params, model}, bolt_{model}, request_{std::make_unique<Request>(model, params.search.max_length)} {
+    : std::unique_lock<std::mutex>{model.execution_mutex_},
+      State{params, model},
+      bolt_{model},
+      state_description_{&model},
+      request_{std::make_unique<Request>(model, params.search.max_length)} {
   if (model.dynamic_prefill_) {
     prefill_chunk_rows_ = NemotronBoltPrefillChunkRows(params.search.chunk_size, model.capacity_);
   }
@@ -462,6 +511,7 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
                                                static_cast<int64_t>(model.aux_width_)};
     prefill_aux_ = std::make_unique<Tensor>(model.p_device_, aux.GetType());
     prefill_aux_->CreateTensor(prefill_shape, true);
+    BindCheckpointState();
   }
   if (model.dynamic_prefill_ && prefill_chunk_rows_ > kBoltVerifyRows) {
     prefill_ids_span_ = model.p_device_->Allocate<int64_t>(prefill_chunk_rows_);
@@ -506,9 +556,38 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     }
   }
   Reset();
+  bolt_.memory_budget_.Refresh();
+  unlock();
 }
 
-NemotronBoltState::~NemotronBoltState() = default;
+void NemotronBoltState::BindCheckpointState() {
+  if (!bolt_.prefix_cache_) return;
+  for (const auto& name : input_storage_) {
+    if (name.rfind("past_", 0) != 0) continue;
+    auto* tensor = tensors_.at(name).get();
+    const bool sequence = name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0;
+    const StateCheckpointLayout layout{
+        sequence ? StateCheckpointLayout::Kind::Sequence : StateCheckpointLayout::Kind::SelectedRow,
+        sequence ? 2u : 0u};
+    state_description_.BindBuffer(name, [this, tensor, layout] {
+      return StateCheckpointDescription::Buffer{
+          static_cast<uint8_t*>(tensor->GetMutableRawData()), tensor->GetByteSpan().size(),
+          tensor->GetShape(), tensor->GetType(), layout, 0, std::nullopt, static_cast<size_t>(state_row_)};
+    });
+  }
+  if (prefill_aux_) {
+    state_description_.BindBuffer("auxiliary_context", [this] {
+      return StateCheckpointDescription::Buffer{
+          static_cast<uint8_t*>(prefill_aux_->GetMutableRawData()), prefill_aux_->GetByteSpan().size(), prefill_aux_->GetShape(), prefill_aux_->GetType(), {StateCheckpointLayout::Kind::Sequence, 0}, aux_start_};
+    });
+  }
+  state_description_.BindValue(state_row_);
+  state_description_.BindValue(anchor_);
+}
+
+NemotronBoltState::~NemotronBoltState() {
+  lock();
+}
 
 DeviceSpan<float> NemotronBoltState::Run(int, DeviceSpan<int32_t>&, DeviceSpan<int32_t>) {
   throw std::runtime_error("nemotron_bolt uses native block decoding, not the logits search path");
@@ -543,10 +622,12 @@ void NemotronBoltState::Reset() {
   drafts_.clear();
   pending_.clear();
   prefilled_ = false;
+  cached_prompt_tokens_ = 0;
   stats_ = {};
 }
 
 void NemotronBoltState::RewindTo(size_t length) {
+  std::lock_guard lock{bolt_.execution_mutex_};
   Require(length == 0, "only reset-to-zero rewind is supported");
   Reset();
 }
@@ -660,9 +741,10 @@ std::vector<int64_t> NemotronBoltState::VerifyBlock(std::span<const int32_t> tok
   return {cpu.begin(), cpu.begin() + rows};
 }
 
-int64_t NemotronBoltState::PrefillChunk(
-    std::span<const int32_t> tokens, size_t pos, size_t draft_start, bool want_prediction) {
+int64_t NemotronBoltState::RunDynamicPrefillTarget(
+    std::span<const int32_t> tokens, size_t auxiliary_start, bool want_prediction) {
   const size_t rows = tokens.size();
+  const size_t pos = length_;
   Require(bolt_.dynamic_prefill_ && rows > kBoltVerifyRows && length_ + rows <= bolt_.capacity_,
           "prefill chunk exceeds capacity or requires dynamic prefill contract");
   const auto& dev_mem_info = bolt_.p_device_->GetAllocator().GetInfo();
@@ -727,8 +809,8 @@ int64_t NemotronBoltState::PrefillChunk(
     outputs_[output_idx_pred_ids_] = temp_preds->GetOrtTensor();
   }
 
-  const bool need_aux = drafter_ != nullptr && (pos + rows > draft_start);
-  const size_t overlap_start = need_aux ? std::max(pos, draft_start) : pos;
+  const bool need_aux = drafter_ != nullptr && (pos + rows > auxiliary_start);
+  const size_t overlap_start = need_aux ? std::max(pos, auxiliary_start) : pos;
   const size_t aux_begin_in_chunk = overlap_start - pos;
   const size_t aux_count = need_aux ? (rows - aux_begin_in_chunk) : 1;
   if (bolt_.has_aux_rows_) {
@@ -747,7 +829,7 @@ int64_t NemotronBoltState::PrefillChunk(
         1, static_cast<int64_t>(aux_count), static_cast<int64_t>(bolt_.aux_width_)};
     uint8_t* aux_dst_ptr =
         need_aux ? (reinterpret_cast<uint8_t*>(prefill_aux_->GetMutableRawData()) +
-                    (overlap_start - draft_start) * aux_row_bytes)
+                    (overlap_start - auxiliary_start) * aux_row_bytes)
                  : reinterpret_cast<uint8_t*>(tensors_.at("aux_hidden_states")->GetMutableRawData());
     aux_out_ort = OrtValue::CreateTensor(
         dev_mem_info, aux_dst_ptr, aux_count * aux_row_bytes, aux_out_shape,
@@ -768,7 +850,7 @@ int64_t NemotronBoltState::PrefillChunk(
   if (need_aux && !bolt_.has_aux_rows_) {
     auto aux_src = temp_aux->GetByteSpan();
     auto prefill_dst = prefill_aux_->GetByteSpan();
-    prefill_dst.subspan((overlap_start - draft_start) * aux_row_bytes, aux_count * aux_row_bytes)
+    prefill_dst.subspan((overlap_start - auxiliary_start) * aux_row_bytes, aux_count * aux_row_bytes)
         .CopyFrom(aux_src.subspan(aux_begin_in_chunk * aux_row_bytes, aux_count * aux_row_bytes));
   }
   if (!want_prediction) return 0;
@@ -798,61 +880,90 @@ void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int3
   ++stats_.draft_forward_passes;
 }
 
-void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
+void NemotronBoltState::RestorePrefix(std::span<const int32_t> tokens) {
+  if (!drafter_ || !bolt_.prefix_cache_) return;
+  if (auto saved = bolt_.prefix_cache_->Find(tokens)) {
+    bolt_.prefix_cache_->Restore(*saved, state_description_, model_.p_device_);
+    length_ = cached_prompt_tokens_ = saved->tokens.size();
+    touched_kv_rows_ = std::max(touched_kv_rows_, length_);
+  }
+}
+
+NemotronBoltState::PrefillResult NemotronBoltState::RunPrefillTarget(
+    std::span<const int32_t> tokens, size_t auxiliary_start, bool want_prediction) {
+  if (tokens.size() > kBoltVerifyRows)
+    return {static_cast<int32_t>(kBoltVerifyRows - 1),
+            static_cast<int32_t>(RunDynamicPrefillTarget(tokens, auxiliary_start, want_prediction))};
+  Require(!tokens.empty() && tokens.size() <= bolt_.target_rows_, "prefill target exceeds target row count");
+  std::vector<int32_t> block(bolt_.target_rows_, tokens.back());
+  std::copy(tokens.begin(), tokens.end(), block.begin());
+  const auto predictions = Verify(block, want_prediction);
+  const size_t end = length_ + tokens.size();
+  if (drafter_ && end > auxiliary_start) {
+    const size_t begin = std::max(length_, auxiliary_start);
+    const size_t row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
+    auto destination = prefill_aux_->GetByteSpan();
+    auto source = aux_view_->GetByteSpan();
+    destination.subspan((begin - auxiliary_start) * row_bytes, (end - begin) * row_bytes)
+        .CopyFrom(source.subspan((begin - length_) * row_bytes, (end - begin) * row_bytes));
+  }
+  return {static_cast<int32_t>(tokens.size() - 1),
+          want_prediction ? static_cast<int32_t>(predictions[tokens.size() - 1]) : 0};
+}
+
+void NemotronBoltState::Prefill(std::span<const int32_t> tokens, PrefixCacheMetrics* cache_events) {
+  std::lock_guard lock{bolt_.execution_mutex_};
   Require(!prefilled_ && !tokens.empty(), "AppendTokens requires a fresh or reset generator");
   for (const auto token : tokens)
     Require(token >= 0 && token < model_.config_->model.vocab_size, "token id outside vocabulary");
+  const auto before = bolt_.prefix_cache_ ? bolt_.prefix_cache_->Metrics() : PrefixCacheMetrics{};
+  const auto record_events = [&] {
+    if (!cache_events || !bolt_.prefix_cache_) return;
+    const auto& after = bolt_.prefix_cache_->Metrics();
+    cache_events->lookups += after.lookups - before.lookups;
+    cache_events->queried_tokens += after.queried_tokens - before.queried_tokens;
+    cache_events->matches += after.matches - before.matches;
+    cache_events->registered_blocks += after.registered_blocks - before.registered_blocks;
+    cache_events->evictions += after.evictions - before.evictions;
+    cache_events->retention_refusals += after.retention_refusals - before.retention_refusals;
+    cache_events->publication_refusals += after.publication_refusals - before.publication_refusals;
+  };
   // A failure after the first chunk leaves advanced caches and a native cursor that the public
   // sequence (still empty) cannot rewind, so discard all partial state before propagating.
   try {
-    const size_t window = drafter_ ? drafter_->ContextWindow() : 0;
-    const size_t draft_start =
-        (window != 0 && tokens.size() > window)
-            ? ((tokens.size() - window) / kBoltVerifyRows) * kBoltVerifyRows
-            : 0;
-    const size_t draft_rows = tokens.size() - draft_start;
-    const bool can_dynamic_prefill =
-        bolt_.dynamic_prefill_ && prefill_chunk_rows_ > kBoltVerifyRows;
-    const bool single_chunk =
-        draft_rows <= kBoltVerifyRows && (!can_dynamic_prefill || tokens.size() <= kBoltVerifyRows);
+    bolt_.memory_budget_.Refresh();
+    const NemotronBoltPrefillPlan plan{tokens.size(), drafter_ ? drafter_->ContextWindow() : 0,
+                                       drafter_ && bolt_.prefix_cache_ != nullptr};
+    aux_start_ = plan.auxiliary_start;
+    const size_t draft_rows = tokens.size() - plan.draft_start;
     const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
-    for (size_t pos = 0; pos < tokens.size();) {
-      const size_t remaining = tokens.size() - pos;
-      if (can_dynamic_prefill && remaining > kBoltVerifyRows) {
-        const size_t valid = std::min(prefill_chunk_rows_, remaining);
-        const bool last_chunk = pos + valid >= tokens.size();
-        const int64_t pred = PrefillChunk(tokens.subspan(pos, valid), pos, draft_start, last_chunk);
-        if (last_chunk) {
-          anchor_ = static_cast<int32_t>(pred);
-        }
-        length_ += valid;
-        state_row_ = static_cast<int32_t>(kBoltVerifyRows - 1);
-        pos += valid;
-        continue;
-      }
-      const size_t valid = std::min(bolt_.target_rows_, remaining);
-      const bool last_chunk = pos + bolt_.target_rows_ >= tokens.size();
-      std::vector<int32_t> block(bolt_.target_rows_, tokens[pos + valid - 1]);
-      std::copy_n(tokens.begin() + pos, valid, block.begin());
-      const auto predictions = Verify(block, last_chunk);
-      if (drafter_ && !single_chunk && pos + valid > draft_start) {
-        const size_t overlap_start = std::max(pos, draft_start);
-        const size_t src_row = overlap_start - pos;
-        const size_t count = valid - src_row;
-        auto aux_src = aux_view_->GetByteSpan();
-        auto prefill_dst = prefill_aux_->GetByteSpan();
-        prefill_dst.subspan((overlap_start - draft_start) * aux_row_bytes, count * aux_row_bytes)
-            .CopyFrom(aux_src.subspan(src_row * aux_row_bytes, count * aux_row_bytes));
-      }
-      if (last_chunk) {
-        anchor_ = static_cast<int32_t>(predictions[valid - 1]);
-      }
+    const size_t max_rows = bolt_.dynamic_prefill_ ? prefill_chunk_rows_ : bolt_.target_rows_;
+    RestorePrefix(tokens);
+    while (length_ < tokens.size()) {
+      const size_t valid = plan.NextRows(length_, max_rows);
+      const size_t end = length_ + valid;
+      const bool save = plan.checkpoint != 0 && end == plan.checkpoint;
+      const bool want_prediction = end == tokens.size() || save;
+      const auto result = RunPrefillTarget(tokens.subspan(length_, valid), plan.auxiliary_start, want_prediction);
+      if (want_prediction) anchor_ = result.prediction;
       length_ += valid;
-      state_row_ = static_cast<int32_t>(valid - 1);
-      pos += bolt_.target_rows_;
+      state_row_ = result.state_row;
+      if (save) {
+        bolt_.memory_budget_.Refresh();
+        bolt_.prefix_cache_->Capture(tokens.first(plan.checkpoint), state_description_, model_.p_device_);
+      }
     }
-    if (drafter_)
-      Propose(draft_rows, draft_start, anchor_, single_chunk ? aux_view_.get() : prefill_aux_.get());
+    if (drafter_) {
+      auto prefill_dst = prefill_aux_->GetByteSpan();
+      const std::array<int64_t, 2> shape{static_cast<int64_t>(draft_rows), static_cast<int64_t>(bolt_.aux_width_)};
+      Tensor features{OrtValue::CreateTensor(*model_.p_device_->GetMemoryInfo(),
+                                             prefill_dst.Span().data() +
+                                                 (plan.draft_start - plan.auxiliary_start) * aux_row_bytes,
+                                             draft_rows * aux_row_bytes, shape, prefill_aux_->GetType())};
+      features.p_device_ = model_.p_device_;
+      Propose(draft_rows, plan.draft_start, anchor_, &features);
+    }
+    model_.p_device_->Synchronize();
     if (tokens.size() < static_cast<size_t>(params_->search.max_length)) {
       pending_.push_back(anchor_);
       stats_.tokens_queued = 1;
@@ -860,15 +971,18 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
     stats_.effective_k = drafter_ ? 7 : 0;
     prefilled_ = true;
   } catch (...) {
+    record_events();
     try {
       Reset();
     } catch (...) {
     }
     throw;
   }
+  record_events();
 }
 
 int32_t NemotronBoltState::NextToken(size_t public_length) {
+  std::lock_guard lock{bolt_.execution_mutex_};
   Require(prefilled_, "AppendTokens must precede GenerateNextToken");
   Require(params_->search.max_length > 0 &&
               public_length < static_cast<size_t>(params_->search.max_length),
@@ -934,6 +1048,7 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
   const int32_t token = pending_.front();
   pending_.pop_front();
   ++stats_.tokens_emitted;
+  model_.p_device_->Synchronize();
   return token;
 }
 

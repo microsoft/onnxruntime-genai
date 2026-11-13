@@ -25,12 +25,15 @@ env:
   buildRoot: 'build/cuda/win-x64'
   binaryDir: 'build/cuda/win-x64/Release'
   ORT_NUGET_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  ORT_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
   ORT_EP_NUGET_SOURCE: "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
-  ORT_PACKAGE_VERSION: "1.31.0"
+  # The folded dense-handoff regression requires the SpeculativePrefixCommit schema and CUDA kernel.
+  ORT_PACKAGE_VERSION: "1.32.0"
+  ORT_PYPI_VERSION: "1.32.0.dev20261110006"
   ORT_EP_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.EP.Cuda12.win-x64"
-  ORT_EP_NUGET_VERSION: "0.3.0-dev.20261009143618"
+  ORT_EP_NUGET_VERSION: "0.4.0-dev.20261110145305"
   ORT_EP_PYPI_VERSION: "0.3.0"
 
 jobs:
@@ -194,12 +197,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install -r test\python\cuda\torch\requirements.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install --index-url https://pypi.org/simple/ -r test\python\cuda\ort\requirements.txt
+          python -m pip install --index-url $env:ORT_PYPI_SOURCE onnxruntime==$env:ORT_PYPI_VERSION
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install --index-url $env:ORT_EP_PYPI_SOURCE onnxruntime-ep-cuda12==$env:ORT_EP_PYPI_VERSION
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Align the Python CUDA plugin with the native tests
+        run: |
+          # The released Python shim bundles an older plugin without the nightly kernels.
+          $cudaPythonLibrary = python -c "import onnxruntime_ep_cuda; print(onnxruntime_ep_cuda.get_library_path())"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$env:GITHUB_WORKSPACE\ort\ep\onnxruntime_providers_cuda.dll" $cudaPythonLibrary -Force -ErrorAction Stop
 
       - name: Run the synthetic Engine Python tests
         run: |
