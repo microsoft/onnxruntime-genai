@@ -19,14 +19,6 @@ size_t NemotronBoltVerifyUsableRows(size_t position, size_t capacity, int max_le
 void ValidateNemotronBoltSearch(const GeneratorParams& params);
 void ValidateNemotronBoltGraphCapture(const Config::SessionOptions& options, bool speculative);
 std::unique_ptr<Config> CreateNemotronBoltDrafterConfig(const Config& config);
-struct NemotronBoltRoundStats {
-  size_t accepted{};
-  size_t evaluated{};
-  bool correction{};
-  bool bonus{};
-};
-NemotronBoltRoundStats GetNemotronBoltRoundStats(std::span<const int32_t> drafts,
-                                                 std::span<const int32_t> emitted_tokens);
 size_t NemotronBoltAcceptedPrefix(std::span<const int32_t> drafts,
                                   std::span<const int64_t> predictions,
                                   size_t max_accepted = kBoltVerifyRows - 1);
