@@ -2464,11 +2464,18 @@ class Model:
         del self.values[name]
         return output_name
 
-    def make_value(self, name, dtype: ir.DataType | int | None = None, shape: Sequence[int | str] | ir.Shape | None = None) -> ir.Value:
+    def make_value(
+        self,
+        name,
+        dtype: ir.DataType | int | None = None,
+        shape: Sequence[int | str] | ir.Shape | None = None,
+        *,
+        value_type: ir.TypeProtocol | None = None,
+    ) -> ir.Value:
         """Obtain or create an IR value by value name.
 
         If the value does not exist a new one is created.
-        If dtype or shape is provided, it will be set on the value.
+        A complete value_type is copied before applying optional dtype or shape overrides.
 
         Args:
             name: The name of the value.
@@ -2478,6 +2485,8 @@ class Model:
             # None value
             return ir.Value(name="")
         value = self.values.setdefault(name, ir.Value(name=name))
+        if value_type is not None:
+            value.type = copy.deepcopy(value_type)
         if dtype is not None:
             value.dtype = ir.DataType(dtype)
         if shape is not None:

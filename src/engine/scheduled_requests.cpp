@@ -7,6 +7,7 @@
 #include "request_index.h"
 #include "../constrained_logits_processor.h"
 #include "../decoding/speculative_sampling.h"
+#include "../models/env_utils.h"
 #include "../search.h"
 #include <algorithm>
 #include <cmath>
@@ -456,6 +457,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
   std::vector<int32_t> row_argmax =
       step_has_drafts ? TryDeviceArgmaxPerRow(*model_->p_device_inputs_, verify_rows)
                       : std::vector<int32_t>{};
+  bool verification_rows_downloaded = false;
   if (step_has_drafts && row_argmax.empty()) {
     row_argmax.resize(verify_rows.size());
     const bool rows_share_buffer =
@@ -475,6 +477,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
           std::max_element(row_values.begin(), row_values.end()) -
           row_values.begin());
     }
+    verification_rows_downloaded = true;
   }
   int max_sampling_top_k = 0;
   bool any_checkpoint_needed = false;
@@ -490,6 +493,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
   const TopKScores topk = TryDeviceTopKScoresPerRow(
       *model_->p_device_inputs_, verify_rows, max_sampling_top_k);
   SampledCategorical sampling_scratch;
+  std::vector<DeviceSpan<float>> traced_buffers;
   size_t row = 0;
   for (size_t i = 0; i < requests_.size(); ++i) {
     const size_t draft_count =
@@ -592,8 +596,8 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
       }
       ++accepted_count;
     }
-    const char* trace = std::getenv("ORT_GENAI_TRACE_SPECULATIVE");
-    const bool trace_greedy = trace != nullptr && trace[0] == '1';
+    const auto trace = GetEnv("ORT_GENAI_TRACE_SPECULATIVE");
+    const bool trace_greedy = !trace.empty() && trace.front() == '1';
     const int64_t verification_position = trace_greedy ? requests_[i]->CurrentSequenceLength() - static_cast<int64_t>(draft_count) : 0;
     const int64_t verification_past = trace_greedy ? requests_[i]->ProcessedSequenceLength() : 0;
     requests_[i]->CommitAcceptedDraftsForTransaction(accepted_count);
@@ -613,7 +617,15 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
       }
       record << "],\"rows\":[";
       for (size_t offset = 0; offset < requests_[i]->EvaluatedDraftTokenCount(); ++offset) {
-        const auto scores = verify_rows[row + offset].CopyDeviceToCpu();
+        auto& score_row = verify_rows[row + offset];
+        if (!verification_rows_downloaded &&
+            std::none_of(traced_buffers.begin(), traced_buffers.end(), [&score_row](const auto& downloaded) {
+              return downloaded.SameBufferAs(score_row);
+            })) {
+          score_row.CopyDeviceToCpu();
+          traced_buffers.push_back(score_row);
+        }
+        const auto scores = score_row.CpuSpan();
         const int32_t draft = drafts[offset];
         const int32_t target = row_argmax[row + offset];
         const bool valid_draft = draft >= 0 && static_cast<size_t>(draft) < scores.size();

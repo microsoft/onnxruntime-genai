@@ -6,6 +6,7 @@
 #include "engine/request.h"
 #include "engine/decoders/varlen_decoder_io.h"
 #include "engine/paged_key_value_cache.h"
+#include "models/env_utils.h"
 #include "models/io/kv_cache.h"
 
 #include <algorithm>
@@ -1567,8 +1568,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         feed.first_position, feed.aux_row_count, "DFlash 2 cached positions");
   }
 
-  const char* trace = std::getenv("ORT_GENAI_TRACE_SPECULATIVE");
-  const bool trace_greedy = trace != nullptr && trace[0] == '1';
+  const auto trace = GetEnv("ORT_GENAI_TRACE_SPECULATIVE");
+  const bool trace_greedy = !trace.empty() && trace.front() == '1';
   if (!drafts_wanted || (device_selection && !trace_greedy)) {
     return true;
   }

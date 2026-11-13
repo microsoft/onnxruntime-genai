@@ -542,7 +542,8 @@ def calibrate_kv_scales(
     quantile of ``|x|``) or ``mse`` (the clip point minimizing the round-trip quantization
     error, see :func:`_mse_threshold`; not available for FP8). ``percentile`` and ``mse`` buffer
     up to ``sample_budget`` token rows per layer, strided evenly across every calibration
-    sequence so the estimate is not biased towards early positions.
+    sequence so the estimate is not biased towards early positions. BF16 and FP32 cache outputs
+    retain FP32 sample storage so finite values outside FP16 range remain calibratable.
 
     ``k_rotary_envelope`` calibrates the K threshold on the rotation-invariant pair norm
     (see :func:`_pair_envelope`) instead of the raw post-RoPE values. Without it, the K scales
@@ -706,6 +707,10 @@ def calibrate_kv_scales(
     v_amax = np.zeros((num_layers, channels), dtype=np.float32)
     need_samples = method in {"percentile", "mse"}
     per_seq_budget = max(1, sample_budget // max(1, len(seqs)))
+    sample_dtype = np.float32 if any(
+        getattr(meta, "type", None) in {"tensor(bfloat16)", "tensor(float)"}
+        for meta in sess.get_outputs() if meta.name in read_names
+    ) else np.float16
     k_buf = [[] for _ in range(num_layers)] if need_samples else None
     v_buf = [[] for _ in range(num_layers)] if need_samples else None
 
@@ -763,8 +768,8 @@ def calibrate_kv_scales(
             k_amax[i] = np.maximum(k_amax[i], np.abs(k).max(axis=0))
             v_amax[i] = np.maximum(v_amax[i], np.abs(v).max(axis=0))
             if need_samples:
-                k_buf[i].append(_subsample(k, per_seq_budget).astype(np.float16))
-                v_buf[i].append(_subsample(v, per_seq_budget).astype(np.float16))
+                k_buf[i].append(_subsample(k, per_seq_budget).astype(sample_dtype))
+                v_buf[i].append(_subsample(v, per_seq_budget).astype(sample_dtype))
         logger.info("[%d/%d] seq_len=%d k_amax<L0>=%.4f v_amax<L0>=%.4f", pi + 1, len(seqs), seq_len, k_amax[0].max(), v_amax[0].max())
 
     # A NaN/Inf anywhere in the captured KV poisons the whole channel's threshold, so fail loudly
@@ -780,6 +785,8 @@ def calibrate_kv_scales(
         for i in range(num_layers):
             ks = np.concatenate(k_buf[i], axis=0).astype(np.float32)
             vs = np.concatenate(v_buf[i], axis=0).astype(np.float32)
+            if not np.isfinite(ks).all() or not np.isfinite(vs).all():
+                raise ValueError("Calibration sample buffers contain non-finite cache values.")
             if method == "percentile":
                 k_thr[i] = np.percentile(np.abs(ks), percentile, axis=0)
                 v_thr[i] = np.percentile(np.abs(vs), percentile, axis=0)

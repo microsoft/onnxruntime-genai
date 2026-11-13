@@ -50,7 +50,7 @@ class OnnxSourceModel(Model):
                     (decoder_config["outputs"], ("present_key_names", "present_value_names")),
                 ):
                     cache_names.update(bindings[key] % layer_id for key in keys)
-                for key in ("past_key_names", "past_value_names"):
+                for key, cache_slot in (("past_key_names", 3), ("past_value_names", 4)):
                     name = decoder_config["inputs"][key] % layer_id
                     value = source_inputs.get(name)
                     if value is None or value.dtype not in {ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
@@ -61,6 +61,13 @@ class OnnxSourceModel(Model):
                         or list(value.shape)[2:] != [self.num_kv_heads, self.head_size]
                     ):
                         raise ValueError(f"ONNX source cache {name!r} does not match the decoder head geometry.")
+                    if any(
+                        consumer.domain != "com.microsoft"
+                        or consumer.op_type != "PagedAttention"
+                        or input_index != cache_slot
+                        for consumer, input_index in value.uses()
+                    ):
+                        raise ValueError(f"ONNX source cache consumer for {name!r} is unsupported for conversion.")
         elif self.kv_cache_attrs["scales_path"]:
             raise ValueError("Unquantized ONNX source export does not use a KV scale file.")
 
@@ -77,13 +84,21 @@ class OnnxSourceModel(Model):
             for value in node.outputs:
                 self.make_source_value(value, cache_names)
             inputs = [value.name if value is not None else "" for value in node.inputs]
-            attributes = {name: attribute.value for name, attribute in node.attributes.items()}
+            attributes = dict(node.attributes)
             if scheme != "none" and node.domain == "com.microsoft" and node.op_type == "PagedAttention":
                 if len(inputs) < 5 or inputs[3] not in layer_by_key:
                     raise ValueError("ONNX source attention does not match its decoder cache bindings.")
                 layer_id = layer_by_key[inputs[3]]
                 if inputs[4] != decoder_config["inputs"]["past_value_names"] % layer_id:
                     raise ValueError("ONNX source key/value cache layers do not match.")
+                if len(node.outputs) < 3:
+                    raise ValueError("ONNX source cache outputs must include the key and value caches.")
+                for cache, key in zip(node.outputs[1:3], ("present_key_names", "present_value_names"), strict=True):
+                    expected_name = decoder_config["outputs"][key] % layer_id
+                    if cache.name != expected_name or not cache.is_graph_output():
+                        raise ValueError("ONNX source cache outputs must directly match the decoder bindings.")
+                    if cache.uses():
+                        raise ValueError(f"ONNX source cache consumer for output {cache.name!r} is unsupported for conversion.")
                 inputs.extend([""] * max(0, 16 - len(inputs)))
                 inputs[14], inputs[15] = self.get_kv_cache_scale_inputs(layer_id=layer_id)
                 attributes.update(k_quant_type="PER_CHANNEL", v_quant_type="PER_CHANNEL")
@@ -164,7 +179,10 @@ class OnnxSourceModel(Model):
 
     def make_source_value(self, value, cache_names):
         emitted = self.make_value(
-            value.name, ir.DataType.INT8 if value.name in cache_names else value.dtype, value.shape
+            value.name,
+            ir.DataType.INT8 if value.name in cache_names else None,
+            value.shape,
+            value_type=value.type,
         )
         emitted.doc_string = value.doc_string
         emitted.metadata_props.update(value.metadata_props)

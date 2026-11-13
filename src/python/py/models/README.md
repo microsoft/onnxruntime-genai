@@ -1007,6 +1007,8 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 The Python `OnnxSourceModel` builder accepts validated flat ONNX sources when the original checkpoint is unavailable or its architecture has no checkpoint loader. It preserves existing nodes, tensor encodings, packed-weight layouts, metadata, and activation precision, and emits a new graph through `Model`'s graph, initializer, scale, and serialization APIs. It does not requantize the weights or modify the source graph. Local functions, nested graphs, and sparse initializers are rejected. Sparse initializers are checked before IR conversion can discard them. Hybrid decoder `state_groups` identify the attention-cache layers; contiguous layer IDs remain the fallback for legacy decoders. The supported cache policies for this importer are `none` and static `int8_per_channel`; other checkpoint builders retain their existing wider scheme support.
 
+Unchanged graph values retain their complete ONNX types, including tensor sequences, and node attributes retain their explicit types. INT8 cache conversion requires each attention cache output to directly match its configured decoder output with no additional consumers. Cache inputs may only feed the corresponding `PagedAttention` cache slots. Indirect cache aliases and other floating-cache consumers are rejected rather than being exported with mixed cache representations.
+
 Calibrate the original target first:
 
 ```bash

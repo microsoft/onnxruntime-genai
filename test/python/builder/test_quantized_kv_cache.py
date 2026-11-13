@@ -221,6 +221,36 @@ def test_onnx_source_uses_sparse_paged_kv_state_groups(tmp_path, paged_onnx_sour
     np.testing.assert_array_equal(attention.inputs[15].const_value.numpy(), np.full((1, 1, 128), 0.25))
 
 
+@pytest.mark.parametrize("topology", ["output_alias", "output_consumer", "input_consumer"])
+def test_onnx_source_rejects_unsupported_cache_conversion_topology(tmp_path, paged_onnx_source, topology):
+    onnx = importlib.import_module("onnx")
+    source_path, decoder = paged_onnx_source
+    source = OnnxSourceModel.from_pretrained(source_path)
+    cache_shape = [1, 256, 1, 128]
+    if topology == "output_alias":
+        source.rename_value("present_keys_0", "raw_keys")
+        source.graph.outputs[:] = [value for value in source.graph.outputs if value.name != "raw_keys"]
+        source.make_node("Identity", inputs=["raw_keys"], outputs=["present_keys_0"], name="cache_alias")
+        source.graph.outputs.append(source.make_value("present_keys_0", ir.DataType.BFLOAT16, cache_shape))
+    else:
+        cache_name = "past_keys_0" if topology == "input_consumer" else "present_keys_0"
+        source.make_node(
+            "Cast", inputs=[cache_name], outputs=["floating_cache"], name="floating_consumer", to=ir.DataType.FLOAT
+        )
+        source.graph.outputs.append(source.make_value("floating_cache", ir.DataType.FLOAT, cache_shape))
+    topology_path = source.save_model(tmp_path / "topology")
+    onnx.checker.check_model(topology_path)
+    scales_path = tmp_path / "scales.json"
+    scales_path.write_text(json.dumps({"scales": {"k_scales": [[0.125] * 128], "v_scales": [[0.25] * 128]}}))
+
+    with pytest.raises(ValueError, match=r"cache output|cache consumer"):
+        OnnxSourceModel.from_pretrained(
+            topology_path,
+            decoder,
+            {"kv_cache_quant_scheme": "int8_per_channel", "kv_cache_scale_file": str(scales_path)},
+        )
+
+
 def test_onnx_source_preserves_existing_int8_target(tmp_path, paged_onnx_source):
     source_path, decoder = paged_onnx_source
     scales = tmp_path / "scales.json"
@@ -376,6 +406,67 @@ def test_onnx_source_preserves_folded_constant_initializer(tmp_path):
     session_options.intra_op_num_threads = 4
     session = ort.InferenceSession(str(exported_path), sess_options=session_options, providers=["CPUExecutionProvider"])
     np.testing.assert_array_equal(session.run(None, {"input": np.asarray([1, 2], dtype=np.float32)})[0], [[1], [2]])
+
+
+@pytest.mark.parametrize("operation", ["SequenceConstruct", "SequenceAt", "Identity"])
+def test_onnx_source_preserves_sequence_types(tmp_path, operation):
+    onnx = importlib.import_module("onnx")
+    ort = importlib.import_module("onnxruntime")
+    source = Model(graph_name="sequence_source")
+    input_value = source.make_value("input", ir.DataType.FLOAT, [2])
+    output_value = source.make_value("output", ir.DataType.FLOAT, [2])
+    if operation != "SequenceConstruct":
+        input_value.type = ir.SequenceType(ir.TensorType(ir.DataType.FLOAT))
+    if operation != "SequenceAt":
+        output_value.type = ir.SequenceType(ir.TensorType(ir.DataType.FLOAT))
+    source.graph.inputs.append(input_value)
+    inputs = ["input"]
+    if operation == "SequenceAt":
+        source.make_initializer(np.asarray(0, dtype=np.int64), "index")
+        inputs.append("index")
+    source.make_node(operation, inputs=inputs, outputs=["output"], name="sequence")
+    source.graph.outputs.append(output_value)
+    source_path = tmp_path / "sequence.onnx"
+    source.save_onnx_model(source.model, source_path)
+    onnx.checker.check_model(source_path)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 4
+    feed = np.asarray([1, 2], dtype=np.float32)
+    if operation != "SequenceConstruct":
+        feed = [feed, np.asarray([3, 4], dtype=np.float32)]
+    original = ort.InferenceSession(str(source_path), options, providers=["CPUExecutionProvider"])
+    expected = original.run(None, {"input": feed})[0]
+
+    exported_path = OnnxSourceModel.from_pretrained(source_path).save_model(tmp_path / "exported")
+    onnx.checker.check_model(exported_path)
+    session = ort.InferenceSession(str(exported_path), options, providers=["CPUExecutionProvider"])
+    actual = session.run(None, {"input": feed})[0]
+    if operation == "SequenceAt":
+        np.testing.assert_array_equal(actual, expected)
+    else:
+        assert len(actual) == len(expected)
+        for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+            np.testing.assert_array_equal(actual_tensor, expected_tensor)
+
+
+def test_onnx_source_preserves_typed_empty_float_attributes(tmp_path):
+    onnx = importlib.import_module("onnx")
+    source = Model(graph_name="typed_attribute_source")
+    source.make_node(
+        "Constant", inputs=[], outputs=["output"], name="empty_floats",
+        value_floats=ir.Attr("value_floats", ir.AttributeType.FLOATS, []),
+    )
+    source.graph.outputs.append(source.make_value("output", ir.DataType.FLOAT, [0]))
+    source_path = tmp_path / "empty.onnx"
+    source.save_onnx_model(source.model, source_path)
+    onnx.checker.check_model(source_path)
+
+    exported_path = OnnxSourceModel.from_pretrained(source_path).save_model(tmp_path / "exported")
+    onnx.checker.check_model(exported_path)
+    exported = ir.load(exported_path)
+    attribute = next(iter(exported.graph)).attributes["value_floats"]
+    assert attribute.type == ir.AttributeType.FLOATS
+    assert attribute.value == () or attribute.value == []
 
 
 def test_onnx_source_rejects_sparse_initializers_before_ir_conversion(tmp_path):

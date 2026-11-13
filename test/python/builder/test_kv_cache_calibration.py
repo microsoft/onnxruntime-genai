@@ -65,6 +65,49 @@ def test_run_calibration_batch_preserves_floating_cache(tmp_path, cache_dtype):
     np.testing.assert_array_equal(actual[0], expected)
 
 
+@pytest.mark.parametrize("method", ["minmax", "percentile"])
+def test_calibrate_bf16_values_beyond_fp16_range(tmp_path, monkeypatch, method):
+    ir = pytest.importorskip("onnx_ir")
+    ort = pytest.importorskip("onnxruntime")
+    ml_dtypes = pytest.importorskip("ml_dtypes")
+
+    def value(name, dtype, shape):
+        return ir.Value(name=name, type=ir.TensorType(dtype), shape=ir.Shape(shape))
+
+    shape = [1, 1, 3, 4]
+    keys = value("present.0.key", ir.DataType.BFLOAT16, shape)
+    values = value("present.0.value", ir.DataType.BFLOAT16, shape)
+    graph = ir.Graph(
+        inputs=[
+            value("input_ids", ir.DataType.INT64, [1, "tokens"]),
+            value("attention_mask", ir.DataType.INT64, [1, "tokens"]),
+            value("past_key_values.0.key", ir.DataType.BFLOAT16, [1, 1, "past", 4]),
+            value("past_key_values.0.value", ir.DataType.BFLOAT16, [1, 1, "past", 4]),
+        ],
+        outputs=[keys, values],
+        nodes=[
+            ir.node("Constant", inputs=[], outputs=[keys], attributes={"value": ir.tensor(np.full(shape, 65536, dtype=ml_dtypes.bfloat16))}),
+            ir.node("Constant", inputs=[], outputs=[values], attributes={"value": ir.tensor(np.full(shape, 131072, dtype=ml_dtypes.bfloat16))}),
+        ],
+        name="bf16_range_calibration",
+        opset_imports={"": 20},
+    )
+    model_path = tmp_path / "bf16.onnx"
+    ir.save(ir.Model(graph, ir_version=10), model_path)
+    monkeypatch.setattr(ort, "get_available_providers", lambda: ["CPUExecutionProvider"])
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(
+        AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda path: _FakeTokenizer(tokens_per_call=3)),
+    ))
+    output_path = tmp_path / "scales.json"
+    kvc.calibrate_kv_scales(
+        str(model_path), str(tmp_path / "tokenizer"), str(output_path), method=method,
+        target_seq=3, num_seqs=1, k_rotary_envelope=False,
+    )
+    result = json.loads(output_path.read_text())
+    np.testing.assert_array_equal(result["scales"]["k_scales"], [[512.0] * 4])
+    np.testing.assert_array_equal(result["scales"]["v_scales"], [[1024.0] * 4])
+
+
 @pytest.mark.parametrize("cache_dtype", ["FLOAT16", "BFLOAT16"])
 def test_run_calibration_batch_aliases_paged_caches(tmp_path, cache_dtype):
     ir = pytest.importorskip("onnx_ir")
