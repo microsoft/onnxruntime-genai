@@ -31,6 +31,10 @@ class WhisperEncoder(Model):
 
         self.num_mel_bins = config.num_mel_bins
         self.max_source_positions = config.max_source_positions
+        # The encoder makes the cross-attention KV caches of each decoder layer, as many as the decoder has
+        # (`num_hidden_layers` in extra_options sets both counts). The decoder can have fewer layers than the encoder
+        # (e.g. whisper-large-v3-turbo has 32 encoder layers and 4 decoder layers).
+        self.num_decoder_layers = int(extra_options.get("num_hidden_layers", config.decoder_layers))
 
         extra_options["include_hidden_states"] = True  # Include hidden states as output
         extra_options["exclude_lm_head"] = True        # Exclude LM head since it's not used in the encoder
@@ -55,8 +59,8 @@ class WhisperEncoder(Model):
         # Set output dicts
         self.output_names = {
             "hidden_states": "hidden_states",
-            "present_key_cross": {i: f"present_key_cross_{i}" for i in range(self.num_layers)},
-            "present_value_cross": {i: f"present_value_cross_{i}" for i in range(self.num_layers)},
+            "present_key_cross": {i: f"present_key_cross_{i}" for i in range(self.num_decoder_layers)},
+            "present_value_cross": {i: f"present_value_cross_{i}" for i in range(self.num_decoder_layers)},
         }
         self.output_types = {
             "hidden_states": self.io_dtype,
@@ -143,13 +147,13 @@ class WhisperEncoder(Model):
         return past_k, past_v, present_k, present_v
 
     def make_postprocessing_nodes(self):
-        # Make the following subgraphs to extract and transpose cross-attention KV cache outputs for each layer:
+        # Make the following subgraphs to extract and transpose cross-attention KV cache outputs for each decoder layer:
         #
         # encoder_hidden_states --> MatMul --> Reshape --> Transpose --> present_key_cross_i
         # encoder_hidden_states --> MatMul --> Add --> Reshape --> Transpose --> present_value_cross_i
 
         # Add cross-attention KV cache outputs
-        for i in range(self.num_layers):
+        for i in range(self.num_decoder_layers):
             for proj_type in ["k_proj", "v_proj"]:
                 basename = f"/model/layers.{i}/attn/cross/{proj_type}"
                 matmul_name = f"{basename}/MatMul"
