@@ -124,9 +124,59 @@ The configuration above describes the required interface, not a certified
 exporter/library/model combination. Package compatibility remains unverified
 until those artifacts are supplied.
 
+## Bulk prefill (`model.decoder.prefill_filename`)
+
+R8 prompt ingestion runs one whole-model pass per eight prompt tokens (4096 passes for a
+32K prompt), and each pass re-reads every packed weight. An optional companion graph
+consumes full `R`-token chunks instead, where `8 < R <= 2048` and `R % 8 == 0`:
+
+```json
+"decoder": {
+  "filename": "model.onnx",
+  "prefill_filename": "prefill-r2048.onnx",
+  "prefill_sequence_length": 2048,
+  "shared_initializers": [ ...every external initializer... ]
+}
+```
+
+The runtime runs full `R`-row chunks through the prefill session and the shorter
+remainder through the unchanged R8 target. Verification and decoding stay R8, and the
+context-capacity reserve stays eight positions. The prefill session clones the decoder
+session options, binds the same KV and recurrent-state buffers, and runs uncaptured
+(`gpu_graph_id=-1`), so verification capture ownership is unaffected. List every large
+initializer in `shared_initializers` so both sessions use one device copy.
+
+The prefill graph contract:
+
+- Inputs equal the target's, with `input_ids` `[1, R]`; `seqlens_k = L + R - 1` for
+  logical past length `L`.
+- Recurrent layers use `com.microsoft::Mamba2Prefill`, which applies Mamba2Verify's
+  per-token arithmetic to the whole chunk and writes only the terminal convolution and
+  SSM state to slot 0; the runtime then continues with `state_row = 0`.
+- BF16 `logits[1,1,vocab]` and INT64 `pred_ids[1,1]` describe only the last prompt
+  row; BF16 `aux_hidden_states[1,R,width]` contains every row for the drafter window.
+
+`tools/python/create_bolt_prefill_model.py` derives such a graph from the package's
+fixed-R8 target graph, hardlinking package files into a new directory without rewriting
+weights:
+
+```bash
+python tools/python/create_bolt_prefill_model.py --source /models/bolt \
+  --output /models/bolt-prefill-2048 --rows 2048
+```
+
+This requires an ONNX Runtime build with `Mamba2Prefill` and the CUDA
+`session.gqa.fixed_query_chunk_size` session option. The prefill session sets that
+option to `"8"` unless configured, so Flash attention keeps the per-row arithmetic of
+eight-row calls. Packed projections, MoE experts and the router run at `M = R` and use
+different GEMM reduction orders than their eight-row kernels, so bulk prefill is
+numerically close to, but not byte-identical with, R8 prefill. Prompts shorter than `R`
+never use the prefill graph. The prefill graph does not change KV capacity.
+
 ## State and public-token semantics
 
-Prompt ingestion uses the same fixed-R8 target, eight tokens per call. Intermediate
+By default, prompt ingestion uses the same fixed-R8 target, eight tokens per call. An
+optional bulk-prefill graph (above) consumes full larger chunks first. Intermediate
 chunks execute asynchronously without host readback; the final chunk is padded
 but only valid rows are committed, and its last valid row selects the recurrent
 state and first generated anchor. The drafter then ingests the prompt's trailing
@@ -179,6 +229,12 @@ reset and at every output-budget boundary, terminal EOS, every recurrent
 acceptance row, and prompt lengths immediately below/at/above an eight-row chunk,
 the drafter context window, and the supported capacity (with rejection above
 capacity). Those independent real-graph checks remain outstanding.
+
+For a package with `prefill_filename`, set `ORTGENAI_BOLT_PREFILL_TEST_MODEL` and run
+`engine_unit_tests --gtest_filter='NemotronBoltGPU.*Prefill*'`. It compares bulk and R8
+prefill: exact tokens, drafter proposals, prefill call counts and reset determinism,
+plus bounded relative error of committed KV/recurrent state and last-row logits.
+Prompts shorter than the chunk size must stay byte-identical.
 
 ## Direct GGUF weight loading (`gguf_initializers`)
 
