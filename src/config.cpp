@@ -3121,7 +3121,8 @@ struct Search_Element : JSON::Element {
 };
 
 struct Speculative_Element : JSON::Element {
-  explicit Speculative_Element(Config::Speculative& v) : v_{v} {}
+  explicit Speculative_Element(Config::Speculative& v, bool allow_target_only = false)
+      : v_{v}, allow_target_only_{allow_target_only} {}
 
   // Draft widths (max_draft_tokens, min_adaptive_k) must be within [kMinK, kMaxDraftTokens].
   // This is a parse-time sanity bound, not a capability: the engine clamps the width again at
@@ -3134,9 +3135,10 @@ struct Speculative_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "max_draft_tokens") {
       int k = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (k < kMinK || k > kMaxDraftTokens)
+      const int minimum = allow_target_only_ ? 0 : kMinK;
+      if (k < minimum || k > kMaxDraftTokens)
         throw std::runtime_error(
-            "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
+            "speculative.max_draft_tokens must be between " + std::to_string(minimum) + " and " +
             std::to_string(kMaxDraftTokens) + " Got: " + std::to_string(k) + ".");
       v_.max_draft_tokens = k;
     } else if (name == "ngram_size") {
@@ -3165,6 +3167,7 @@ struct Speculative_Element : JSON::Element {
 
  private:
   Config::Speculative& v_;
+  bool allow_target_only_{};
 };
 
 uint64_t ParseRuntimeProfileMemoryBytes(JSON::Value& value, std::string_view name);
@@ -4052,7 +4055,7 @@ struct Root_Element : JSON::Element {
   Config& config_;
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
-  Speculative_Element speculative_element_{config_.speculative};
+  Speculative_Element speculative_element_{config_.speculative, true};
   Engine_Element engine_element_{config_.engine};
   RuntimeProfiles_Element runtime_profiles_element_{config_.runtime_profiles};
 };
@@ -4066,6 +4069,12 @@ struct RootObject_Element : JSON::Element {
 
   JSON::Element& t_;
 };
+
+void ValidateSpeculativeConfig(const Config& config) {
+  // Model type and draft width may be supplied by different documents.
+  if (config.speculative.max_draft_tokens == 0 && config.model.type != "nemotron_bolt")
+    throw std::runtime_error("speculative.max_draft_tokens must be between 1 and 16. Got: 0.");
+}
 
 void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config,
                  std::optional<std::string_view> memory_json) {
@@ -4102,6 +4111,7 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
       throw std::runtime_error(oss.str());
     }
   }
+  ValidateSpeculativeConfig(config);
   ValidateRuntimeProfiles(config);
 }
 
@@ -4208,6 +4218,7 @@ void OverlayConfig(Config& config, std::string_view json) {
   RootObject_Element element{root};
   JSON::Parse(element, json);
   RefreshEngramProviders(candidate);
+  ValidateSpeculativeConfig(candidate);
   ValidateRuntimeProfiles(candidate);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
   ValidateTimestampConfiguration(candidate.model);

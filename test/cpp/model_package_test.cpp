@@ -240,6 +240,7 @@ TEST(ModelPackage, TokenizerResolvesThroughSharedAsset) {
 
   // The tokenizer files move to the content-addressed shared asset directory.
   for (const auto& entry : fs_std::directory_iterator(src_model)) {
+    if (!entry.is_regular_file()) continue;
     const auto name = entry.path().filename().string();
     if (name == "past.onnx" || name == "genai_config.json") continue;
     fs_std::copy_file(entry.path(), asset_dir / name,
@@ -294,6 +295,7 @@ TEST(ModelPackage, ExternalInitializersFolderResolvesThroughSharedAsset) {
 
   // Tokenizer files sit beside the model so the genai model directory is complete.
   for (const auto& entry : fs_std::directory_iterator(src_model)) {
+    if (!entry.is_regular_file()) continue;
     const auto name = entry.path().filename().string();
     if (name == "past.onnx" || name == "genai_config.json") continue;
     fs_std::copy_file(entry.path(), variant_dir / name,
@@ -343,6 +345,7 @@ TEST(ModelPackage, FlatDirectoryRejectsSha256Reference) {
   const auto dir = MakeTempDir("flat_sha256");
   std::error_code ec;
   for (const auto& entry : fs_std::directory_iterator(src_model)) {
+    if (!entry.is_regular_file()) continue;
     fs_std::copy_file(entry.path(), dir / entry.path().filename().string(),
                       fs_std::copy_options::overwrite_existing, ec);
     ASSERT_FALSE(ec) << ec.message();
