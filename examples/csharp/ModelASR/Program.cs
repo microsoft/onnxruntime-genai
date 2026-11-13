@@ -157,7 +157,7 @@ static string FormatTimestampRecords(ASRPostProcessorResult result, bool useSegm
     string separator = useSegments && (text.Length == 0 || !char.IsWhiteSpace(text[0])) ? " " : "";
     string suffix = useSegments ? "" : " ";
     var (start, stop) = record.TimeInterval;
-    return $"[{start:F2} - {stop:F2}]{separator}{text}{suffix}";
+    return $"[{start} - {stop}]{separator}{text}{suffix}";
   }));
 }
 

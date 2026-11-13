@@ -43,8 +43,23 @@ The target must expose the residual stream entering the layers in `aux_hidden_st
 * Avoid `ReduceLogSumExp` / `ReduceMax` over the `[rows, vocab]` logits: on the CUDA execution
   providers they run a cuDNN reduction that is ~100x slower than TopK + Exp + ReduceSum. The exporter
   derives the log-partition from the sorted top-k instead.
-* The graph keeps `in_vec` behind a single `Slice`. Two slices of it would be fused by ORT's
-  `GatherSliceToSplitFusion` into a `Split` whose CUDA kernel allocates per call, which breaks CUDA graph capture
-  (`enable_cuda_graph`). With capture the drafter step takes ~2.5 ms against ~3.3 ms eager (H200, 8 context rows).
+* `GatherSliceToSplitFusion` can merge the selector's axis-1 slices of `[batch, 7, 8, 1024]` into
+  an unequal `Split` with sizes `1 + 6`. Its general CUDA path copies host-side pointer and split
+  arrays; these host buffers must remain valid for CUDA graph replay. This was verified with fusion
+  enabled on ORT stack #33967 at `dc85408` (API 33, CUDA 12.8, H100), which retains captured host
+  buffers. Candidate IDs, scores, and drafts matched the unfused path across capture/replay and
+  fresh context lengths 1-8. The fixture's legacy Q8 head was migrated to the current `MatMulPacked`
+  Q8_0 contract without changing effective scales or quantized bytes.
+* The Bolt adapter retains this narrow exclusion because the supported external runtimes do not
+  yet guarantee the captured-host-buffer fix. An API version alone does not establish that
+  guarantee. Existing caller exclusions are retained when adding the workaround; the adapter does
+  not lower the overall graph optimization level. The successful qualification above is evidence
+  for that exact build, not a claim that every older runtime fails.
+* With capture enabled, Bolt warms disposable target state with four verification calls and,
+  when present, the drafter with four proposal calls. These conservatively cover the legacy
+  two-eager-run capture delay, capture, and a subsequent replay. Newer ORT can perform warm-up
+  and capture internally within one `Run`, so the four calls do not always map to those four
+  phases. Caches, cursors, and statistics are reset before the real prompt.
+* With capture the drafter step takes ~2.5 ms against ~3.3 ms eager (H200, 8 context rows).
 * `lilicorr_drafter_tests` (CUDA kernel tests) replays recorded drafter steps through the real
   `Dflash2Drafter`; it is skipped unless `LILICORR_TEST_DIR` is set.

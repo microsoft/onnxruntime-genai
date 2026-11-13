@@ -11,6 +11,10 @@
 
 namespace Generators {
 
+namespace test {
+struct NemotronBoltTestAccess;
+}
+
 inline constexpr size_t kBoltVerifyRows = 8;
 
 struct NemotronBoltPrefillPlan {
@@ -24,6 +28,8 @@ struct NemotronBoltPrefillPlan {
 };
 
 void ValidateNemotronBoltSearch(const GeneratorParams& params);
+void ValidateNemotronBoltGraphCapture(const Config::SessionOptions& options, bool speculative);
+std::unique_ptr<Config> CreateNemotronBoltDrafterConfig(const Config& config);
 size_t NemotronBoltAcceptedPrefix(std::span<const int32_t> drafts,
                                   std::span<const int64_t> predictions);
 std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
@@ -63,6 +69,8 @@ struct NemotronBoltState : private std::unique_lock<std::mutex>, State {
   size_t CachedPromptTokens() const { return cached_prompt_tokens_; }
 
  private:
+  friend struct test::NemotronBoltTestAccess;
+
   struct PrefillResult {
     int32_t state_row;
     int32_t prediction;

@@ -343,6 +343,9 @@ endif()
 # It hosts pure unit tests (no model, no ONNX session, no GPU) alongside component
 # tests that mint requests from a tiny CPU fixture model; the fixture model only loads and never
 # runs the graph, so the suite still needs no GPU and no real inference.
+# Extensions populates JSON without adding its CMake subdirectory or target.
+FetchContent_GetProperties(nlohmann_json)
+
 file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/engine/*.cpp"
@@ -366,6 +369,7 @@ target_include_directories(engine_unit_tests PRIVATE
   ${onnxruntime_extensions_SOURCE_DIR}/shared/api
   ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/cpp
+  "${nlohmann_json_SOURCE_DIR}/include"
 )
 # onnxruntime-genai-obj propagates its PUBLIC usage requirements (ORT + extensions include dirs and
 # link libs), so those are inherited here.

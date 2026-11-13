@@ -13,6 +13,7 @@ import os
 import struct
 import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,24 @@ SRC_STATE_CAPS = {8257, 8259, 32771, 33283, 65539}
 
 def align_up(val: int, align: int = ALIGN) -> int:
     return (val + align - 1) // align * align
+
+
+FINGERPRINT_THREADS = 16
+
+
+def file_sha256(path: Path) -> str:
+    """Return the SHA-256 of the complete contents of `path`.
+
+    Always read the file: writes through an already-dirty writable mmap can change its contents without changing its stat
+    metadata, so a stat-based digest cache cannot safely validate mutable checkpoints.
+    """
+    h = hashlib.sha256()
+    buf = bytearray(4 << 20)
+    view = memoryview(buf)
+    with open(path, "rb", buffering=0) as f:
+        while n := f.readinto(buf):
+            h.update(view[:n])
+    return h.hexdigest()
 
 
 class HFCheckpointReader:
@@ -165,31 +184,19 @@ class HFCheckpointReader:
         return t
 
     def checkpoint_fingerprint(self) -> str:
-        """Compute a deterministic fingerprint of the checkpoint's shards, headers, and weight payloads."""
+        """Return a SHA-256 of the weight map and the complete contents of every shard.
+
+        Weight banks are reused only while their recorded fingerprint matches, so every byte is hashed: a change anywhere
+        in a shard must produce a new fingerprint. The shards are hashed in parallel.
+        """
         h = hashlib.sha256()
-        shards = sorted(set(self.weight_map.values()))
         for item_k, item_v in sorted(self.weight_map.items()):
             h.update(f"{item_k}:{item_v}\n".encode())
-        window = 4 * 1024 * 1024
-        for shard in shards:
-            p = self.hf_dir / shard
-            if not p.is_file():
-                continue
-            st = p.stat()
-            h.update(f"{shard}:{st.st_size}:".encode())
-            with open(p, "rb") as f:
-                if st.st_size <= 16 * window:
-                    while True:
-                        chunk = f.read(window)
-                        if not chunk:
-                            break
-                        h.update(chunk)
-                else:
-                    h.update(f.read(window))
-                    f.seek(st.st_size // 2)
-                    h.update(f.read(window))
-                    f.seek(max(0, st.st_size - window))
-                    h.update(f.read(window))
+        shards = [shard for shard in sorted(set(self.weight_map.values())) if (self.hf_dir / shard).is_file()]
+        with ThreadPoolExecutor(max_workers=max(1, min(FINGERPRINT_THREADS, len(shards)))) as ex:
+            digests = list(ex.map(file_sha256, [self.hf_dir / shard for shard in shards]))
+        for shard, digest in zip(shards, digests, strict=True):
+            h.update(f"{shard}:{digest}\n".encode())
         return h.hexdigest()
 
 
@@ -256,20 +263,102 @@ class AlignedBlobWriter:
         return self.filename, off, len(raw), dtype, list(dims)
 
 
-def read_gguf_tensor_infos(path: Path) -> tuple[list[dict], int]:
-    """Return the tensor infos (`name`, `dims`, `ggml_type`, absolute `data_offset`) of the GGUF file `path` and its data offset."""
-    with open(path, "rb") as f:
+GGML_TYPE_INFO: dict[int, tuple[str, int, int]] = {
+    0: ("F32", 1, 4),
+    1: ("F16", 1, 2),
+    2: ("Q4_0", 32, 18),
+    3: ("Q4_1", 32, 20),
+    6: ("Q5_0", 32, 22),
+    7: ("Q5_1", 32, 24),
+    8: ("Q8_0", 32, 34),
+    10: ("Q2_K", 256, 84),
+    11: ("Q3_K", 256, 110),
+    12: ("Q4_K", 256, 144),
+    13: ("Q5_K", 256, 176),
+    14: ("Q6_K", 256, 210),
+    16: ("IQ2_XXS", 256, 66),
+    17: ("IQ2_XS", 256, 74),
+    18: ("IQ3_XXS", 256, 98),
+    19: ("IQ1_S", 256, 50),
+    20: ("IQ4_NL", 32, 18),
+    21: ("IQ3_S", 256, 110),
+    22: ("IQ2_S", 256, 82),
+    23: ("IQ4_XS", 256, 136),
+    29: ("IQ1_M", 256, 56),
+    30: ("BF16", 1, 2),
+    39: ("MXFP4", 32, 17),
+    40: ("NVFP4", 64, 36),
+    41: ("Q1_0", 128, 18),
+    42: ("Q2_0", 64, 18),
+}
 
-        def read(fmt: str):
-            size = struct.calcsize(fmt)
+DEFAULT_PLE_VOCAB: tuple[int, ...] = (
+    20000003,
+    20000023,
+    20000033,
+    20000047,
+    20000059,
+    20000063,
+    20000069,
+    20000077,
+    20000081,
+    20000093,
+    20000107,
+    20000147,
+    20000153,
+    20000159,
+    20000161,
+    20000171,
+)
+DEFAULT_PLE_OFFSETS: tuple[int, ...] = (
+    0,
+    20000003,
+    40000026,
+    60000059,
+    80000106,
+    100000165,
+    120000228,
+    140000297,
+    160000374,
+    180000455,
+    200000548,
+    220000655,
+    240000802,
+    260000955,
+    280001114,
+    300001275,
+)
+DEFAULT_PLE_MULT: tuple[int, ...] = (23703573157769, 20109073645365, 8052911324071, 0)
+DEFAULT_PLE_ROWS_PER_SHARD = 2500012
+
+
+def parse_gguf_header_stream(path: Path, *, validate_bounds: bool = True) -> tuple[dict[str, object], list[dict], int]:
+    """Stream-parse a GGUF v2/v3 header of arbitrary size and optionally validate tensor byte ranges against file size."""
+    path = Path(path).expanduser()
+    with open(path, "rb") as f:
+        file_size = os.fstat(f.fileno()).st_size
+
+        def read_exact(size: int) -> bytes:
             buf = f.read(size)
             if len(buf) != size:
                 raise ValueError(f"Truncated GGUF header in {path}")
-            return struct.unpack(fmt, buf)
+            return buf
 
-        def read_str() -> str:
+        def skip_exact(size: int) -> None:
+            if size < 0 or f.tell() + size > file_size:
+                raise ValueError(f"Truncated GGUF metadata in {path}")
+            if size > 0:
+                f.seek(size, os.SEEK_CUR)
+
+        def read(fmt: str):
+            return struct.unpack(fmt, read_exact(struct.calcsize(fmt)))
+
+        def read_str(*, skip_only: bool = False) -> str:
             (n,) = read("<Q")
-            return f.read(n).decode("utf-8", errors="replace")
+            if skip_only:
+                skip_exact(n)
+                return ""
+            return read_exact(n).decode("utf-8", errors="replace")
 
         scalar_formats = {
             0: "<B",
@@ -285,41 +374,209 @@ def read_gguf_tensor_infos(path: Path) -> tuple[list[dict], int]:
             12: "<d",
         }
 
-        def read_value(vtype: int) -> object:
+        def read_value(vtype: int, *, skip_only: bool = False) -> object:
             if vtype in scalar_formats:
-                return read(scalar_formats[vtype])[0]
+                fmt = scalar_formats[vtype]
+                if skip_only:
+                    skip_exact(struct.calcsize(fmt))
+                    return None
+                return read(fmt)[0]
             if vtype == 8:
-                return read_str()
+                return read_str(skip_only=skip_only)
             if vtype == 9:
                 atype, alen = read("<IQ")
                 if atype in scalar_formats:
-                    f.seek(alen * struct.calcsize(scalar_formats[atype]), os.SEEK_CUR)
+                    skip_exact(alen * struct.calcsize(scalar_formats[atype]))
                 else:
                     for _ in range(alen):
-                        read_value(atype)
-                return None
+                        read_value(atype, skip_only=True)
+                return f"arr[{alen}]"
             raise ValueError(f"Unknown GGUF value type {vtype} in {path}")
 
-        magic, _version, n_tensors, n_kv = read("<4sIQQ")
+        magic, version, n_tensors, n_kv = read("<4sIQQ")
         if magic != b"GGUF":
             raise ValueError(f"Not a GGUF file: {path}")
+        if version not in (2, 3):
+            raise ValueError(f"Unsupported GGUF version {version} in {path}")
+
         kvs: dict[str, object] = {}
         for _ in range(n_kv):
             key = read_str()
             (vtype,) = read("<I")
             kvs[key] = read_value(vtype)
-        tensors = []
+
+        tensors: list[dict] = []
         for _ in range(n_tensors):
             name = read_str()
             (n_dims,) = read("<I")
             dims = [read("<Q")[0] for _ in range(n_dims)]
             ggml_type, rel_offset = read("<IQ")
             tensors.append({"name": name, "dims": dims, "ggml_type": ggml_type, "rel_offset": rel_offset})
+
         alignment = int(kvs.get("general.alignment", 32))
+        if alignment <= 0 or (alignment & (alignment - 1)) != 0:
+            raise ValueError(f"Invalid GGUF alignment {alignment} in {path}")
         data_offset = align_up(f.tell(), alignment)
+
+    if validate_bounds and tensors and data_offset > file_size:
+        raise ValueError(
+            f"Truncated GGUF file {path}: tensor data section starts at byte {data_offset}, past file size {file_size}"
+        )
+
     for t in tensors:
         t["data_offset"] = data_offset + t["rel_offset"]
+        type_info = GGML_TYPE_INFO.get(t["ggml_type"])
+        if type_info is None:
+            if validate_bounds:
+                raise ValueError(f"Unsupported GGUF tensor type {t['ggml_type']} for {t['name']} in {path}")
+            continue
+        if not t["dims"] or any(int(d) <= 0 for d in t["dims"]):
+            raise ValueError(f"Invalid GGUF tensor dimensions {t['dims']} for {t['name']} in {path}")
+        tname, blck_elems, blck_bytes = type_info
+        d0 = int(t["dims"][0])
+        if d0 % blck_elems != 0:
+            raise ValueError(f"{t['name']} in {path}: d0={d0} is not divisible by block size {blck_elems}")
+        row_bytes = (d0 // blck_elems) * blck_bytes
+        c_dims = [int(d) for d in reversed(t["dims"][1:])]
+        n_rows = 1
+        for d in c_dims:
+            n_rows *= d
+        n_bytes = n_rows * row_bytes
+        t["type_name"] = tname
+        t["row_bytes"] = row_bytes
+        t["n_bytes"] = n_bytes
+        t["onnx_u8_shape"] = [*c_dims, row_bytes] if c_dims else [row_bytes]
+        if validate_bounds and t["data_offset"] + n_bytes > file_size:
+            raise ValueError(
+                f"Truncated GGUF tensor {t['name']} in {path}: declared range "
+                f"[{t['data_offset']}, {t['data_offset'] + n_bytes}) exceeds file size {file_size}"
+            )
+    return kvs, tensors, data_offset
+
+
+def read_gguf_tensor_infos(path: Path, *, validate_bounds: bool = False) -> tuple[list[dict], int]:
+    """Return the tensor infos (`name`, `dims`, `ggml_type`, absolute `data_offset`) of the GGUF file `path` and its data offset."""
+    _kvs, tensors, data_offset = parse_gguf_header_stream(path, validate_bounds=validate_bounds)
     return tensors, data_offset
+
+
+def read_ple_table_spec(ple_table_path: Path | None = None) -> dict[str, object]:
+    """Read PLE table geometry (`head_dim`, `vocab`, `offset`, `total_rows`, etc.) or return the Qwen3.8 default."""
+    spec: dict[str, object] = {
+        "n_heads": 16,
+        "head_dim": 160,
+        "heads_per_ngram": 8,
+        "eos": 248044,
+        "mult": list(DEFAULT_PLE_MULT),
+        "vocab": list(DEFAULT_PLE_VOCAB),
+        "offset": list(DEFAULT_PLE_OFFSETS),
+    }
+    if ple_table_path is not None and Path(ple_table_path).is_file():
+        lines = Path(ple_table_path).read_text(encoding="utf-8").splitlines()
+        if not lines or lines[0].strip() != "qwen38_ple_table 1":
+            raise ValueError(f"Unsupported PLE table header in {ple_table_path}")
+        for raw_line in lines[1:]:
+            parts = raw_line.split()
+            if not parts:
+                continue
+            key = parts[0]
+            if key in ("n_heads", "head_dim", "heads_per_ngram", "eos"):
+                spec[key] = int(parts[1])
+            elif key in ("mult", "vocab", "offset"):
+                spec[key] = [int(x) for x in parts[1:]]
+    head_dim = int(spec["head_dim"])
+    if head_dim <= 0 or head_dim % 32 != 0:
+        raise ValueError(f"GGUF PLE table requires head_dim to be a positive multiple of 32, got {head_dim}")
+    vocab = [int(x) for x in spec["vocab"]]  # type: ignore[union-attr]
+    offset = [int(x) for x in spec["offset"]]  # type: ignore[union-attr]
+    if not vocab or len(vocab) != len(offset):
+        raise ValueError("Invalid PLE vocab/offset metadata")
+    spec["total_rows"] = max(o + v for o, v in zip(offset, vocab, strict=True))
+    return spec
+
+
+def validate_engram_gguf(
+    engram_gguf: Path,
+    ple_spec: dict[str, object],
+    *,
+    expected_kind: str | None = None,
+) -> tuple[str, str, int, int]:
+    """Validate an engram GGUF's tensor name, quantization type, shape, and byte bounds."""
+    engram_path = Path(engram_gguf).expanduser()
+    if not engram_path.is_file():
+        raise FileNotFoundError(f"Missing engram GGUF: {engram_path}")
+    _kvs, engram_ts, engram_doff = parse_gguf_header_stream(engram_path, validate_bounds=True)
+    if len(engram_ts) != 1 or engram_ts[0]["name"] != "per_layer_token_embd.weight":
+        raise ValueError(
+            f"{engram_path} must hold only per_layer_token_embd.weight, got {[t['name'] for t in engram_ts]}"
+        )
+    t0 = engram_ts[0]
+    head_dim = int(ple_spec["head_dim"])
+    total_rows = int(ple_spec["total_rows"])
+    expected_dims = [head_dim, total_rows]
+    if [int(d) for d in t0["dims"]] != expected_dims:
+        raise ValueError(f"Invalid engram tensor shape in {engram_path}: expected {expected_dims}, got {t0['dims']}")
+    ggml_type = int(t0["ggml_type"])
+    if ggml_type == 20:
+        engram_dst_name = "Qwen3.8-Flash-Next-engram-IQ4_NL.gguf"
+        ple_format = "iq4_nl"
+        ple_row_bytes = (head_dim // 32) * 18
+    elif ggml_type == 8:
+        engram_dst_name = "Qwen3.8-Flash-Next-engram-Q8_0.gguf"
+        ple_format = "q8_0"
+        ple_row_bytes = (head_dim // 32) * 34
+    else:
+        raise ValueError(f"Unsupported engram GGUF tensor type {ggml_type} in {engram_path}")
+    if expected_kind in ("iq4_nl", "q8_0") and ple_format != expected_kind:
+        raise ValueError(f"Engram GGUF {engram_path} has format {ple_format}, but {expected_kind} was requested")
+    required_end = engram_doff + total_rows * ple_row_bytes
+    actual_size = engram_path.stat().st_size
+    if required_end > actual_size:
+        raise ValueError(
+            f"Truncated engram GGUF {engram_path}: required {required_end} bytes for {total_rows} rows, got {actual_size}"
+        )
+    return engram_dst_name, ple_format, ple_row_bytes, engram_doff
+
+
+def format_gguf_ple_table_lines(
+    engram_dst_name: str,
+    ple_format: str,
+    engram_doff: int,
+    ple_row_bytes: int,
+    ple_spec: dict[str, object] | None = None,
+) -> list[str]:
+    """Format `qwen38_ple_table 1` lines pointing at `engram_dst_name`."""
+    spec = read_ple_table_spec() if ple_spec is None else ple_spec
+    mult_str = " ".join(str(x) for x in spec["mult"])  # type: ignore[union-attr]
+    vocab_str = " ".join(str(x) for x in spec["vocab"])  # type: ignore[union-attr]
+    offset_str = " ".join(str(x) for x in spec["offset"])  # type: ignore[union-attr]
+    ple_lines = [
+        "qwen38_ple_table 1",
+        f"n_heads {spec['n_heads']}",
+        f"head_dim {spec['head_dim']}",
+        f"heads_per_ngram {spec['heads_per_ngram']}",
+        f"eos {spec['eos']}",
+        f"format {ple_format}",
+        f"mult {mult_str}",
+        f"vocab {vocab_str}",
+        f"offset {offset_str}",
+    ]
+    total_ple_rows = int(spec["total_rows"])
+    rows_per_shard = max(1, min(DEFAULT_PLE_ROWS_PER_SHARD, (total_ple_rows + 127) // 128))
+    if total_ple_rows == DEFAULT_PLE_OFFSETS[-1] + DEFAULT_PLE_VOCAB[-1]:
+        rows_per_shard = DEFAULT_PLE_ROWS_PER_SHARD
+    cur_row = 0
+    for _s_idx in range(128):
+        r_cnt = min(rows_per_shard, total_ple_rows - cur_row)
+        if r_cnt <= 0:
+            break
+        byte_off = engram_doff + cur_row * ple_row_bytes
+        ple_lines.append(f"shard {engram_dst_name} {byte_off} {r_cnt}")
+        cur_row += r_cnt
+    if cur_row < total_ple_rows:
+        byte_off = engram_doff + cur_row * ple_row_bytes
+        ple_lines.append(f"shard {engram_dst_name} {byte_off} {total_ple_rows - cur_row}")
+    return ple_lines
 
 
 # Linux copies file ranges in the kernel. Windows has no os.sendfile, and the macOS one only writes to sockets.
@@ -476,3 +733,193 @@ def set_capacity_metadata(model: onnx.ModelProto, kv_capacity: int, layout: str)
             positions["capacity"] = capacity.to_dict()
             props["qwen38.position_config"] = json.dumps(positions, sort_keys=True)
     helper.set_model_props(model, props)
+
+
+GGUF_DFLASH2_RESERVED_BLOCKS = 13
+GGUF_MIN_NUM_BLOCKS_32K = 128 + GGUF_DFLASH2_RESERVED_BLOCKS  # 141
+GGUF_NUM_BLOCKS_32K = 129 + GGUF_DFLASH2_RESERVED_BLOCKS  # 142
+GGUF_MIN_NUM_BLOCKS_64K = 256 + GGUF_DFLASH2_RESERVED_BLOCKS  # 269
+GGUF_NUM_BLOCKS_64K = 257 + GGUF_DFLASH2_RESERVED_BLOCKS  # 270
+GGUF_MIN_NUM_BLOCKS_128K = 512 + GGUF_DFLASH2_RESERVED_BLOCKS  # 525
+GGUF_NUM_BLOCKS_128K = GGUF_MIN_NUM_BLOCKS_128K  # 525
+GGUF_MIN_NUM_BLOCKS_256K = 1024 + GGUF_DFLASH2_RESERVED_BLOCKS  # 1037
+GGUF_NUM_BLOCKS_256K = GGUF_MIN_NUM_BLOCKS_256K  # 1037
+
+
+def compute_gguf_model_weight_stats(model: onnx.ModelProto) -> dict[str, int]:
+    """Compute referenced external weight byte totals (`gguf_bytes`, `non_gguf_bytes`, `moe_bytes`) for `model`."""
+    used_inputs = {inp for n in model.graph.node for inp in n.input if inp}
+    inits_by_name = {t.name: t for t in model.graph.initializer if t.name in used_inputs}
+
+    moe_slices: set[tuple[str, int, int]] = set()
+    for n in model.graph.node:
+        if n.op_type == "MoEPacked":
+            for wi in n.input[2:5]:
+                t = inits_by_name.get(wi)
+                if t is not None and t.data_location == TensorProto.EXTERNAL:
+                    ext = {e.key: e.value for e in t.external_data}
+                    moe_slices.add((ext["location"], int(ext.get("offset", 0)), int(ext["length"])))
+
+    gguf_slices: set[tuple[str, int, int]] = set()
+    non_gguf_slices: set[tuple[str, int, int]] = set()
+    for t in inits_by_name.values():
+        if t.data_location != TensorProto.EXTERNAL:
+            continue
+        ext = {e.key: e.value for e in t.external_data}
+        loc = ext.get("location", "")
+        if not loc or loc in ("dflash2.onnx.data", "embedding.onnx.data"):
+            continue
+        key = (loc, int(ext.get("offset", 0)), int(ext["length"]))
+        if loc.endswith(".gguf"):
+            gguf_slices.add(key)
+        else:
+            non_gguf_slices.add(key)
+
+    return {
+        "gguf_bytes": sum(ln for _loc, _off, ln in gguf_slices),
+        "non_gguf_bytes": sum(ln for _loc, _off, ln in non_gguf_slices),
+        "moe_bytes": sum(ln for _loc, _off, ln in moe_slices),
+    }
+
+
+def estimate_gguf_peak_vram_and_thresholds(
+    total_weight_bytes: int,
+    moe_bytes: int = 0,
+    *,
+    kv_cache_dtype: str = "int8",
+    prefill_chunk_32k: int = 4096,
+    prefill_chunk_long: int = 8192,
+) -> dict:
+    """Estimate peak GPU VRAM (`cudaMemGetInfo` used bytes) and `runtime_profiles` VRAM thresholds for GGUF packages.
+
+    Calibrated against empirical H200 measurements across all three GGUF variants (INT8 KV cache), and adjusted
+    for final KV cache element width (`fp16`/`bf16` adds 12,288 bytes/token across 12 QSA layers, ~3.00 GiB at 256K)
+    and configured prefill chunk sizes.
+    """
+    kv_extra_per_token = 12_288 if kv_cache_dtype in ("fp16", "bf16") else 0
+    chunk_32k_extra = max(0, ((prefill_chunk_32k - 4096) * 2_190_000_000) // 4096)
+    chunk_long_extra = max(0, ((prefill_chunk_long - 8192) * 2_190_000_000) // 4096)
+
+    peak_32k_bytes = total_weight_bytes + 6_160_000_000 + 33_032 * kv_extra_per_token + chunk_32k_extra
+    peak_32k_c8192_bytes = total_weight_bytes + 8_350_000_000 + 33_032 * kv_extra_per_token
+    peak_64k_bytes = total_weight_bytes + 6_535_000_000 + 65_800 * kv_extra_per_token + chunk_long_extra
+    peak_128k_bytes = total_weight_bytes + 7_720_000_000 + 131_080 * kv_extra_per_token + chunk_long_extra
+    peak_256k_bytes = total_weight_bytes + 10_610_000_000 + 262_152 * kv_extra_per_token + chunk_long_extra
+
+    gb = 1_000_000_000
+    min_vram_32k = ((peak_32k_bytes + 2 * gb + gb - 1) // gb) * gb
+    min_vram_64k = max(min_vram_32k + gb, ((peak_64k_bytes + 2 * gb + gb - 1) // gb) * gb)
+    min_vram_128k = max(min_vram_64k + gb, ((peak_128k_bytes + 2 * gb + gb - 1) // gb) * gb)
+    min_vram_256k = max(min_vram_128k + 3 * gb, ((peak_256k_bytes + 2_500_000_000 + gb - 1) // gb) * gb)
+
+    return {
+        "total_weight_bytes": total_weight_bytes,
+        "total_weight_gib": round(total_weight_bytes / 2**30, 3),
+        "total_weight_gb": round(total_weight_bytes / 1e9, 3),
+        "moe_bytes": moe_bytes,
+        "moe_gib": round(moe_bytes / 2**30, 3),
+        "kv_cache_dtype": kv_cache_dtype,
+        "prefill_chunk_32k": prefill_chunk_32k,
+        "prefill_chunk_long": prefill_chunk_long,
+        "min_num_blocks_32k": GGUF_MIN_NUM_BLOCKS_32K,
+        "min_num_blocks_64k": GGUF_MIN_NUM_BLOCKS_64K,
+        "min_num_blocks_128k": GGUF_MIN_NUM_BLOCKS_128K,
+        "min_num_blocks_256k": GGUF_MIN_NUM_BLOCKS_256K,
+        "num_blocks_32k": GGUF_NUM_BLOCKS_32K,
+        "num_blocks_64k": GGUF_NUM_BLOCKS_64K,
+        "num_blocks_128k": GGUF_NUM_BLOCKS_128K,
+        "num_blocks_256k": GGUF_NUM_BLOCKS_256K,
+        "peak_32k_bytes": peak_32k_bytes,
+        "peak_32k_gib": round(peak_32k_bytes / 2**30, 3),
+        "peak_32k_gb": round(peak_32k_bytes / 1e9, 3),
+        "peak_32k_c8192_bytes": peak_32k_c8192_bytes,
+        "peak_32k_c8192_gib": round(peak_32k_c8192_bytes / 2**30, 3),
+        "peak_32k_c8192_gb": round(peak_32k_c8192_bytes / 1e9, 3),
+        "peak_64k_bytes": peak_64k_bytes,
+        "peak_64k_gib": round(peak_64k_bytes / 2**30, 3),
+        "peak_64k_gb": round(peak_64k_bytes / 1e9, 3),
+        "peak_128k_bytes": peak_128k_bytes,
+        "peak_128k_gib": round(peak_128k_bytes / 2**30, 3),
+        "peak_128k_gb": round(peak_128k_bytes / 1e9, 3),
+        "peak_256k_bytes": peak_256k_bytes,
+        "peak_256k_gib": round(peak_256k_bytes / 2**30, 3),
+        "peak_256k_gb": round(peak_256k_bytes / 1e9, 3),
+        "min_vram_32k_bytes": min_vram_32k,
+        "min_vram_64k_bytes": min_vram_64k,
+        "min_vram_128k_bytes": min_vram_128k,
+        "min_vram_256k_bytes": min_vram_256k,
+    }
+
+
+def default_gguf_runtime_profiles(
+    total_weight_bytes: int,
+    decoder_filename: str | None = "model.onnx",
+    *,
+    kv_cache_dtype: str = "int8",
+    prefill_chunk_32k: int = 4096,
+    prefill_chunk_long: int = 8192,
+) -> list[dict]:
+    """Hardware-matched `runtime_profiles` sizing `num_blocks` (`32K`/`64K`/`128K`/`256K`) to the GGUF model's VRAM footprint."""
+    vram_info = estimate_gguf_peak_vram_and_thresholds(
+        total_weight_bytes,
+        kv_cache_dtype=kv_cache_dtype,
+        prefill_chunk_32k=prefill_chunk_32k,
+        prefill_chunk_long=prefill_chunk_long,
+    )
+    min_32k = vram_info["min_vram_32k_bytes"]
+    min_64k = vram_info["min_vram_64k_bytes"]
+    min_128k = vram_info["min_vram_128k_bytes"]
+    min_256k = vram_info["min_vram_256k_bytes"]
+
+    def make_overlay(num_blocks: int, max_scheduled: int, chunk_size: int | None = None) -> dict:
+        ov: dict[str, object] = {}
+        if decoder_filename:
+            ov["model"] = {"decoder": {"filename": decoder_filename}}
+        ov["engine"] = {
+            "dynamic_batching": {
+                "num_blocks": num_blocks,
+                "max_batch_size": 1,
+                "max_scheduled_tokens": max_scheduled,
+            }
+        }
+        if chunk_size is not None:
+            ov["search"] = {"chunk_size": chunk_size}
+        return ov
+
+    return [
+        {
+            "id": "gpu-32k",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": min_32k,
+                "maximum_total_device_memory_bytes": min_64k - 1,
+                "is_integrated": False,
+            },
+            "overlay": make_overlay(GGUF_NUM_BLOCKS_32K, prefill_chunk_32k, chunk_size=prefill_chunk_32k),
+        },
+        {
+            "id": "gpu-64k",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": min_64k,
+                "maximum_total_device_memory_bytes": min_128k - 1,
+                "is_integrated": False,
+            },
+            "overlay": make_overlay(GGUF_NUM_BLOCKS_64K, prefill_chunk_long),
+        },
+        {
+            "id": "gpu-128k",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": min_128k,
+                "maximum_total_device_memory_bytes": min_256k - 1,
+                "is_integrated": False,
+            },
+            "overlay": make_overlay(GGUF_NUM_BLOCKS_128K, prefill_chunk_long),
+        },
+        {
+            "id": "gpu-256k",
+            "eligibility": {
+                "minimum_total_device_memory_bytes": min_256k,
+                "is_integrated": False,
+            },
+            "overlay": make_overlay(GGUF_NUM_BLOCKS_256K, prefill_chunk_long),
+        },
+    ]

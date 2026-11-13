@@ -16,11 +16,11 @@ def reject_output_overlap(out: Path, inputs: Mapping[str, Path | None]) -> Path:
     are canonicalised (symlinks resolved) first, and the check runs before the caller creates or removes
     anything. Inputs that were not given (`None`) are skipped; files are checked like folders.
     """
-    resolved_out = Path(out).resolve()
+    resolved_out = Path(out).expanduser().resolve()
     for label, given in inputs.items():
         if given is None:
             continue
-        source = Path(given).resolve()
+        source = Path(given).expanduser().resolve()
         if resolved_out == source or resolved_out.is_relative_to(source) or source.is_relative_to(resolved_out):
             raise SystemExit(
                 f"--out ({resolved_out}) must not be equal to, nested inside or contain {label} ({source})"
