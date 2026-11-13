@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -1160,6 +1161,81 @@ TEST(Dflash2ConfigTest, ProjectsDrafterWithoutTargetState) {
   EXPECT_FALSE(decoder.state_groups.has_value());
 }
 
+TEST(Dflash2ConfigTest, PagedAttentionPaddingRequiresCompatiblePolicy) {
+#if ORT_API_VERSION >= 32
+  if (!std::getenv("ORTGENAI_TEST_CUDA_PAGED_ATTENTION")) {
+    GTEST_SKIP() << "Set ORTGENAI_TEST_CUDA_PAGED_ATTENTION with an admitted CUDA device";
+  }
+  auto execute = [](bool padded, bool skip_sanitizer) {
+    auto config = MakeDflash2Config();
+    config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+    config.model.dflash2.filename = "padded_attention.onnx";
+    config.model.dflash2.num_hidden_layers = config.model.dflash2.num_key_value_heads = 1;
+    config.model.dflash2.head_size = 64;
+    SetProviderOption(config, "cuda", "device_id", "0");
+    config.model.dflash2.session_options.emplace();
+    config.model.dflash2.session_options->config_entries.emplace_back(
+        "session.paged_attention.skip_input_sanitizer", skip_sanitizer ? "1" : "0");
+    Dflash2Model model{CreateDflash2Config(config), GetOrtEnv()};
+    auto* cpu = GetDeviceInterface(DeviceType::CPU);
+    auto* gpu = GetDeviceInterface(DeviceType::CUDA);
+    const int64_t rows = padded ? 16 : 9;
+    std::vector<std::unique_ptr<Tensor>> tensors;
+    std::vector<const OrtValue*> values;
+    auto add = [&](ONNXTensorElementDataType type, std::initializer_list<int64_t> shape,
+                   bool cache = false) -> Tensor& {
+      auto tensor = std::make_unique<Tensor>(cache ? gpu : cpu, type);
+      tensor->CreateTensor(std::span<const int64_t>{shape.begin(), shape.size()});
+      tensor->GetByteSpan().Zero();
+      values.push_back(tensor->GetOrtTensor());
+      tensors.push_back(std::move(tensor));
+      return *tensors.back();
+    };
+    add(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {rows, 64});
+    add(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {rows, 64});
+    auto value_span = add(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {rows, 64})
+                          .GetDeviceSpan<Ort::Float16_t>()
+                          .CpuSpan();
+    std::fill(value_span.begin(), value_span.end(), Ort::Float16_t{uint16_t{0x4400}});
+    std::fill_n(value_span.begin(), 9 * 64, Ort::Float16_t{uint16_t{0x3c00}});
+    add(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {2, 16, 1, 64}, true);
+    add(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {2, 16, 1, 64}, true);
+    add(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {2}).GetDeviceSpan<int32_t>().CpuSpan()[1] = 9;
+    add(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
+    add(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1, 2}).GetDeviceSpan<int32_t>().CpuSpan()[1] = 1;
+    auto bounds = add(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {3}).GetDeviceSpan<int32_t>().CpuSpan();
+    bounds[0] = bounds[1] = 16;
+    const std::array names{"query", "key", "value", "key_cache", "value_cache",
+                           "cumulative_sequence_length", "past_seqlens", "block_table",
+                           "attention_metadata"};
+    const std::array output_names{"output", "key_cache_out", "value_cache_out"};
+    // PagedAttention requires cache outputs to alias its device-resident inputs.
+    std::array<OrtValue*, 3> outputs{nullptr, tensors[3]->GetOrtTensor(), tensors[4]->GetOrtTensor()};
+    gpu->Synchronize();
+    model.session_->Run(nullptr, names.data(), values.data(), values.size(),
+                        output_names.data(), outputs.data(), outputs.size());
+    std::unique_ptr<OrtValue> owned{outputs[0]};
+    auto output_span = WrapTensor<Ort::Float16_t>(
+        DeviceForTensor(*owned, *model.p_device_inputs_), *owned);
+    auto cache_span = tensors[4]->GetDeviceSpan<Ort::Float16_t>();
+    const auto output = output_span.CopyDeviceToCpu();
+    const auto cache = cache_span.CopyDeviceToCpu();
+    std::vector<uint16_t> result;
+    for (size_t i = 0; i < 9 * 64; ++i) result.push_back(output[i].value);
+    for (size_t i = 0; i < 16 * 64; ++i) result.push_back(cache[i].value);
+    return result;
+  };
+  const auto ordinary = execute(false, false);
+  EXPECT_EQ(execute(true, true), ordinary);
+  const auto sanitized_padding = execute(true, false);
+  EXPECT_NE(sanitized_padding.front(), ordinary.front());
+  EXPECT_EQ(ordinary[9 * 64 + 9 * 64], 0);
+  EXPECT_EQ(sanitized_padding[9 * 64 + 9 * 64], 0x4400);
+#else
+  GTEST_SKIP() << "PagedAttention sanitizer opt-out requires ONNX Runtime API 32 or later";
+#endif
+}
+
 TEST(Dflash2ConfigTest, AccountsForWindowedPagedCache) {
   const auto config = MakeDflash2Config();
   EXPECT_EQ(Dflash2Drafter::BytesPerBlock(
@@ -1241,6 +1317,9 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   dspark.sliding_window = 0;
 
   auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  EXPECT_THROW((Dflash2Drafter{model, /*paged_block_size=*/4, /*num_blocks=*/10,
+                               /*max_requests=*/1, /*fixed_single_request=*/true}),
+               std::runtime_error);
   Dflash2Drafter drafter{model, /*paged_block_size=*/4, /*num_blocks=*/10,
                          /*max_requests=*/2};
 
@@ -1524,15 +1603,22 @@ TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
   }
 
   // 5. Fixed single-request mode (block_size = 8, num_draft_tokens = 7, context_window_ = 16):
-  //    exercises 1..8 context rows with 16-row padded q_row_map/qkv_row_map and packed input/output
-  //    spans, window trimming on a large prefill, a follow-up short proposal, and ReleaseAll reset.
-  {
+  //    Padding requires an explicit compatible PagedAttention policy; otherwise use real rows.
+  for (bool skip_sanitizer : {false, true}) {
     const auto fixed_root = WriteAnchorRowIndexDrafterModel(8);
     auto fixed_config = config;
     fixed_config.config_path = fs::path{fixed_root.string()};
     fixed_config.model.dflash2.block_size = 8;
     fixed_config.model.dflash2.num_draft_tokens = 7;
     fixed_config.model.dflash2.sliding_window = 8;  // context_window_ = 8 + 8 = 16.
+    fixed_config.model.dflash2.session_options.emplace();
+    fixed_config.model.dflash2.session_options->config_entries.emplace_back(
+        "session.paged_attention.skip_input_sanitizer", skip_sanitizer ? "1" : "0");
+#if ORT_API_VERSION >= 32
+    const bool padding_enabled = skip_sanitizer;
+#else
+    const bool padding_enabled = false;
+#endif
     auto fixed_model = std::make_shared<Dflash2Model>(CreateDflash2Config(fixed_config), GetOrtEnv());
     Dflash2Drafter fixed_drafter{fixed_model, /*paged_block_size=*/4,
                                  Dflash2Drafter::PoolBlocks(fixed_config, 4, 1),
@@ -1562,9 +1648,10 @@ TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
       ASSERT_EQ(drafts.size(), 1u);
       const int32_t expected_anchor_row = static_cast<int32_t>(ctx_rows - 1);
       const int32_t expected_aux = static_cast<int32_t>(ctx_rows * 100 + ctx_rows - 1);
-      const int32_t expected_q_check = 16 + 28;
+      const auto physical_ctx_rows = padding_enabled ? 8 : ctx_rows;
+      const int32_t expected_q_check = static_cast<int32_t>(physical_ctx_rows + 8 + 28);
       const int32_t expected_qkv_sum =
-          static_cast<int32_t>(92 + ctx_rows * (ctx_rows - 1) / 2);
+          static_cast<int32_t>(28 + 8 * physical_ctx_rows + ctx_rows * (ctx_rows - 1) / 2);
       const int32_t expected_block_row_sum = static_cast<int32_t>(8 * ctx_rows + 28);
       const int32_t expected_seq_check =
           static_cast<int32_t>(pos + ctx_rows + 8) + anchor_token;
@@ -1619,7 +1706,8 @@ TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
       ASSERT_TRUE(fixed_drafter.Propose(*short_aux, short_feeds, drafts));
       ASSERT_EQ(drafts.size(), 1u);
       EXPECT_EQ(drafts[0], (std::vector<int32_t>{
-                               2, 952, prev_anchor_aux, 16 + 28, 92 + 3,
+                               2, 952, prev_anchor_aux, (padding_enabled ? 16 : 11) + 28,
+                               28 + 8 * (padding_enabled ? 8 : 3) + 3,
                                8 * 3 + 28, static_cast<int32_t>(pos + 11 + 31)}));
     }
 
@@ -1638,7 +1726,9 @@ TEST(Dflash2ConfigTest, RunsDrafterWithAnchorRowIndex) {
       };
       ASSERT_TRUE(fixed_drafter.Propose(*reset_aux, reset_feeds, drafts));
       ASSERT_EQ(drafts.size(), 1u);
-      EXPECT_EQ(drafts[0], (std::vector<int32_t>{1, 961, 0, 16 + 28, 92 + 1, 8 * 2 + 28, 10 + 32}));
+      EXPECT_EQ(drafts[0], (std::vector<int32_t>{
+                               1, 961, 0, (padding_enabled ? 16 : 10) + 28,
+                               28 + 8 * (padding_enabled ? 8 : 2) + 1, 8 * 2 + 28, 10 + 32}));
     }
   }
 }
