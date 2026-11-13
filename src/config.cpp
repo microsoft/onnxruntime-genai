@@ -3886,17 +3886,24 @@ static std::string DeclaredStateName(std::string name) {
   return name;
 }
 
+static std::string DeclaredBlockTableName(const std::string& name) {
+  if (name.empty() || name.find_first_of("{}") != std::string::npos)
+    throw std::runtime_error("K1 requires a literal block-table name or one %d layer placeholder.");
+  return name.find('%') == std::string::npos ? name : DeclaredStateName(name);
+}
+
 void ValidateDeclaredStateConfig(const Config& config) {
   const auto& decoder = config.model.decoder;
   if (!decoder.declared_state)
     return;
 
   const auto& limits = *decoder.declared_state;
-  if (limits.max_batch_size != 1 || limits.max_live_instances != 1 ||
+  const bool paged = config.engine.dynamic_batching.has_value();
+  if (limits.max_batch_size <= 0 || (!paged && limits.max_batch_size != 1) || limits.max_live_instances != 1 ||
       limits.max_sequence_length <= 0 || limits.max_sequence_length > config.model.context_length) {
     throw std::runtime_error(
-        "K1 requires max_batch_size=1, max_live_instances=1, and a positive max_sequence_length "
-        "no greater than model.context_length.");
+        "K1 requires a positive batch bound (one for dense), max_live_instances=1, and a positive "
+        "max_sequence_length no greater than model.context_length.");
   }
   if (!ModelType::IsLLM(config.model.type) || ModelType::IsLFM2(config.model.type) ||
       ModelType::IsQwenVLFamily(config.model.type) || config.model.type == "bailing_hybrid" ||
@@ -3906,7 +3913,7 @@ void ValidateDeclaredStateConfig(const Config& config) {
       !decoder.layer_types.empty() || decoder.state_groups || decoder.sliding_window ||
       decoder.state_update_capacity != 0 || decoder.conv_cache_size != 0 ||
       decoder.ple_token_pad_id >= 0 || decoder.indexer_compress_ratio != 0 ||
-      config.engine.dynamic_batching || config.engine.static_batching ||
+      config.engine.static_batching ||
       config.model.draft || !config.model.mtp.filename.empty() || !config.model.dflash2.filename.empty() ||
       config.speculative.ngram_size != 0 || !config.model.encoder.filename.empty() ||
       !config.model.embedding.filename.empty() || !config.model.engram.filename.empty() ||
@@ -3916,7 +3923,7 @@ void ValidateDeclaredStateConfig(const Config& config) {
       !decoder.inputs.cross_past_key_names.empty() || !decoder.inputs.cross_past_value_names.empty() ||
       !decoder.inputs.past_key_scale_names.empty() || !decoder.inputs.past_value_scale_names.empty() ||
       !decoder.outputs.present_key_scale_names.empty() || !decoder.outputs.present_value_scale_names.empty()) {
-    throw std::runtime_error("K1 currently supports only a single unquantized, non-windowed dense GQA decoder.");
+    throw std::runtime_error("K1 currently supports only a single unquantized, non-windowed GQA or paged decoder.");
   }
   if (decoder.num_hidden_layers <= 0 || config.search.batch_size != 1 || config.search.num_beams != 1 ||
       config.search.num_return_sequences != 1 ||
@@ -3931,6 +3938,26 @@ void ValidateDeclaredStateConfig(const Config& config) {
                            &decoder.outputs.present_key_names, &decoder.outputs.present_value_names}) {
     DeclaredStateName(*name);
   }
+  if (paged) {
+    const auto& batching = *config.engine.dynamic_batching;
+    constexpr auto max_index = static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+    if (!batching.num_blocks || *batching.num_blocks == 0 || *batching.num_blocks > max_index ||
+        batching.block_size == 0 || batching.block_size > max_index ||
+        *batching.num_blocks > max_index / batching.block_size ||
+        batching.max_batch_size != static_cast<size_t>(limits.max_batch_size) ||
+        batching.gpu_utilization_factor || batching.device_memory_budget_bytes ||
+        batching.device_memory_headroom_bytes || batching.prefix_caching != std::optional<bool>{false} ||
+        batching.snapshot_cache.Configured() || batching.max_snapshots) {
+      throw std::runtime_error(
+          "Paged K1 requires fixed int32-addressable num_blocks/block_size, max_batch_size matching "
+          "the declared bound, prefix_caching=false, and no automatic sizing or snapshots.");
+    }
+    const auto columns = (static_cast<uint64_t>(limits.max_sequence_length) + batching.block_size - 1) /
+                         batching.block_size;
+    if (*batching.num_blocks < static_cast<uint64_t>(limits.max_batch_size) * columns)
+      throw std::runtime_error("Paged K1 pool must cover every declared request at its maximum sequence length.");
+    DeclaredBlockTableName(decoder.inputs.block_table);
+  }
 }
 
 std::string BuildDeclaredStateContract(const Config& config) {
@@ -3939,9 +3966,10 @@ std::string BuildDeclaredStateContract(const Config& config) {
   if (!decoder.declared_state)
     throw std::runtime_error("K1 requires model.decoder.declared_state before session creation.");
   const auto& limits = *decoder.declared_state;
+  const bool paged = config.engine.dynamic_batching.has_value();
   std::ostringstream json;
   json.imbue(std::locale::classic());
-  json << R"({"version":1,"max_batch_size":)" << limits.max_batch_size
+  json << R"({"version":)" << (paged ? 2 : 1) << R"(,"max_batch_size":)" << limits.max_batch_size
        << R"(,"max_sequence_length":)" << limits.max_sequence_length
        << R"(,"max_live_instances":)" << limits.max_live_instances << R"(,"states":[)";
   const std::array<const std::string*, 2> inputs{&decoder.inputs.past_key_names, &decoder.inputs.past_value_names};
@@ -3958,8 +3986,14 @@ std::string BuildDeclaredStateContract(const Config& config) {
       json << layer;
     }
     json << R"(],"capacity":)" << limits.max_sequence_length << R"(,"alias":")"
-         << (config.search.past_present_share_buffer ? "past_present" : "none")
-         << R"(","lifetime":"per_generator","location":"follow_consumer"})";
+         << (paged || config.search.past_present_share_buffer ? "past_present" : "none")
+         << R"(","lifetime":")" << (paged ? "per_session" : "per_generator") << R"(","location":"follow_consumer")";
+    if (paged) {
+      const auto& batching = *config.engine.dynamic_batching;
+      json << R"(,"paging":{"block_size":)" << batching.block_size << R"(,"num_blocks":)" << *batching.num_blocks
+           << R"(,"block_table":")" << EscapeJsonString(DeclaredBlockTableName(decoder.inputs.block_table)) << R"("})";
+    }
+    json << '}';
   }
   json << "]}";
   return json.str();

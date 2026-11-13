@@ -34,6 +34,8 @@ examples/csharp/ModelChat/models
 !test/models/gemma4/*
 !/test/models/dense-k1/
 !test/models/dense-k1/*
+!/test/models/paged-k1/
+!test/models/paged-k1/*
 !/test/models/lfm2-audio/
 !test/models/lfm2-audio/*
 !test/models/hf-internal-testing/*

@@ -268,6 +268,9 @@ struct PagedKeyValueCache {
   };
 
   void BindCache(State& state);
+  void ValidateDeclaredStateBounds(size_t rows, size_t slots) const;
+  void ValidateDeclaredStateTableBounds(size_t rows, size_t columns) const;
+  void ValidateDeclaredStatePools() const;
   void InitializeCacheAllocations(const std::vector<int>& layers);
   Ort::Allocator& CacheAllocator(size_t index) {
     return cache_allocations_.empty() ? model_->p_device_kvcache_->GetAllocator() : *cache_allocations_[index].allocator;
@@ -307,6 +310,8 @@ struct PagedKeyValueCache {
                        int32_t* data, size_t columns);
   void RebuildBlockTableIndex() noexcept;
   std::shared_ptr<Model> model_;
+  // The resident lease follows the backing, even if a cache manager outlives its Engine.
+  std::shared_ptr<const void> declared_state_lease_;
   std::vector<CacheAllocation> cache_allocations_;
   std::vector<LayerCache> cache_;  // Pair of key and value caches for all layers
   // Scale caches in binding order: for each layer of cache_, the key scale then the value scale,

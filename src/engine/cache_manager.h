@@ -52,6 +52,7 @@ struct KeyValueCacheState : State {
 
 struct CacheManager {
   CacheManager(std::shared_ptr<Model> model) : model_{model} {}
+  bool IsForModel(const Model& model) const noexcept { return model_.get() == &model; }
 
   static std::unique_ptr<CacheManager> Create(std::shared_ptr<Model> model,
                                               size_t auxiliary_bytes_per_block = 0,

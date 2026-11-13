@@ -4,6 +4,7 @@
 #include "cache_manager.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <numeric>
 #include <set>
@@ -546,12 +547,80 @@ void PagedKeyValueCache::InitializeCacheAllocations(const std::vector<int>& laye
   cache_allocations_ = model_->GetCacheAllocations(inputs, outputs);
 }
 
+void PagedKeyValueCache::ValidateDeclaredStateBounds(size_t rows, size_t slots) const {
+  if (!model_->DeclaredStateIsPaged())
+    return;
+  model_->ValidateDeclaredStateEngineConfig();
+  const auto& limits = *model_->GetDeclaredState();
+  if (rows > static_cast<size_t>(limits.max_batch_size) ||
+      slots > static_cast<size_t>(limits.max_sequence_length)) {
+    throw std::runtime_error("Paged K1 cache operation exceeds its immutable request/sequence envelope.");
+  }
+}
+
+void PagedKeyValueCache::ValidateDeclaredStateTableBounds(size_t rows, size_t columns) const {
+  if (!model_->DeclaredStateIsPaged())
+    return;
+  ValidateDeclaredStateBounds(rows, 0);
+  const auto capacity = static_cast<size_t>(model_->GetDeclaredState()->max_sequence_length);
+  if (columns > (capacity + BlockSize() - 1) / BlockSize())
+    throw std::runtime_error("Paged K1 block table exceeds the declared sequence envelope.");
+}
+
+void PagedKeyValueCache::ValidateDeclaredStatePools() const {
+  if (!model_->DeclaredStateIsPaged())
+    return;
+  const auto& decoder = model_->config_->model.decoder;
+  const auto& batching = *model_->config_->engine.dynamic_batching;
+  const auto& metadata = model_->session_info_;
+  const std::array<int64_t, 4> expected{static_cast<int64_t>(*batching.num_blocks),
+                                        static_cast<int64_t>(batching.block_size),
+                                        decoder.num_key_value_heads, decoder.head_size};
+  if (expected[2] <= 0 || expected[3] <= 0)
+    throw std::runtime_error("Paged K1 requires positive cache head geometry.");
+  const auto& session = metadata.GetInputSession(ComposeKeyValueName(decoder.inputs.past_key_names, 0));
+  for (const auto& [pattern, input] : {
+           std::pair{decoder.inputs.past_key_names, true},
+           std::pair{decoder.inputs.past_value_names, true},
+           std::pair{decoder.outputs.present_key_names, false},
+           std::pair{decoder.outputs.present_value_names, false}}) {
+    std::set<std::string> declared_names;
+    for (int layer = 0; layer < decoder.num_hidden_layers; ++layer) {
+      const auto name = ComposeKeyValueName(pattern, layer);
+      declared_names.insert(name);
+      const auto shape = input ? metadata.GetInputShape(name) : metadata.GetOutputShape(name);
+      if (shape.size() != expected.size() || shape[2] != expected[2] || shape[3] != expected[3])
+        throw std::runtime_error("Paged K1 cache must have matching static head geometry: " + name);
+      for (size_t dimension = 0; dimension < 2; ++dimension) {
+        if (shape[dimension] >= 0 && shape[dimension] != expected[dimension])
+          throw std::runtime_error("Paged K1 fixed cache dimensions differ from the declared pool: " + name);
+      }
+    }
+    const auto names = input ? session.GetInputNames() : session.GetOutputNames();
+    const auto marker = pattern.find("%d");
+    const auto prefix = pattern.substr(0, marker);
+    const auto suffix = pattern.substr(marker + 2);
+    for (const auto& name : names) {
+      if (name.size() <= prefix.size() + suffix.size() || !name.starts_with(prefix) || !name.ends_with(suffix))
+        continue;
+      auto index = std::string_view{name}.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+      if (index.starts_with('-'))
+        index.remove_prefix(1);
+      if (index.empty() || !std::all_of(index.begin(), index.end(), [](char c) { return c >= '0' && c <= '9'; }))
+        continue;
+      if (declared_names.count(name) == 0) {
+        throw std::runtime_error("Paged K1 requires every cache layer to be included in the declaration: " + name);
+      }
+    }
+  }
+}
+
 PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
                                        size_t auxiliary_bytes_per_block,
                                        size_t auxiliary_reserved_memory_bytes,
                                        bool requires_prefix_checkpoint,
                                        size_t max_prefix_checkpoints)
-    : model_(model) {
+    : model_(model), declared_state_lease_(model_->AcquireDeclaredStatePoolLease()) {
   const auto& decoder = model->config_->model.decoder;
   window_block_table_required_ =
       !decoder.inputs.block_table_windowed.empty() &&
@@ -563,6 +632,14 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   const auto dtype = KeyValueCacheType(model_, paged_group);
   const bool prefix_caching_enabled =
       ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block);
+  if (model_->DeclaredStateIsPaged()) {
+    if ((dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 && dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) ||
+        window_block_table_required_ || prefix_caching_enabled || auxiliary_bytes_per_block != 0 ||
+        auxiliary_reserved_memory_bytes != 0 || requires_prefix_checkpoint || max_prefix_checkpoints != 0) {
+      throw std::runtime_error("Paged K1 requires unquantized FP16/BF16 pools without windowed, prefix, or auxiliary state.");
+    }
+    ValidateDeclaredStatePools();
+  }
   InitializeCacheAllocations(paged_group.layer_ids);
   const bool nonprimary = std::any_of(cache_allocations_.begin(), cache_allocations_.end(),
                                       [&](const auto& allocation) {
@@ -600,13 +677,13 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
       const auto name = table_template ? ComposeKeyValueName(decoder.inputs.block_table, paged_group.layer_ids[i])
                                        : decoder.inputs.block_table;
       if (!model_->session_info_.HasInput(name)) {
-        if (nonprimary || table_template)
+        if (nonprimary || table_template || model_->DeclaredStateIsPaged())
           throw std::runtime_error("Paged block table was not found: " + name);
         continue;
       }
       const auto& location = model_->session_info_.GetInputMemoryInfo(name);
       auto& device = model_->GetCacheDevice(location, name);
-      if (nonprimary || table_template) {
+      if (nonprimary || table_template || model_->DeclaredStateIsPaged()) {
         const auto shape = model_->session_info_.GetInputShape(name);
         if (model_->session_info_.GetInputDataType(name) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 || shape.size() != 2)
           throw std::runtime_error("Paged block tables must be rank-two int32 inputs: " + name);
@@ -788,6 +865,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
 }
 
 bool PagedKeyValueCache::CanAdd(std::shared_ptr<Request> request) const {
+  ValidateDeclaredStateBounds(block_tables_.size() + 1, RequiredSlots(request));
   if (block_pool_->AvailableBlocks() < block_pool_->BlocksNeeded(RequiredSlots(request))) {
     return false;
   }
@@ -827,6 +905,7 @@ void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
 }
 
 bool PagedKeyValueCache::CanAppendTokens(std::shared_ptr<Request> request) const {
+  ValidateDeclaredStateBounds(block_tables_.size(), RequiredSlots(request));
   const auto block_table_it = std::find_if(block_tables_.begin(), block_tables_.end(),
                                            [&request](const PagedCacheBlockTable& block_table) {
                                              return block_table.request_id_ == request.get();
@@ -969,6 +1048,17 @@ size_t PagedKeyValueCache::CommittedSlots(
 }
 
 PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheReservationRequest> requests) {
+  if (model_->DeclaredStateIsPaged()) {
+    size_t rows = block_tables_.size();
+    size_t slots = 0;
+    for (const auto& request : requests) {
+      rows += request.newly_admitted ? 1 : 0;
+      slots = std::max({slots, request.target_slots, request.reserved_slots});
+      if (request.prefix_match)
+        throw std::runtime_error("Paged K1 does not permit prefix adoption.");
+    }
+    ValidateDeclaredStateBounds(rows, slots);
+  }
   RetainedBlockReclaimer reclaimer{*prefix_cache_};
   return PagedCacheReservation{*block_pool_, block_tables_, requests,
                                window_block_pool_.get(), window_ring_blocks_,
@@ -1233,6 +1323,12 @@ void PagedKeyValueCache::RebuildBlockTableIndex() noexcept {
 }
 
 StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
+  if (model_->DeclaredStateIsPaged()) {
+    size_t slots = 0;
+    for (const auto& entry : plan.requests)
+      slots = std::max({slots, entry.target_cache_slots, entry.whole_sequence_cache_slots});
+    ValidateDeclaredStateBounds(block_tables_.size(), slots);
+  }
   const size_t committed_request_count = block_tables_.size();
   if (committed_request_count > max_batch_size_) {
     throw StepPlanningConsistencyError(
@@ -1597,6 +1693,7 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vec
     }
   }
 
+  ValidateDeclaredStateTableBounds(requests.size(), max_blocks);
   std::vector<int64_t> shape = {static_cast<int64_t>(requests.size()), static_cast<int64_t>(max_blocks)};
   int32_t* block_table_data = nullptr;
   DeviceSpan<int32_t> device_span;
@@ -1640,6 +1737,7 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(
   if (columns < reservation.RequiredBlockTableColumns()) {
     throw std::runtime_error("Proposed block table is narrower than the cache reservation.");
   }
+  ValidateDeclaredStateTableBounds(requests.size(), columns);
 
   std::vector<int64_t> shape{
       static_cast<int64_t>(requests.size()),
@@ -1804,6 +1902,7 @@ void PagedKeyValueCache::BindCache(State& state) {
 }
 
 void PagedKeyValueCache::UpdateState(State& state, const std::vector<std::shared_ptr<Request>>& requests) {
+  ValidateDeclaredStateBounds(requests.size(), 0);
   BindCache(state);
   auto block_tables = BlockTables(requests);
   const size_t block_table_index = cache_.size() * 2 + scale_cache_.size();
@@ -1827,6 +1926,7 @@ void PagedKeyValueCache::UpdateState(
     const std::vector<std::shared_ptr<Request>>& requests,
     const PagedCacheReservation& reservation,
     size_t columns) {
+  ValidateDeclaredStateTableBounds(requests.size(), columns);
   BindCache(state);
   auto block_tables = BlockTables(requests, reservation, columns);
   const size_t block_table_index = cache_.size() * 2 + scale_cache_.size();
