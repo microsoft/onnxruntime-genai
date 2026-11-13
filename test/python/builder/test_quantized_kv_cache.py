@@ -36,7 +36,8 @@ sys.path.insert(0, str(MODELS_DIR))
 
 
 def _load_base_module():
-    sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package = sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package.__path__ = [str(MODELS_DIR)]
     builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
     builders_package.__path__ = [str(BUILDERS_DIR)]
 

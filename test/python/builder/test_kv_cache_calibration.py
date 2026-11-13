@@ -29,7 +29,9 @@ QUANTIZATION_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models
 
 
 def _load_calibration_module():
-    sys.modules.setdefault("models", types.ModuleType("models"))
+    sys.path.insert(0, str(QUANTIZATION_DIR.parent))
+    models_package = sys.modules.setdefault("models", types.ModuleType("models"))
+    models_package.__path__ = [str(QUANTIZATION_DIR.parent)]
     module_name = "models.quantization.kv_cache_calibration"
     spec = importlib.util.spec_from_file_location(module_name, QUANTIZATION_DIR / "kv_cache_calibration.py")
     module = importlib.util.module_from_spec(spec)
