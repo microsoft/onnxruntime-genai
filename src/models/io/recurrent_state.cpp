@@ -11,14 +11,7 @@
 namespace Generators {
 
 std::string ComposeCacheName(const std::string& template_string, int index) {
-  constexpr int32_t CacheNameLength = 64;
-  char cache_name[CacheNameLength];
-  if (auto length = snprintf(cache_name, std::size(cache_name), template_string.c_str(), index);
-      length < 0 || length >= CacheNameLength) {
-    throw std::runtime_error("Unable to compose cache name from the provided template " + template_string +
-                             ". This could be either due to an encoding error or the name being too long.");
-  }
-  return std::string(cache_name);
+  return ComposeKeyValueName(template_string, index, 64, "cache name");
 }
 
 RecurrentState::RecurrentState(State& state, bool graph_capture_variants_supported)
