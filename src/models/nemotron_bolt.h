@@ -14,15 +14,28 @@ struct NemotronBoltTestAccess;
 
 inline constexpr size_t kBoltVerifyRows = 8;
 
+size_t NemotronBoltVerifyPrefixRows(size_t position);
+size_t NemotronBoltVerifyUsableRows(size_t position, size_t capacity, int max_length);
 void ValidateNemotronBoltSearch(const GeneratorParams& params);
 void ValidateNemotronBoltGraphCapture(const Config::SessionOptions& options, bool speculative);
 std::unique_ptr<Config> CreateNemotronBoltDrafterConfig(const Config& config);
+struct NemotronBoltRoundStats {
+  size_t accepted{};
+  size_t evaluated{};
+  bool correction{};
+  bool bonus{};
+  bool full{};  // All seven proposed drafts matched.
+};
+NemotronBoltRoundStats GetNemotronBoltRoundStats(std::span<const int32_t> drafts,
+                                                 std::span<const int32_t> emitted_tokens);
 size_t NemotronBoltAcceptedPrefix(std::span<const int32_t> drafts,
-                                  std::span<const int64_t> predictions);
+                                  std::span<const int64_t> predictions,
+                                  size_t max_accepted = kBoltVerifyRows - 1);
 std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
                                              std::span<const int64_t> predictions,
                                              size_t remaining,
-                                             std::span<const int> eos);
+                                             std::span<const int> eos,
+                                             size_t usable_rows = kBoltVerifyRows);
 
 struct NemotronBoltModel : Model {
   NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env);
@@ -32,6 +45,8 @@ struct NemotronBoltModel : Model {
   std::shared_ptr<Dflash2Model> drafter_model_;
   size_t capacity_{};
   size_t aux_width_{};
+  size_t target_rows_{kBoltVerifyRows};
+  bool single_token_decode_{};
 };
 
 // The target owns dense attention K/V and eight recurrent-state rows. Only the drafter is paged.
@@ -51,11 +66,16 @@ struct NemotronBoltState : State {
   Tensor& AddTensor(const std::string& name, bool input, DeviceInterface* device,
                     ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
   std::vector<int64_t> Verify(std::span<const int32_t> tokens, bool want_predictions = true);
+  std::vector<int64_t> VerifyBlock(std::span<const int32_t> tokens, bool want_predictions);
+  static std::unique_ptr<Tensor> SaveVerifyPrefix(Tensor& tensor, size_t prefix_rows);
+  static void RestoreVerifyPrefix(Tensor& tensor, Tensor& prefix);
   void Propose(size_t context_rows, size_t first_position, int32_t anchor, Tensor* aux_override = nullptr);
   void Reset();
 
   const NemotronBoltModel& bolt_;
   std::map<std::string, std::unique_ptr<Tensor>> tensors_;
+  std::map<std::string, std::unique_ptr<Tensor>> single_token_tensors_;
+  std::vector<size_t> single_token_input_indices_, single_token_output_indices_;
   std::vector<std::string> input_storage_, output_storage_;
   std::vector<Tensor*> caches_;
   DeviceSpan<int32_t> verify_inputs_span_;
@@ -65,6 +85,7 @@ struct NemotronBoltState : State {
   std::unique_ptr<Tensor> prefill_aux_;
   std::unique_ptr<Request> request_;
   size_t length_{};
+  size_t verified_rows_{};
   int32_t state_row_{};
   int32_t anchor_{};
   std::vector<int32_t> drafts_;

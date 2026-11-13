@@ -50,6 +50,18 @@ python qwen-3.6-mtp.py -m {path to main model folder} -d {path to MTP head folde
 python d1-decisions.py -m {path to model folder} -r {path to request json}
 ```
 
+## Opt-in Nemotron Bolt ordinary decoding
+
+The runtime also accepts an ordinary-only Bolt package with eight-row prefill and
+captured one-row decode in one session. Such packages are produced by the Nemotron
+Bolt Olive recipe. They require an ORT build including the multi-slot R1 Mamba
+readout-order correction, which older release binaries lack. Keep the original R8
+package for k7 speculation.
+
+```bash
+python model-generate.py -m /path/to/hybrid-package -e cuda
+```
+
 ## Execution Providers
 
 The ONNX Runtime GenAI Python package supports the following execution providers (EPs):
