@@ -80,6 +80,8 @@ size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
 // prefix caching retains windowed layers in full paged storage and includes them in this cost.
 size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
 
+size_t PagedWindowPrefixCheckpointBytes(const std::shared_ptr<Model>& model);
+
 size_t PagedCacheCaptureBlockTableBytes(const std::shared_ptr<Model>& model);
 
 // Resolves the configured prefix-cache flag, retention capacity, and target/auxiliary layout into
@@ -159,7 +161,7 @@ struct PagedKeyValueCache {
   }
   std::span<const std::shared_ptr<Block>> RequestBlocks(const void* request_id) const;
   std::shared_ptr<const PagedWindowPrefixCheckpoint> CaptureWindowPrefix(
-      const void* request_id, size_t token_count);
+      const void* request_id, size_t token_count, bool preserve_existing = false);
   void RestoreWindowPrefix(const void* request_id, const PrefixCacheMatch& match,
                            const PagedCacheReservation& reservation);
   bool RequiresPrefixCheckpoint() const;

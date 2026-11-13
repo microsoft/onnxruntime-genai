@@ -120,7 +120,7 @@ struct CacheManager {
   virtual void InitializeSnapshotCache(std::shared_ptr<PrefixSnapshotCache>) {}
   virtual bool WindowPrefixSnapshotEnabled() const { return false; }
   virtual std::shared_ptr<const PagedWindowPrefixCheckpoint> CaptureWindowPrefix(
-      const void*, size_t) { return nullptr; }
+      const void*, size_t, bool = false) { return nullptr; }
 
   // Maximum query tokens one request can contribute to a step, or 0 when the cache imposes no
   // per-request limit. Sliding-window rings use this to prevent a step from overwriting live KV.
@@ -265,8 +265,8 @@ struct PagedCacheManager : CacheManager {
     return key_value_cache_->WindowPrefixSnapshotEnabled();
   }
   std::shared_ptr<const PagedWindowPrefixCheckpoint> CaptureWindowPrefix(
-      const void* request_id, size_t token_count) override {
-    return key_value_cache_->CaptureWindowPrefix(request_id, token_count);
+      const void* request_id, size_t token_count, bool preserve_existing = false) override {
+    return key_value_cache_->CaptureWindowPrefix(request_id, token_count, preserve_existing);
   }
 
   size_t MaxQueryTokensPerRequest() const override;

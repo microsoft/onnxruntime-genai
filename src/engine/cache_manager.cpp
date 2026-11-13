@@ -392,18 +392,23 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   if (target_mapped_prefix) {
     const auto& batching = *model_->config_->engine.dynamic_batching;
     const auto& limits = batching.snapshot_cache;
-    if (limits.vram_bytes != 0 && model_->p_device_kvcache_->GetType() != DeviceType::CUDA) {
-      throw std::runtime_error("A VRAM prefix snapshot budget requires a CUDA device.");
-    }
-    if (limits.vram_bytes > std::numeric_limits<size_t>::max() - auxiliary_reserved_memory_bytes) {
-      throw std::overflow_error("Prefix snapshot reservation overflows size_t.");
-    }
-    draft_checkpoint_vram_bytes_ = limits.vram_bytes;
-    auxiliary_reserved_memory_bytes += limits.vram_bytes;
     draft_checkpoint_capacity_ = std::min(batching.dflash2_max_snapshots, batching.max_batch_size);
     if (batching.max_snapshots) {
       draft_checkpoint_capacity_ = std::min(draft_checkpoint_capacity_, *batching.max_snapshots);
     }
+    const size_t window_bytes = PagedWindowPrefixCheckpointBytes(model_);
+    if (window_bytes != 0 && limits.vram_bytes != 0 &&
+        model_->p_device_kvcache_->GetType() != DeviceType::CUDA) {
+      throw std::runtime_error("A VRAM prefix snapshot budget requires a CUDA device.");
+    }
+    if (window_bytes != 0) {
+      draft_checkpoint_vram_bytes_ =
+          std::min(draft_checkpoint_capacity_, limits.vram_bytes / window_bytes) * window_bytes;
+    }
+    if (draft_checkpoint_vram_bytes_ > std::numeric_limits<size_t>::max() - auxiliary_reserved_memory_bytes) {
+      throw std::overflow_error("Prefix snapshot reservation overflows size_t.");
+    }
+    auxiliary_reserved_memory_bytes += draft_checkpoint_vram_bytes_;
   }
   const bool hybrid_prefix_caching =
       ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block) &&

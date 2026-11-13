@@ -608,7 +608,8 @@ void PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device)
 
 bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device,
                                    std::string_view component,
-                                   size_t component_max_entries) {
+                                   size_t component_max_entries,
+                                   bool preserve_existing) {
   entry->PrepareStorage();
   const bool webgpu = device->GetType() == DeviceType::WEBGPU;
   const bool device_resident = device_resident_ || webgpu;
@@ -622,7 +623,9 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     LogEvent("refused", entry.get(), reason);
     return false;
   };
-  if (device_memory_limit_ && !MakeRoom(Tier::Vram, 0, device))
+  if (device_memory_limit_ &&
+      (preserve_existing ? accounting_->used[0] > Limit(Tier::Vram)
+                         : !MakeRoom(Tier::Vram, 0, device)))
     return refuse("device_memory_leased");
   if (entry->bytes == 0) return refuse("empty_payload");
   if (max_entries_ == 0 || component_max_entries == 0) return refuse("count_disabled");
@@ -631,6 +634,11 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     return refuse("payload_exceeds_tiers");
   }
   Prune();
+  if (preserve_existing &&
+      (entries_.size() >= max_entries_ ||
+       (!component.empty() && Count(component) >= component_max_entries))) {
+    return refuse("preserving_existing_count");
+  }
   entries_.reserve(entries_.size() + 1);
   const auto publish = [&] {
     entry->component = component;
@@ -653,8 +661,15 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     if (!EvictOldest()) return refuse("shared_count_leased");
   }
   for (size_t index = 0; index < limits_.size(); ++index) {
-    if ((!device_resident || device_memory_limit_) &&
-        !MakeRoom(static_cast<Tier>(index), entry->bytes, device)) continue;
+    if (!device_resident || device_memory_limit_) {
+      const auto tier = static_cast<Tier>(index);
+      if (preserve_existing) {
+        if (accounting_->used[index] > Limit(tier) ||
+            entry->bytes > Limit(tier) - accounting_->used[index]) continue;
+      } else if (!MakeRoom(tier, entry->bytes, device)) {
+        continue;
+      }
+    }
     Entry staged;
     staged.shapes = entry->shapes;
     staged.type = entry->type;

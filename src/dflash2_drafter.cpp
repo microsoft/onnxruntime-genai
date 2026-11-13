@@ -899,7 +899,8 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
          !feed.prefix_checkpoint->IsResident() ||
          feed.prefix_checkpoint->token_count != feed.first_position ||
          feed.prefix_checkpoint->target_generation.lock() != target_generation_)) {
-      throw std::runtime_error("DFlash 2 cannot adopt a prefix without its target-mapped cache.");
+      ++admission_misses_;
+      return false;
     }
     if (requests_.size() >= max_requests_ || free_blocks_.size() < query_spill_blocks_) {
       throw std::logic_error("DFlash 2 target-mapped admission exceeds the target batch capacity.");

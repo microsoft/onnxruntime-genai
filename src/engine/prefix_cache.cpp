@@ -175,7 +175,6 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
 
   uint64_t parent_hash = RootHash();
   std::shared_ptr<const BlockIdentity> parent;
-  size_t matched_blocks = 0;
   for (size_t offset = 0; offset + block_size <= adoptable; offset += block_size) {
     const auto chunk = tokens.subspan(offset, block_size);
     const uint64_t hash = Hash(parent_hash, chunk);
@@ -193,17 +192,7 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
     match.blocks.push_back(entry->block);
     parent = entry->identity;
     parent_hash = hash;
-    if (!options_.requires_draft_checkpoint ||
-        (entry->draft_checkpoint && entry->draft_checkpoint->IsResident() &&
-         entry->draft_checkpoint->token_count == match.blocks.size() * block_size &&
-         (!options_.requires_window_checkpoint || entry->draft_checkpoint->target_window))) {
-      matched_blocks = match.blocks.size();
-      match.draft_checkpoint = entry->draft_checkpoint;
-      match.target_window_checkpoint =
-          entry->draft_checkpoint ? entry->draft_checkpoint->target_window : nullptr;
-    }
   }
-  match.blocks.resize(matched_blocks);
   if (match.blocks.empty()) {
     return match;
   }
@@ -735,11 +724,11 @@ void PrefixCache::DropUnleasedDraftCheckpoints() {
     if (entry.draft_checkpoint && entry.draft_checkpoint.use_count() == 1) {
       entry.draft_checkpoint.reset();
     }
-    checkpoint_entries_.erase(
-        std::remove_if(checkpoint_entries_.begin(), checkpoint_entries_.end(),
-                       [](const Entry* entry) { return !entry->checkpoint && !entry->draft_checkpoint; }),
-        checkpoint_entries_.end());
   }
+  checkpoint_entries_.erase(
+      std::remove_if(checkpoint_entries_.begin(), checkpoint_entries_.end(),
+                     [](const Entry* entry) { return !entry->checkpoint && !entry->draft_checkpoint; }),
+      checkpoint_entries_.end());
 }
 
 size_t PrefixCache::ReclaimCheckpoints(size_t checkpoints_needed) {

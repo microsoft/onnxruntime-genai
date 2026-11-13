@@ -435,15 +435,19 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
         feed.first_position + feed.aux_row_count != entry.target_cache_slots) {
       continue;
     }
-    if (dflash2_drafter_->UsesTargetBlockTables() &&
-        entry.target_cache_slots == static_cast<size_t>(entry.sequence_length_before)) continue;
     auto boundary = cache_manager_->DraftBoundary(entry.request_id, entry.target_cache_slots);
     if (!boundary ||
         !dflash2_drafter_->CanCapturePrefix(feed.request, entry.target_cache_slots)) {
       continue;
     }
     try {
-      auto target_window = cache_manager_->CaptureWindowPrefix(feed.request, entry.target_cache_slots);
+      // An exact-prompt endpoint cannot serve identical replay. Publish it only with spare
+      // storage, so it cannot evict an earlier checkpoint that can.
+      const bool preserve_existing =
+          dflash2_drafter_->UsesTargetBlockTables() &&
+          entry.target_cache_slots == static_cast<size_t>(entry.sequence_length_before);
+      auto target_window = cache_manager_->CaptureWindowPrefix(
+          feed.request, entry.target_cache_slots, preserve_existing);
       if (cache_manager_->WindowPrefixSnapshotEnabled() && !target_window) {
         cache_manager_->RecordPrefixPublicationRefusal();
         continue;

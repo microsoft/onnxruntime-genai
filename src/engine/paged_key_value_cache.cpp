@@ -480,6 +480,29 @@ size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
   return bytes;
 }
 
+size_t PagedWindowPrefixCheckpointBytes(const std::shared_ptr<Model>& model) {
+  const auto& decoder = model->config_->model.decoder;
+  const auto windowed = WindowedLayers(model, ResolvePagedKeyValueGroup(decoder));
+  if (windowed.empty()) return 0;
+  const auto chunk_size = model->config_->search.chunk_size.value_or(0);
+  if (chunk_size == 0) {
+    throw std::runtime_error("Window prefix snapshots require chunked prefill.");
+  }
+  const size_t ring_blocks = WindowRingBlocks(
+      chunk_size, static_cast<size_t>(decoder.sliding_window->window_size),
+      model->config_->engine.dynamic_batching->block_size);
+  size_t bytes = 0;
+  for (const int layer : windowed) {
+    const size_t layer_bytes = CheckedMultiply(
+        ring_blocks, BytesPerBlock(model, layer), "Window prefix snapshot");
+    if (layer_bytes > std::numeric_limits<size_t>::max() - bytes) {
+      throw std::overflow_error("Window prefix snapshot overflows size_t");
+    }
+    bytes += layer_bytes;
+  }
+  return bytes;
+}
+
 size_t PagedCacheCaptureBlockTableBytes(const std::shared_ptr<Model>& model) {
   const auto& batching = *model->config_->engine.dynamic_batching;
   const auto& decoder = model->config_->model.decoder;
@@ -503,6 +526,10 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
   if (!IsPrefixCachingRequested(*model->config_)) {
     return false;
   }
+  if (auxiliary_bytes_per_block != 0 &&
+      (batching.dflash2_max_snapshots == 0 ||
+       (batching.max_snapshots && *batching.max_snapshots == 0) ||
+       (batching.snapshot_cache.Configured() && !batching.snapshot_cache.Enabled()))) return false;
 
   const auto paged_group =
       ResolvePagedKeyValueGroup(model->config_->model.decoder);
@@ -526,9 +553,6 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
           "Sliding-window DFlash prefix caching requires an explicit snapshot_cache byte budget.");
     }
   }
-  if (auxiliary_bytes_per_block != 0 &&
-      (batching.dflash2_max_snapshots == 0 ||
-       (batching.max_snapshots && *batching.max_snapshots == 0))) return false;
   if (!unsupported_layout) {
     return true;
   }
@@ -1165,7 +1189,7 @@ std::vector<std::unique_ptr<Tensor>> PagedKeyValueCache::WindowCacheViews() cons
 }
 
 std::shared_ptr<const PagedWindowPrefixCheckpoint> PagedKeyValueCache::CaptureWindowPrefix(
-    const void* request_id, size_t token_count) {
+    const void* request_id, size_t token_count, bool preserve_existing) {
   if (!WindowPrefixSnapshotEnabled() || !prefix_snapshot_cache_) return nullptr;
   const auto index = block_table_index_->Find(request_id);
   if (!index || token_count == 0 || token_count % BlockSize() != 0 ||
@@ -1188,7 +1212,8 @@ std::shared_ptr<const PagedWindowPrefixCheckpoint> PagedKeyValueCache::CaptureWi
   try {
     if (!prefix_snapshot_cache_->Allocate(
             checkpoint, model_->p_device_kvcache_, "paged-window",
-            std::min(batching.dflash2_max_snapshots, batching.max_batch_size))) return nullptr;
+            std::min(batching.dflash2_max_snapshots, batching.max_batch_size),
+            preserve_existing)) return nullptr;
     std::vector<PrefixSnapshotCache::Entry::Range> ranges(window_ring_blocks_);
     for (size_t layer = 0; layer < views.size(); ++layer) {
       const size_t block_bytes = views[layer]->GetByteSpan().size() / window_block_pool_->Capacity();

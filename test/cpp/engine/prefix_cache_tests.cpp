@@ -217,9 +217,14 @@ TEST(PrefixCacheTest, DraftOnlyAdoptionLeasesProtectTheCompletePhysicalHistory) 
   {
     const auto match = cache.Match(prompt, 8);
     ASSERT_EQ(match.token_count, 8u);
+    cache.DropUnleasedDraftCheckpoints();
+    EXPECT_EQ(cache.CheckpointCount(), 1u);
     EXPECT_EQ(cache.ReclaimableBlocks(), 0u);
     EXPECT_EQ(cache.Reclaim(4), 0u);
   }
+  cache.DropUnleasedDraftCheckpoints();
+  EXPECT_EQ(cache.CheckpointCount(), 0u);
+  EXPECT_TRUE(cache.Match(prompt, 8).Empty());
   EXPECT_EQ(cache.Reclaim(4), 2u);
 }
 

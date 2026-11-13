@@ -78,7 +78,8 @@ class PrefixSnapshotCache {
                       std::filesystem::path directory = {}, bool device_resident = false);
   bool Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device,
                 std::string_view component = {},
-                size_t component_max_entries = std::numeric_limits<size_t>::max());
+                size_t component_max_entries = std::numeric_limits<size_t>::max(),
+                bool preserve_existing = false);
   void Touch(const Entry& entry) noexcept;
   void Discard(const Entry& entry) noexcept;
   const std::array<size_t, 3>& Used() const noexcept { return accounting_->used; }
