@@ -235,7 +235,13 @@ def _write_gguf_file(
     extra_kvs: list[tuple[str, int, object]] | None = None,
     alignment: int = 32,
     truncate_payload_to: int | None = None,
+    leading_pad: int = 0,
 ) -> int:
+    """Write a GGUF file and return its data section offset.
+
+    `leading_pad` zero bytes (a multiple of `alignment`) precede the first tensor, so it starts at a nonzero relative offset.
+    """
+    assert leading_pad % alignment == 0
     kvs: list[tuple[str, int, object]] = [("general.alignment", 4, alignment)]
     if extra_kvs:
         kvs.extend(extra_kvs)
@@ -243,8 +249,8 @@ def _write_gguf_file(
     for k, vt, v in kvs:
         parts.append(_pack_gguf_kv(k, vt, v))
 
-    rel_off = 0
-    payloads: list[bytes] = []
+    rel_off = leading_pad
+    payloads: list[bytes] = [b"\x00" * leading_pad]
     for name, dims, ggml_type, raw in tensors:
         nb = name.encode("utf-8")
         parts.append(struct.pack("<Q", len(nb)) + nb)
@@ -1442,6 +1448,68 @@ def test_parse_gguf_header_supports_metadata_exceeding_16_mib(package_builder, t
     assert tensors[0]["name"] == "token_embd.weight"
     assert tensors[0]["data_offset"] == expected_doff
     assert tensors[0]["n_bytes"] == len(payload)
+
+
+def _ple_shard_lines(ple_table_path: Path) -> list[tuple[str, int, int]]:
+    shards = []
+    for line in ple_table_path.read_text().splitlines():
+        if line.startswith("shard "):
+            _, name, off, rows = line.split()
+            shards.append((name, int(off), int(rows)))
+    return shards
+
+
+@pytest.mark.parametrize(
+    ("engram_kind", "ggml_type", "row_bytes", "fill"),
+    [("iq4_nl", 20, 5 * 18, b"\x33"), ("q8_0", 8, 5 * 34, b"\x44")],
+)
+def test_ple_shards_start_at_engram_tensor_offset_not_data_section_start(
+    package_builder, precision_options_mod, tmp_path, engram_kind, ggml_type, row_bytes, fill
+):
+    """Regression test: a valid engram tensor may start past the GGUF data section start; PLE shards must follow it."""
+    fx = _make_synthetic_48_layer_fixture(tmp_path / "fx", package_builder)
+    total_rows = 64
+    payload = fill * (total_rows * row_bytes)
+    leading_pad = 96
+    engram = tmp_path / "engram_nonzero_rel_offset.gguf"
+    data_section = _write_gguf_file(
+        engram,
+        [("per_layer_token_embd.weight", [160, total_rows], ggml_type, payload)],
+        leading_pad=leading_pad,
+    )
+    tensor_start = data_section + leading_pad
+    ple_spec = package_builder.read_ple_table_spec(fx["base_pkg"] / "ple_table.txt")
+
+    dst_name, ple_format, ple_row_bytes, tensor_offset = package_builder.validate_engram_gguf(engram, ple_spec)
+    assert (ple_format, ple_row_bytes) == (engram_kind, row_bytes)
+    assert tensor_offset == tensor_start != data_section
+
+    def check_shards(ple_table_path: Path, engram_path: Path) -> None:
+        shards = _ple_shard_lines(ple_table_path)
+        assert shards and sum(rows for _, _, rows in shards) == total_rows
+        assert shards[0][1] == tensor_start
+        raw = engram_path.read_bytes()
+        row = 0
+        for shard_name, shard_off, shard_rows in shards:
+            assert shard_name == dst_name
+            assert shard_off == tensor_start + row * row_bytes
+            expected_rows = payload[row * row_bytes : (row + shard_rows) * row_bytes]
+            assert raw[shard_off : shard_off + shard_rows * row_bytes] == expected_rows
+            row += shard_rows
+
+    out_dir = tmp_path / "built"
+    package_builder.build_gguf_package("nonzero_rel_offset", fx["variant_dir"], engram, fx["base_pkg"], out_dir)
+    check_shards(out_dir / "ple_table.txt", out_dir / dst_name)
+
+    for validate_engram in (True, False):
+        table_dir = tmp_path / f"table_validate_{validate_engram}"
+        table_dir.mkdir()
+        (table_dir / "ple_table.txt").write_bytes((fx["base_pkg"] / "ple_table.txt").read_bytes())
+        written_name = precision_options_mod.write_gguf_ple_table(
+            table_dir, engram_kind, engram, validate_engram=validate_engram
+        )
+        assert written_name == dst_name
+        check_shards(table_dir / "ple_table.txt", table_dir / written_name)
 
 
 def test_truncated_or_wrong_shape_gguf_rejected_before_replacing_output(package_builder, tmp_path):

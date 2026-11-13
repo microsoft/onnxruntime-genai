@@ -505,7 +505,7 @@ def validate_engram_gguf(
     engram_path = Path(engram_gguf).expanduser()
     if not engram_path.is_file():
         raise FileNotFoundError(f"Missing engram GGUF: {engram_path}")
-    _kvs, engram_ts, engram_doff = parse_gguf_header_stream(engram_path, validate_bounds=True)
+    _kvs, engram_ts, _data_offset = parse_gguf_header_stream(engram_path, validate_bounds=True)
     if len(engram_ts) != 1 or engram_ts[0]["name"] != "per_layer_token_embd.weight":
         raise ValueError(
             f"{engram_path} must hold only per_layer_token_embd.weight, got {[t['name'] for t in engram_ts]}"
@@ -529,23 +529,28 @@ def validate_engram_gguf(
         raise ValueError(f"Unsupported engram GGUF tensor type {ggml_type} in {engram_path}")
     if expected_kind in ("iq4_nl", "q8_0") and ple_format != expected_kind:
         raise ValueError(f"Engram GGUF {engram_path} has format {ple_format}, but {expected_kind} was requested")
-    required_end = engram_doff + total_rows * ple_row_bytes
+    # The tensor may start past the data section start (rel_offset > 0), so use its own absolute offset.
+    engram_tensor_offset = int(t0["data_offset"])
+    required_end = engram_tensor_offset + total_rows * ple_row_bytes
     actual_size = engram_path.stat().st_size
     if required_end > actual_size:
         raise ValueError(
             f"Truncated engram GGUF {engram_path}: required {required_end} bytes for {total_rows} rows, got {actual_size}"
         )
-    return engram_dst_name, ple_format, ple_row_bytes, engram_doff
+    return engram_dst_name, ple_format, ple_row_bytes, engram_tensor_offset
 
 
 def format_gguf_ple_table_lines(
     engram_dst_name: str,
     ple_format: str,
-    engram_doff: int,
+    engram_tensor_offset: int,
     ple_row_bytes: int,
     ple_spec: dict[str, object] | None = None,
 ) -> list[str]:
-    """Format `qwen38_ple_table 1` lines pointing at `engram_dst_name`."""
+    """Format `qwen38_ple_table 1` lines pointing at `engram_dst_name`.
+
+    `engram_tensor_offset` is the absolute file offset of the engram tensor's first row.
+    """
     spec = read_ple_table_spec() if ple_spec is None else ple_spec
     mult_str = " ".join(str(x) for x in spec["mult"])  # type: ignore[union-attr]
     vocab_str = " ".join(str(x) for x in spec["vocab"])  # type: ignore[union-attr]
@@ -570,11 +575,11 @@ def format_gguf_ple_table_lines(
         r_cnt = min(rows_per_shard, total_ple_rows - cur_row)
         if r_cnt <= 0:
             break
-        byte_off = engram_doff + cur_row * ple_row_bytes
+        byte_off = engram_tensor_offset + cur_row * ple_row_bytes
         ple_lines.append(f"shard {engram_dst_name} {byte_off} {r_cnt}")
         cur_row += r_cnt
     if cur_row < total_ple_rows:
-        byte_off = engram_doff + cur_row * ple_row_bytes
+        byte_off = engram_tensor_offset + cur_row * ple_row_bytes
         ple_lines.append(f"shard {engram_dst_name} {byte_off} {total_ple_rows - cur_row}")
     return ple_lines
 

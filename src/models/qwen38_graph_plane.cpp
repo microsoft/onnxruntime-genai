@@ -1216,7 +1216,6 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
   const size_t page_sz = page > 0 ? static_cast<size_t>(page) : size_t{4096};
   const uint64_t row_bytes = Qwen38PleShardRowBytes(description);
   bool pin_ple = true;
-  GetEnv("ORT_QMOE_WIN_PIN_PLE", pin_ple);
   GetEnv("ORT_QWEN38_PIN_PLE", pin_ple);
   if (!pin_ple) params.pad_ |= QWEN38_PLANE_PLE_STAGED;
   long long first_row = 0;
@@ -1254,6 +1253,8 @@ Qwen38PleTable::Qwen38PleTable(Qwen38Plane& plane, const std::filesystem::path& 
       if (base == MAP_FAILED) throw std::runtime_error("qwen38_graph: mmap failed for " + full.string());
       auto* rows = static_cast<unsigned char*>(base) + delta;
       if (!pin_ple) {
+        // The staged gather reads random rows of the mapping: readahead would only fault in pages the lookups never use.
+        (void)madvise(base, map_len, MADV_RANDOM);
         mappings_.push_back(Mapping{base, map_len, nullptr});
         params.shard_ptr[i] = rows;
         first_row += shard.rows;
