@@ -215,12 +215,13 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
     int64_t image_nums = 0;
     int64_t video_nums = 0;
 
-    // Count images/videos for this batch item by checking the token *after* vision_start_token_id
+    // Zero denotes an unset vision ID, not a marker for ordinary zero-valued text tokens.
+    // Count images/videos for this batch item by checking the token *after* vision_start_token_id.
     for (int64_t s = 0; s < seq_len - 1; ++s) {
-      if (input_ids[s] == vision_start_token_id_) {
-        if (input_ids[s + 1] == image_token_id_) {
+      if (vision_start_token_id_ != 0 && input_ids[s] == vision_start_token_id_) {
+        if (image_token_id_ != 0 && input_ids[s + 1] == image_token_id_) {
           image_nums++;
-        } else if (input_ids[s + 1] == video_token_id_) {
+        } else if (video_token_id_ != 0 && input_ids[s + 1] == video_token_id_) {
           video_nums++;
         }
       }

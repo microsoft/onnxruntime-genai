@@ -254,6 +254,83 @@ TEST_F(StandardPositionInputsTest, QwenVLWith3DPositionIdsUsesMrope) {
   }
 }
 
+TEST(Qwen2VLPositionInputsTest, Qwen35TextAppendAcceptsConsecutiveZerosWithoutVisionIds) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  auto qwen_config = CreateConfig(GetOrtEnv(), MODEL_PATH "qwen3-5");
+  config->model.type = "qwen3_5_text";
+  config->model.decoder = std::move(qwen_config->model.decoder);
+  config->model.decoder.filename = "../../qwen3-5/dummy_text_only.onnx";
+  config->model.vocab_size = qwen_config->model.vocab_size;
+  config->model.pad_token_id = 248044;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto params = CreateGeneratorParams(*model);
+  params->search.max_length = 8;
+  // The fixture passes KV tensors through unchanged, so their shapes must stay fixed.
+  params->search.past_present_share_buffer = true;
+  auto generator = CreateGenerator(*model, *params);
+
+  const std::array<std::array<int32_t, 4>, 2> prompts{{{1, 3, 4, 2}, {1, 0, 0, 2}}};
+  for (const auto& prompt : prompts) {
+    SCOPED_TRACE(prompt[1]);
+    ASSERT_NO_THROW(generator->AppendTokens(prompt));
+    auto sequence = generator->GetSequence(0).CpuSpan();
+    ASSERT_EQ(sequence.size(), prompt.size());
+    EXPECT_TRUE(std::equal(sequence.begin(), sequence.end(), prompt.begin()));
+    EXPECT_EQ(generator->GetLogits().size(), static_cast<size_t>(model->config_->model.vocab_size));
+    ASSERT_NO_THROW(generator->GenerateNextToken());
+    EXPECT_EQ(generator->GetSequence(0).size(), prompt.size() + 1);
+    ASSERT_NO_THROW(generator->RewindToLength(0));
+  }
+}
+
+TEST_F(StandardPositionInputsTest, UnsetVisionIdsKeepZeroTokensAsTextPositions) {
+  Use3DPositionIds();
+  model_->config_->model.type = "qwen3_5_text";
+  model_->config_->model.pad_token_id = 248044;
+  params_->search.max_length = 1030;
+  const std::array<std::array<int32_t, 3>, 4> marker_ids{{{0, 0, 0}, {0, 7, 8}, {6, 0, 8}, {6, 7, 0}}};
+  for (const auto& ids : marker_ids) {
+    model_->config_->model.vision_start_token_id = ids[0];
+    model_->config_->model.image_token_id = ids[1];
+    model_->config_->model.video_token_id = ids[2];
+    for (int32_t modality_id : {ids[1], ids[2]}) {
+      if (ids[0] != 0 && modality_id != 0)
+        continue;
+      SCOPED_TRACE(testing::Message() << ids[0] << ", " << modality_id);
+      state_ = std::make_unique<PositionInputsTestState>(*params_, *model_);
+      auto inputs = CreatePositionInputs();
+      inputs->Add();
+      std::vector<int32_t> prompt(1024, 1);
+      prompt[1] = ids[0];
+      prompt[2] = modality_id;
+      auto tokens = Tokens(prompt);
+      ASSERT_NO_THROW(inputs->Update(tokens, 1024, 1024));
+      auto* positions = state_->GetInput("position_ids");
+      ASSERT_EQ(positions->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{3, 1, 1024}));
+      for (int dim = 0; dim < 3; ++dim)
+        for (int s = 0; s < 1024; ++s)
+          EXPECT_EQ(positions->GetTensorData<int64_t>()[dim * 1024 + s], s);
+    }
+  }
+}
+
+TEST_F(StandardPositionInputsTest, ConfiguredVisionMarkersStillRequireGridData) {
+  Use3DPositionIds();
+  model_->config_->model.type = "qwen3_5";
+  model_->config_->model.vision_start_token_id = 6;
+  model_->config_->model.image_token_id = 7;
+  model_->config_->model.video_token_id = 8;
+  for (bool video : {false, true}) {
+    state_ = std::make_unique<PositionInputsTestState>(*params_, *model_);
+    auto inputs = CreatePositionInputs();
+    inputs->Add();
+    auto tokens = Tokens(std::array<int32_t, 4>{1, 6, video ? 8 : 7, 2});
+    EXPECT_EQ(CaptureThrowMessage([&] { inputs->Update(tokens, 4, 4); }),
+              video ? "Not enough video_grid_thw data for video tokens."
+                    : "Not enough image_grid_thw data for image tokens.");
+  }
+}
+
 TEST_F(StandardPositionInputsTest, RotaryHistoryRetainsImageCoordinatesThroughDecodeAndReset) {
   UseRotaryPositionHistory();
   auto positions = CreatePositionInputs();
