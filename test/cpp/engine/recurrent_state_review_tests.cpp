@@ -156,5 +156,20 @@ TEST_F(RecurrentStateReview, IndexerRollbackUsesCompressionMetadataAndRejectsOth
   }
 }
 
+TEST_F(RecurrentStateReview, GrowingIndexerWithoutSequenceLengthKeepsSeparateBuffers) {
+  params_->search.past_present_share_buffer = true;
+  UseSession("indexer-growing.onnx", false, true);
+  auto& decoder = model_->config_->model.decoder;
+  decoder.inputs.past_indexer_names = "past.%d.indexer_key";
+  decoder.outputs.present_indexer_names = "present.%d.indexer_key";
+  auto indexer = CreateIndexerCache(*state_);
+  ASSERT_NE(indexer, nullptr);
+  EXPECT_FALSE(indexer->UsesHostSequenceLength());
+  const size_t output_index = state_->outputs_.size();
+  indexer->Add();
+  ASSERT_EQ(state_->outputs_.size(), output_index + 1);
+  EXPECT_EQ(state_->outputs_[output_index], nullptr);
+}
+
 }  // namespace
 }  // namespace Generators::test
