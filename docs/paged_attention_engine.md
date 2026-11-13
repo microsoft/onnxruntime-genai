@@ -2431,8 +2431,9 @@ Qwen and Bolt use the following internal integration contract:
 
 1. Configure snapshot storage and memory limits before clearing or normalizing the public
    `engine.dynamic_batching` section. Keep model-specific capacity and chunk mapping separate.
-   Pass the full model configuration to `CreateNativePrefixSnapshotCache` and the batching settings to
-   `NativeDeviceMemoryBudget::Configure`. Configure the budget before loading weights/sessions;
+   Pass the full model configuration and any backend-specific ineligibility reason to
+   `NativeDeviceMemoryBudget::ConfigurePrefixCache`. This configures the budget even when caching
+   is inactive. Configure it before loading weights/sessions;
    the base Model captures its before-load free-memory baseline. Refresh after native warmup and
    before checkpoint admission, including when prefix caching is disabled.
 2. Define safe capture boundaries and the complete resumable state. Include token identity,
@@ -2457,6 +2458,9 @@ Qwen and Bolt use the following internal integration contract:
    restores dynamically sized dense tensors before rebuilding packed decode storage; unified
    prefill restores its already-active packed buffers. Do not retain idle packed buffers as a
    substitute for dense state, and do not infer a new model's layout from tensor names alone.
+6. Aggregate operational counters with `PrefixCacheMetrics::AddEventsSince`, which excludes
+   committed hits and matched tokens. Engine executors call `RecordAdoption` only after successful
+   completion acknowledgement; Generator restore paths record adoption after successful restoration.
 
 The shared index/policy and `state-checkpoint-tests.cpp` suites cover identity, lease/recency,
 tier/count settings, layouts, typed host state, owned-map recreation, and publication failure cleanup.

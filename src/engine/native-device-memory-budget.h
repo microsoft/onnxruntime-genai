@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <string_view>
+
 #include "../models/model.h"
 
 namespace Generators {
@@ -15,6 +17,8 @@ std::optional<size_t> NativeSnapshotDeviceMemoryLimit(
 class NativeDeviceMemoryBudget {
  public:
   explicit NativeDeviceMemoryBudget(const Model& model) : model_{model} {}
+  std::shared_ptr<PrefixSnapshotCache> ConfigurePrefixCache(
+      const Config& config, const char* disabled_reason = nullptr, std::string_view warning_component = {});
   void Configure(const std::optional<Config::Engine::DynamicBatching>& settings,
                  const std::shared_ptr<PrefixSnapshotCache>& cache);
   void Refresh() const;

@@ -273,13 +273,21 @@ bool IsPrefixCachingRequested(const Config& config) {
          config.engine.dynamic_batching->prefix_caching.value_or(!config.model.decoder.sliding_window.has_value());
 }
 
-std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config& config) {
+std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(
+    const Config& config, const char* disabled_reason, std::string_view warning_component) {
   if (!IsPrefixCachingRequested(config)) return nullptr;
   const auto& batching = *config.engine.dynamic_batching;
   const auto& limits = batching.snapshot_cache;
-  if (batching.max_snapshots.value_or(1) == 0 ||
-      (limits.Configured() && !limits.Enabled()))
+  if (batching.max_snapshots.value_or(1) == 0)
+    disabled_reason = "max_snapshots is zero";
+  else if (!disabled_reason && limits.Configured() && !limits.Enabled())
+    disabled_reason = "snapshot_cache tier budgets are all zero";
+  if (disabled_reason) {
+    if (!warning_component.empty() && batching.prefix_caching.value_or(false) && g_log.enabled && g_log.warning)
+      Log("warning", "%.*s prefix caching is inactive: %s.",
+          static_cast<int>(warning_component.size()), warning_component.data(), disabled_reason);
     return nullptr;
+  }
   const bool resident = !limits.Configured();
   return std::make_shared<PrefixSnapshotCache>(
       std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},

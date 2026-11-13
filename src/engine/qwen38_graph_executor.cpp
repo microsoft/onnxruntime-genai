@@ -51,10 +51,7 @@ void Qwen38GraphSession::Poison() noexcept {
 
 void Qwen38GraphSession::Acknowledge(const TokenCommitAck& ack) {
   completions_.Acknowledge(ack);
-  if (pending_cached_prefix_ != 0) {
-    ++prefix_metrics_.hits;
-    prefix_metrics_.matched_tokens += std::exchange(pending_cached_prefix_, 0);
-  }
+  prefix_metrics_.RecordAdoption(std::exchange(pending_cached_prefix_, 0));
   if (ack.disposition != ContinuationDisposition::Continue || ack.turn_finished) {
     // Stop useful work immediately. Already queued lookahead is retained until explicit retirement quiesces it.
     // A later turn replays Request's authoritative history; no physical-device-length equality is assumed here.

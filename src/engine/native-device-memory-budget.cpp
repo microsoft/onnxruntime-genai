@@ -47,6 +47,13 @@ std::optional<size_t> NativeSnapshotDeviceMemoryLimit(
              : available;
 }
 
+std::shared_ptr<PrefixSnapshotCache> NativeDeviceMemoryBudget::ConfigurePrefixCache(
+    const Config& config, const char* disabled_reason, std::string_view warning_component) {
+  auto cache = CreateNativePrefixSnapshotCache(config, disabled_reason, warning_component);
+  Configure(config.engine.dynamic_batching, cache);
+  return cache;
+}
+
 void NativeDeviceMemoryBudget::Configure(
     const std::optional<Config::Engine::DynamicBatching>& settings,
     const std::shared_ptr<PrefixSnapshotCache>& cache) {

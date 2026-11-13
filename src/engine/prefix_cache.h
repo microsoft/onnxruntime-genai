@@ -103,6 +103,10 @@ struct PrefixCacheMetrics {
   uint64_t evictions{};                // Indexed blocks dropped to make room.
   uint64_t retention_refusals{};       // Registrations skipped because nothing was evictable.
   uint64_t publication_refusals{};     // Boundaries skipped after metadata allocation failures.
+
+  // Operational events may precede adoption; hits are recorded only once adoption commits.
+  void AddEventsSince(const PrefixCacheMetrics& before, const PrefixCacheMetrics& after) noexcept;
+  void RecordAdoption(size_t tokens) noexcept;
 };
 
 /**

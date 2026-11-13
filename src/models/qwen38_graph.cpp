@@ -3514,28 +3514,25 @@ bool ApplyQwen38DynamicBatchingConfig(Config& config) {
   return has_dynamic_batching_kv;
 }
 
-std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Config& config) {
-  const auto& batching = config.engine.dynamic_batching;
-  if (!IsPrefixCachingRequested(config)) return nullptr;
-  const char* disabled = nullptr;
-  if (batching->max_snapshots.value_or(1) == 0)
-    disabled = "max_snapshots is zero";
-  else if (ResolveQwen38MaxBatchSize(config) != 1)
-    disabled = "multiple request slots are configured";
-  else if (batching->snapshot_cache.Configured() && !batching->snapshot_cache.Enabled())
-    disabled = "snapshot_cache tier budgets are all zero";
-  if (disabled) {
-    if (batching->prefix_caching.value_or(false) && g_log.enabled && g_log.warning)
-      Log("warning", "Native Qwen prefix caching is inactive: %s.", disabled);
+namespace {
+
+const char* Qwen38PrefixCacheDisabledReason(const Config& config) {
+  if (!IsPrefixCachingRequested(config) || config.engine.dynamic_batching->max_snapshots.value_or(1) == 0)
     return nullptr;
-  }
-  return CreateNativePrefixSnapshotCache(config);
+  return ResolveQwen38MaxBatchSize(config) == 1 ? nullptr : "multiple request slots are configured";
+}
+
+}  // namespace
+
+std::shared_ptr<PrefixSnapshotCache> CreateQwen38PrefixSnapshotCache(const Config& config) {
+  return CreateNativePrefixSnapshotCache(
+      config, Qwen38PrefixCacheDisabledReason(config), "Native Qwen");
 }
 
 Qwen38GraphModel::Qwen38GraphModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{PreflightQwen38GraphModelConfig(std::move(config))}, memory_budget_{*this} {
-  prefix_snapshot_cache_ = CreateQwen38PrefixSnapshotCache(*config_);
-  memory_budget_.Configure(config_->engine.dynamic_batching, prefix_snapshot_cache_);
+  prefix_snapshot_cache_ = memory_budget_.ConfigurePrefixCache(
+      *config_, Qwen38PrefixCacheDisabledReason(*config_), "Native Qwen");
   // Single-slot normalization clears dynamic_batching, so consume its cache and memory settings first.
   const bool has_dynamic_batching_kv = ApplyQwen38DynamicBatchingConfig(*config_);
   const auto& q = config_->model.qwen38_graph;

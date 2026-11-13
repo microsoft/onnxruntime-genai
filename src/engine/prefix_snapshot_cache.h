@@ -109,6 +109,7 @@ class PrefixSnapshotCache {
 };
 
 bool IsPrefixCachingRequested(const Config& config);
-std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config& config);
+std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(
+    const Config& config, const char* disabled_reason = nullptr, std::string_view warning_component = {});
 
 }  // namespace Generators

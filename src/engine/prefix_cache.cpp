@@ -52,6 +52,22 @@ bool LogicalIdentityEquals(
 
 }  // namespace
 
+void PrefixCacheMetrics::AddEventsSince(const PrefixCacheMetrics& before, const PrefixCacheMetrics& after) noexcept {
+  constexpr uint64_t PrefixCacheMetrics::* fields[]{
+      &PrefixCacheMetrics::lookups, &PrefixCacheMetrics::matches,
+      &PrefixCacheMetrics::deferred_matches, &PrefixCacheMetrics::queried_tokens,
+      &PrefixCacheMetrics::registered_blocks, &PrefixCacheMetrics::duplicate_registrations,
+      &PrefixCacheMetrics::hash_collisions, &PrefixCacheMetrics::evictions,
+      &PrefixCacheMetrics::retention_refusals, &PrefixCacheMetrics::publication_refusals};
+  for (auto field : fields) this->*field += after.*field - before.*field;
+}
+
+void PrefixCacheMetrics::RecordAdoption(size_t tokens) noexcept {
+  if (tokens == 0) return;
+  ++hits;
+  matched_tokens += tokens;
+}
+
 uint64_t PrefixCache::RootHash() {
   return kFnvOffsetBasis;
 }
