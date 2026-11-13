@@ -67,7 +67,7 @@ def runtime():
     package.__path__ = []
     sys.modules["onnxruntime_genai"] = package
     sys.modules["onnxruntime_genai.onnxruntime_genai"] = native
-    source = Path(__file__).parents[2] / "src/python/py/non_generative.py"
+    source = Path(__file__).parents[3] / "src/python/py/non_generative.py"
     spec = importlib.util.spec_from_file_location("_non_generative_test", source)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -20,7 +20,7 @@ import onnxruntime_genai as og
 import pytest
 from transformers import AutoTokenizer
 
-from .run_qwen38_webgpu_engine import (
+from engine.run_qwen38_webgpu_engine import (
     PROMPTS,
     make_config,
     prompt_tokens,

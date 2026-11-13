@@ -89,7 +89,7 @@ def d1_2b_path(model_path, tmp_path_factory):
     builder_tests_dir = str(Path(__file__).resolve().parents[1] / "builder")
     if builder_tests_dir not in sys.path:
         sys.path.insert(0, builder_tests_dir)
-    from _builder_test_utils import (  # noqa: PLC0415
+    from builder_test_utils import (  # noqa: PLC0415
         ort_runs_bidirectional_group_query_attention,
         ort_runs_causal_conv_with_state,
     )

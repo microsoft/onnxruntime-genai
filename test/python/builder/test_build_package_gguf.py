@@ -21,12 +21,12 @@ import onnx
 import pytest
 from onnx import TensorProto, external_data_helper, helper, numpy_helper
 
-SCRIPT = Path(__file__).resolve().parents[2] / "tools/python/qwen38_flash_next/build_package_gguf.py"
-BUILDER_TEST_DIR = Path(__file__).resolve().parent / "builder"
+SCRIPT = Path(__file__).resolve().parents[3] / "tools/python/qwen38_flash_next/build_package_gguf.py"
+BUILDER_TEST_DIR = Path(__file__).resolve().parent
 if str(BUILDER_TEST_DIR) not in sys.path:
     sys.path.insert(0, str(BUILDER_TEST_DIR))
 
-from _qwen38_tools_test_utils import prefill_chunk_problem, unknown_qwen38_graph_keys  # noqa: E402
+from qwen38_tools_test_utils import prefill_chunk_problem, unknown_qwen38_graph_keys  # noqa: E402
 
 
 @pytest.fixture

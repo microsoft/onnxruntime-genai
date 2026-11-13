@@ -4,15 +4,60 @@ This directory contains assets, scripts, and definitions used by the test suite.
 
 ## Layout
 
-- `test/audios/*` contains all audio files used for testing.
-- `test/images/*` contains all image files used for testing.
-- `test/models/model_name/*` contains uploaded assets for `model_name` such as `model.onnx`, `genai_config.json`, `tokenizer.json`, and related files. These are already-created models stored in the repo.
-- `test/python/*` contains all Python scripts used for testing.
-    - `test/python/builder/*` contains Python scripts used to validate the model builder.
-    - `test/python/create/*` contains Python scripts used to create ONNX models. Scripts follow the `create_*.py` naming format.
-    - `test/python/integration/*` contains Python scripts used to run integrating testing on Foundry Local models.
-    - `test/python/models/*` contains Python scripts used to test ONNX models. Scripts follow the `test_*.py` naming format.
-- `test/tool-definitions/*` contains all tool definitions used for testing.
+```text
+test/
+  audios/                         # Audio fixtures
+  images/                         # Image fixtures
+  models/                         # Checked-in ONNX models and model configurations
+    <model_name>/                 # model.onnx, genai_config.json, tokenizers, etc.
+      <variant>/                  # Optional precision/device/case variants
+      external-data/              # External model weights, where needed
+    engine/<model_name>/          # Engine-specific model fixtures
+    hf-internal-testing/<model_name>/ # Tiny model fixtures
+  cmake/                          # CMake/build regression checks
+    export-isolation/             # Shared-library export fixtures
+    telemetry-dependencies/       # Telemetry dependency configuration checks
+  cpp/                            # C++ API and runtime tests
+    cuda/                         # CUDA sampling/top-k tests and benchmarks
+    cuda_batched_sampler_tests/   # Batched CUDA sampler tests
+    cuda_kernel/                  # CUDA kernel tests
+    engine/                       # Internal Engine component tests
+      custom_ops_test_lib/        # Custom-operator library fixture
+      qwen38_legacy_plane_lib/     # Legacy-plane library fixture
+    lilicorr_drafter_tests/        # LiliCorr drafter tests
+    telemetry/                    # Telemetry tests and native fixtures
+  csharp/                         # C# binding tests
+  platform/
+    apple/apple_package_test/     # Apple package test project
+      apple_package_test.xcodeproj/ # Xcode project/workspace configuration
+      ios_package_test/           # iOS test app (Base.lproj/ resources)
+      ios_package_testUITests/    # iOS UI tests
+      macos_package_test/         # macOS test app (Base.lproj/ resources)
+  python/
+    builder/                      # Model-builder/export/quantization tests
+    create/                       # ONNX fixture creation scripts (create_*.py)
+    engine/                       # All Engine tests and Engine test runners
+    integration/                  # Cross-component/runtime/example/packaging tests
+    models/                       # Model-specific behavior and loader tests
+    cpu/{ort,torch}/              # CPU dependency requirements
+    cuda/{ort,ort-nightly,torch}/  # CUDA dependency requirements
+    directml/{ort,torch}/          # DirectML dependency requirements
+    macos/{ort,torch}/             # macOS dependency requirements
+    webgpu/{ort,torch}/            # WebGPU dependency requirements
+  tool-definitions/               # Tool-calling fixtures
+```
+
+Keep model assets, including configuration-only fixtures such as
+`test/models/nemotron-parse/`, under `test/models/`, not a separate configs
+folder. Model-specific nested directories hold their variants and assets.
+
+Only `README.md`, `_test_utils.py`, `conftest.py`, `requirements.txt`,
+`special_tokens.py`, `test_onnxruntime_genai.py`,
+`test_onnxruntime_genai_api.py`, and `test_onnxruntime_genai_e2e.py` belong
+directly under `test/python/`. Store all other Python files in the appropriate
+subfolder above. Engine tests belong in `engine/` even when they use real-model
+integration; non-Engine Foundry Local tests and shared model-resolution helpers
+belong in `integration/`. Keep category-specific helpers beside their tests.
 
 ## Parallel preprocessing checks
 

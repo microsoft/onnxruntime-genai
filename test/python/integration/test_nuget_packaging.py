@@ -11,7 +11,7 @@ import pytest
 
 @pytest.fixture
 def generators(monkeypatch):
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "tools/nuget"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "tools/nuget"))
     return (
         importlib.import_module("generate_nuspec_for_native_nuget"),
         importlib.import_module("generate_nuspec_for_custom_nuget"),

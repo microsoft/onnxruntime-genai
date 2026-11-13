@@ -15,7 +15,7 @@ import numpy as np
 import onnxruntime_genai as og
 import pytest
 
-from . import models, resolver
+from integration import models, resolver
 
 pytestmark = pytest.mark.engine
 
@@ -29,6 +29,12 @@ _PROMPTS = [
 ]
 
 _MAX_STEPS = 20_000
+
+
+def pytest_generate_tests(metafunc):
+    if "device" in metafunc.fixturenames:
+        devices = metafunc.config.getoption("--execution-provider") or ["cpu"]
+        metafunc.parametrize("device", devices)
 
 
 class _Sink:

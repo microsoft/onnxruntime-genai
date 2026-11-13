@@ -29,7 +29,7 @@ torch = pytest.importorskip("torch")
 onnx = pytest.importorskip("onnx")
 ort = pytest.importorskip("onnxruntime")
 transformers = pytest.importorskip("transformers")
-# _builder_test_utils, used by other tests in the session, stubs onnxruntime when it is not installed
+# builder_test_utils, used by other tests in the session, stubs onnxruntime when it is not installed
 if not hasattr(ort, "InferenceSession"):
     pytest.skip("onnxruntime is not installed", allow_module_level=True)
 

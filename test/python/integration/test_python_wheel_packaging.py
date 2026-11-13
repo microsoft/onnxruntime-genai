@@ -22,7 +22,7 @@ import pytest
     ],
 )
 def test_sdk_wheel_excludes_ort_and_declares_runtime_dependency(tmp_path, package, dependency):
-    template = Path(__file__).resolve().parents[2] / "src/python/setup.py.in"
+    template = Path(__file__).resolve().parents[3] / "src/python/setup.py.in"
     setup = template.read_text(encoding="utf-8").replace("@TARGET_NAME@", package).replace("@VERSION_INFO@", "1.0.0")
     (tmp_path / "setup.py").write_text(setup, encoding="utf-8")
     (tmp_path / "package_description.md").write_text("Test package", encoding="utf-8")

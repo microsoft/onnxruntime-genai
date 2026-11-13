@@ -16,7 +16,7 @@ def runner(monkeypatch):
     api = SimpleNamespace(Model=Mock(), Tokenizer=Mock(), GeneratorParams=Mock(), Generator=Mock())
     monkeypatch.setitem(sys.modules, "onnxruntime_genai", api)
     monkeypatch.setattr(_test_utils, "register_plugin_providers", Mock())
-    path = Path(__file__).with_name("test_onnxruntime_genai_e2e.py")
+    path = Path(__file__).resolve().parents[1] / "test_onnxruntime_genai_e2e.py"
     spec = importlib.util.spec_from_file_location("e2e_runner_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

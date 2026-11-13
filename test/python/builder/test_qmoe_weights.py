@@ -28,7 +28,7 @@ import types
 
 import pytest
 import torch
-from _builder_test_utils import BUILDERS_DIR, load_builder_module
+from builder_test_utils import BUILDERS_DIR, load_builder_module
 
 base_module = load_builder_module("base")
 Model = base_module.Model

@@ -19,7 +19,7 @@ _LOG = logging.getLogger(__name__)
 register_plugin_providers(_LOG)
 _WEBGPU_AVAILABLE = register_webgpu_plugin(_LOG)
 
-_MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-composite"
+_MODEL_DIR = Path(__file__).resolve().parents[2] / "models" / "engine" / "synthetic-composite"
 _DEVICES = ["cpu"] + (["cuda"] if og.is_cuda_available() else [])
 
 

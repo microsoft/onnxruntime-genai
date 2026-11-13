@@ -46,7 +46,7 @@ def _cpu_config(package: Path) -> og.Config:
 
 
 def test_combined_clm_high_level_session(tmp_path):
-    fixture = Path(__file__).parents[1] / "models/multimodal-decoder-no-input-ids"
+    fixture = Path(__file__).parents[2] / "models/multimodal-decoder-no-input-ids"
     shutil.copy(fixture / "tokenizer.json", tmp_path / "tokenizer.json")
     shutil.copy(fixture / "tokenizer_config.json", tmp_path / "tokenizer_config.json")
 
@@ -197,7 +197,7 @@ def test_combined_clm_high_level_session(tmp_path):
 
 
 def test_flat_kev_high_level_session(tmp_path):
-    fixture = Path(__file__).parents[1] / "models/multimodal-decoder-no-input-ids"
+    fixture = Path(__file__).parents[2] / "models/multimodal-decoder-no-input-ids"
     shutil.copy(fixture / "tokenizer.json", tmp_path / "tokenizer.json")
     shutil.copy(fixture / "tokenizer_config.json", tmp_path / "tokenizer_config.json")
     ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [None, None])
@@ -293,7 +293,7 @@ def test_flat_kev_high_level_session(tmp_path):
 
 
 def _stateful_kev_package(root: Path) -> Path:
-    fixture = Path(__file__).parents[1] / "models/multimodal-decoder-no-input-ids"
+    fixture = Path(__file__).parents[2] / "models/multimodal-decoder-no-input-ids"
     shutil.copy(fixture / "tokenizer.json", root / "tokenizer.json")
     shutil.copy(fixture / "tokenizer_config.json", root / "tokenizer_config.json")
     inputs = [
@@ -485,7 +485,7 @@ def test_kev_enforces_configured_context_length(tmp_path):
 
 
 def test_malformed_clm_hidden_shape_returns_runtime_error(tmp_path):
-    fixture = Path(__file__).parents[1] / "models/multimodal-decoder-no-input-ids"
+    fixture = Path(__file__).parents[2] / "models/multimodal-decoder-no-input-ids"
     shutil.copy(fixture / "tokenizer.json", tmp_path / "tokenizer.json")
     shutil.copy(fixture / "tokenizer_config.json", tmp_path / "tokenizer_config.json")
 
@@ -554,7 +554,7 @@ def test_malformed_clm_hidden_shape_returns_runtime_error(tmp_path):
 
 
 def test_malformed_kev_probability_shape_returns_runtime_error(tmp_path):
-    fixture = Path(__file__).parents[1] / "models/multimodal-decoder-no-input-ids"
+    fixture = Path(__file__).parents[2] / "models/multimodal-decoder-no-input-ids"
     shutil.copy(fixture / "tokenizer.json", tmp_path / "tokenizer.json")
     shutil.copy(fixture / "tokenizer_config.json", tmp_path / "tokenizer_config.json")
 

@@ -6,7 +6,7 @@
 from types import SimpleNamespace
 
 import pytest
-from _builder_test_utils import load_builder_module
+from builder_test_utils import load_builder_module
 
 base = load_builder_module("base")
 mistral = load_builder_module("mistral")
@@ -55,7 +55,7 @@ def test_default_layer_type_ignores_windows_that_cover_the_context(sliding_windo
 
 def transformers_config(class_name, architecture, **kwargs):
     transformers = pytest.importorskip("transformers")
-    # _builder_test_utils installs an importable transformers stub when the package is absent.
+    # builder_test_utils installs an importable transformers stub when the package is absent.
     if not hasattr(transformers, class_name):
         pytest.skip(f"transformers does not provide {class_name}")
     config = getattr(transformers, class_name)(**SMALL_CONFIG, **kwargs)

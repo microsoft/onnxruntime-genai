@@ -13,7 +13,7 @@ from models.test_gemma4_models import _fixed_output_gemma4, _get_test_media_path
 
 @pytest.fixture(scope="module")
 def benchmark():
-    path = Path(__file__).resolve().parents[2] / "benchmark" / "python" / "benchmark_multimodal.py"
+    path = Path(__file__).resolve().parents[3] / "benchmark" / "python" / "benchmark_multimodal.py"
     spec = importlib.util.spec_from_file_location("benchmark_multimodal_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -148,7 +148,7 @@ def test_captured_decode_matches_eager():
 
 
 def test_runtime_profile_kv_variants_load_and_decode(tmp_path):
-    models_dir = Path(__file__).parents[2] / "src" / "python" / "py" / "models"
+    models_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
     sys.path.insert(0, str(models_dir))
     try:
         apply_runtime_config = importlib.import_module("builder_config").apply_runtime_config

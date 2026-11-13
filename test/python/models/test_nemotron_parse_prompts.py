@@ -35,7 +35,7 @@ def _ort_runs_tensor_scatter():
     builder_tests_dir = str(Path(__file__).resolve().parents[1] / "builder")
     if builder_tests_dir not in sys.path:
         sys.path.insert(0, builder_tests_dir)
-    from _builder_test_utils import ort_runs_tensor_scatter  # noqa: PLC0415
+    from builder_test_utils import ort_runs_tensor_scatter  # noqa: PLC0415
 
     return ort_runs_tensor_scatter()
 
@@ -63,7 +63,7 @@ def model_factory(tmp_path):
         cache_type = helper.np_dtype_to_tensor_dtype(np.dtype(cache_dtype))
         model_dir = tmp_path / f"model_{prefill_length}_{fixed_length}"
         model_dir.mkdir()
-        config_path = Path(__file__).parents[2] / "configs/nemotron-parse/genai_config.json"
+        config_path = Path(__file__).parents[2] / "models/nemotron-parse/genai_config.json"
         config = json.loads(config_path.read_text())
         config["model"].update(context_length=CONTEXT_LENGTH, vocab_size=32)
         config["model"]["vision"]["num_visual_tokens"] = 1

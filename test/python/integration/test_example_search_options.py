@@ -10,8 +10,8 @@ from pathlib import Path
 import onnxruntime_genai as og
 import pytest
 
-EXAMPLES = Path(__file__).resolve().parents[2] / "examples" / "python"
-MODEL = Path(__file__).resolve().parents[1] / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"
+EXAMPLES = Path(__file__).resolve().parents[3] / "examples" / "python"
+MODEL = Path(__file__).resolve().parents[2] / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32"
 
 
 @pytest.fixture

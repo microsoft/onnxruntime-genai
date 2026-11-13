@@ -11,7 +11,7 @@ import onnx_ir as ir
 import pytest
 import torch
 import torch.nn.functional as F
-from _builder_test_utils import load_builder_module
+from builder_test_utils import load_builder_module
 from onnx import checker
 from onnx.reference import ReferenceEvaluator
 

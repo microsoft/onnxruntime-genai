@@ -25,7 +25,7 @@ Keep these tests small and deterministic. Prefer a focused test double over load
 
 ## Synthetic-model tests
 
-Add a case to `test/python/test_onnxruntime_genai_engine.py` when the behavior must pass through the packaged Python API, scheduler, paged cache, packed model inputs, sampling, and request lifecycle together.
+Add a case to `test/python/engine/test_onnxruntime_genai_engine.py` when the behavior must pass through the packaged Python API, scheduler, paged cache, packed model inputs, sampling, and request lifecycle together.
 
 The checked-in model under `test/models/engine/synthetic-paged/` produces exact predictable tokens and requires no external download. Use it for cases where a component-level test could pass even though the components are wired together incorrectly.
 
@@ -41,7 +41,7 @@ Do not treat this test as coverage of the production PagedAttention operator. It
 
 ## Real-model integration tests
 
-Add a case to `test/python/integration/test_integration_engine.py` only when a synthetic graph cannot prove the behavior.
+Add a case to `test/python/engine/test_integration_engine.py` only when a synthetic graph cannot prove the behavior.
 
 Use the real-model lane for:
 
@@ -71,10 +71,10 @@ Performance and capacity work belongs in the benchmark pipeline, not these corre
 ./build/Linux/RelWithDebInfo/engine_unit_tests
 
 # Synthetic public-API tests
-python -m pytest test/python/test_onnxruntime_genai_engine.py -sv
+python -m pytest test/python/engine/test_onnxruntime_genai_engine.py -sv
 
 # Real-model tests (CUDA model root required)
-python -m pytest test/python/integration/test_integration_engine.py -sv \
+python -m pytest test/python/engine/test_integration_engine.py -sv \
     --run-engine-tests \
     --execution-provider cuda \
     --model-root /path/to/models

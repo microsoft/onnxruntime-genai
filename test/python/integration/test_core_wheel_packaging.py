@@ -17,7 +17,7 @@ import pytest
 from packaging.utils import parse_wheel_filename
 from wheel.wheelfile import WheelFile
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location("generate_core_wheel", REPO_ROOT / "tools/python/generate_core_wheel.py")
 core_wheel = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(core_wheel)

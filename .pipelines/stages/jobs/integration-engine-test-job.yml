@@ -77,7 +77,7 @@ jobs:
       model: ${{ parameters.model }}
       modelRoot: $(modelRoot)
       wheelDir: $(wheelDir)
-      testPath: 'test/python/integration/test_integration_engine.py'
+      testPath: 'test/python/engine/test_integration_engine.py'
       extraPytestArgs: '--run-engine-tests'
       resultPrefix: 'integration-engine'
       testRunTitlePrefix: 'integration engine'

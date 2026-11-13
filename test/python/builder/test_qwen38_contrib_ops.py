@@ -10,9 +10,7 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
-from _builder_test_utils import ort_runs_engram_op
-from transformers import LlamaConfig
-
+from builder_test_utils import ort_runs_engram_op
 from models.builders.base import Model
 from models.builders.qwen3_5 import Qwen35MoETextModel
 from models.builders.qwen3_8 import (
@@ -21,6 +19,7 @@ from models.builders.qwen3_8 import (
     Qwen4ExpMTPTextModel,
     Qwen4ExpTextModel,
 )
+from transformers import LlamaConfig
 
 
 def record_calls(model, method_names):

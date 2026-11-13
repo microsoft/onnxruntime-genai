@@ -22,7 +22,7 @@ import types
 
 import numpy as np
 import pytest
-from _builder_test_utils import (
+from builder_test_utils import (
     BUILDERS_DIR,
     check_node_shapes,
     load_builder_module,
@@ -34,7 +34,7 @@ torch = pytest.importorskip("torch")
 onnx = pytest.importorskip("onnx")
 ort = pytest.importorskip("onnxruntime")
 if not hasattr(ort, "InferenceSession"):
-    # _builder_test_utils puts an empty onnxruntime module in place when the package is missing.
+    # builder_test_utils puts an empty onnxruntime module in place when the package is missing.
     pytest.skip("onnxruntime is not installed", allow_module_level=True)
 
 lfm2_module = load_builder_module("lfm2")

@@ -313,7 +313,7 @@ The parameterized `SnapshotTiers/Dflash2GraphRestoreTest.*` cases exercise expli
 ## Testing the runner
 
 ```bash
-python -m pytest --noconftest test/python/test_prefix_cache_qa.py
+python -m pytest --noconftest test/python/engine/test_prefix_cache_qa.py
 ```
 
 These model-free tests validate planning, failure detection, and lifecycle
