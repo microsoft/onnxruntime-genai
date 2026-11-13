@@ -50,6 +50,11 @@ class PrefixSnapshotCache {
     void Read(size_t layer, Tensor& destination, std::span<const Range> ranges) const;
     void Flush();
     void AddPackedBuffer(std::span<const Range> ranges);
+    void PrepareStorage();
+    void AllocateStorage(Tier storage_tier, DeviceInterface* device, const std::filesystem::path& directory,
+                         const std::shared_ptr<Accounting>& owner);
+    void Release() noexcept;
+    void TakeStorage(Entry& source) noexcept;
 
     State state{State::Empty};
     Tier tier{Tier::Ram};
@@ -59,16 +64,13 @@ class PrefixSnapshotCache {
     ONNXTensorElementDataType type{ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED};
     std::vector<std::shared_ptr<void>> host_buffers;
     std::vector<std::unique_ptr<Tensor>> caches;
+    std::string component;
 
    private:
-    friend class PrefixSnapshotCache;
     struct DiskStorage;
     std::shared_ptr<Accounting> accounting;
     std::unique_ptr<DiskStorage> disk;
-    std::string component;
     std::vector<size_t> layer_offsets;
-    void Release() noexcept;
-    void TakeStorage(Entry& source) noexcept;
     void* TransferBuffer(DeviceInterface* device) const;
   };
 
@@ -89,7 +91,6 @@ class PrefixSnapshotCache {
   size_t Limit(Tier tier) const;
   void DisableDisk(const std::system_error& error);
   void Move(Entry& entry, Tier tier, DeviceInterface* device);
-  void AllocateStorage(Entry& entry, Tier tier, DeviceInterface* device);
   void Prune();
   size_t Count(std::string_view component) const;
   bool EvictOldest(std::string_view component = {});

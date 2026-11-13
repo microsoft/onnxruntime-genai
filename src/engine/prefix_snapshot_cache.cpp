@@ -302,7 +302,7 @@ PrefixSnapshotCache::PrefixSnapshotCache(
       }
       Entry probe;
       probe.bytes = 1;
-      AllocateStorage(probe, Tier::Disk, nullptr);
+      probe.AllocateStorage(Tier::Disk, nullptr, directory_, accounting_);
     } catch (const std::system_error& error) {
       throw std::system_error(error.code(),
                               "Invalid engine.dynamic_batching.snapshot_cache.directory '" +
@@ -456,14 +456,35 @@ void PrefixSnapshotCache::DisableDisk(const std::system_error& error) {
   }
 }
 
-void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterface* device) {
-  entry.tier = tier;
-  if (tier == Tier::Disk) {
+void PrefixSnapshotCache::Entry::PrepareStorage() {
+  if (state != State::Empty || accounting) {
+    throw std::logic_error("Prefix snapshot storage may only be allocated once.");
+  }
+  bytes = 0;
+  layer_offsets.clear();
+  layer_offsets.reserve(shapes.size() + 1);
+  layer_offsets.push_back(0);
+  for (const auto& shape : shapes) {
+    const size_t count = TensorBytes(shape, type);
+    if (count > std::numeric_limits<size_t>::max() - bytes) {
+      throw std::overflow_error("Prefix snapshot payload size overflows size_t.");
+    }
+    bytes += count;
+    layer_offsets.push_back(bytes);
+  }
+}
+
+void PrefixSnapshotCache::Entry::AllocateStorage(
+    Tier storage_tier, DeviceInterface* device, const std::filesystem::path& directory,
+    const std::shared_ptr<Accounting>& owner) {
+  auto& entry = *this;
+  entry.tier = storage_tier;
+  if (storage_tier == Tier::Disk) {
     if (entry.bytes > static_cast<uint64_t>(std::numeric_limits<std::streamoff>::max())) {
       throw std::overflow_error("Prefix snapshot exceeds the disk stream offset range.");
     }
-    auto disk = std::make_unique<Entry::DiskStorage>();
-    const auto& parent = directory_;
+    auto spill = std::make_unique<DiskStorage>();
+    const auto& parent = directory;
     std::random_device random;
     for (size_t attempt = 0; attempt < 32; ++attempt) {
       const auto candidate = parent / ("oga-prefix-" + std::to_string(random()) + "-" + std::to_string(random()));
@@ -477,16 +498,16 @@ void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterfa
             std::error_code{errno, std::generic_category()});
       }
 #endif
-      disk->directory = candidate;
+      spill->directory = candidate;
       break;
     }
-    if (disk->directory.empty()) {
+    if (spill->directory.empty()) {
       throw std::system_error(std::make_error_code(std::errc::file_exists),
                               "Unable to create private prefix snapshot spill storage.");
     }
-    std::filesystem::permissions(disk->directory, std::filesystem::perms::owner_all,
+    std::filesystem::permissions(spill->directory, std::filesystem::perms::owner_all,
                                  std::filesystem::perm_options::replace);
-    const auto payload = disk->directory / "payload";
+    const auto payload = spill->directory / "payload";
     auto mode = std::ios::in | std::ios::out | std::ios::binary;
 #ifdef _WIN32
     mode |= std::ios::trunc;
@@ -504,32 +525,32 @@ void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterfa
           std::error_code{errno, std::generic_category()});
     }
 #endif
-    disk->file.exceptions(std::ios::failbit | std::ios::badbit);
-    disk->file.open(payload, mode);
-    disk->file.seekp(static_cast<std::streamoff>(entry.bytes - 1));
-    disk->file.put('\0');
-    disk->file.flush();
-    entry.disk = std::move(disk);
+    spill->file.exceptions(std::ios::failbit | std::ios::badbit);
+    spill->file.open(payload, mode);
+    spill->file.seekp(static_cast<std::streamoff>(entry.bytes - 1));
+    spill->file.put('\0');
+    spill->file.flush();
+    entry.disk = std::move(spill);
   } else {
-    auto* storage_device = tier == Tier::Vram ? device : GetDeviceInterface(DeviceType::CPU);
+    auto* storage_device = storage_tier == Tier::Vram ? device : GetDeviceInterface(DeviceType::CPU);
     for (const auto& shape : entry.shapes) {
       auto tensor = std::make_unique<Tensor>(storage_device, entry.type);
-      if ((tier == Tier::Ram || tier == Tier::Vram) && device->GetType() == DeviceType::CUDA) {
-        const size_t bytes = TensorBytes(shape, entry.type);
+      if ((storage_tier == Tier::Ram || storage_tier == Tier::Vram) && device->GetType() == DeviceType::CUDA) {
+        const size_t tensor_bytes = TensorBytes(shape, entry.type);
         auto& allocator = storage_device->GetAllocator();
         std::shared_ptr<void> buffer;
-        if (tier == Tier::Vram) {
+        if (storage_tier == Tier::Vram) {
           // Arena Alloc retains backing after demotion. Reserve bypasses that pool and Free
           // releases the allocation, so logical snapshot reclamation also reclaims device memory.
           if (!allocator.Reserve) throw std::bad_alloc{};
-          auto* memory = allocator.Reserve(&allocator, bytes);
+          auto* memory = allocator.Reserve(&allocator, tensor_bytes);
           if (!memory) throw std::bad_alloc{};
           buffer = std::shared_ptr<void>(memory, [&allocator](void* pointer) { allocator.Free(pointer); });
         } else {
-          buffer = device->AllocatePinnedHost(bytes);
+          buffer = device->AllocatePinnedHost(tensor_bytes);
         }
         tensor->ort_tensor_ = OrtValue::CreateTensor(storage_device->GetAllocator().GetInfo(), buffer.get(),
-                                                     bytes, shape, entry.type);
+                                                     tensor_bytes, shape, entry.type);
         entry.host_buffers.push_back(std::move(buffer));
       } else {
         try {
@@ -546,8 +567,8 @@ void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterfa
       entry.caches.push_back(std::move(tensor));
     }
   }
-  accounting_->used[static_cast<size_t>(tier)] += entry.bytes;
-  entry.accounting = accounting_;
+  owner->used[static_cast<size_t>(storage_tier)] += entry.bytes;
+  entry.accounting = owner;
 }
 
 void PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device) {
@@ -555,14 +576,13 @@ void PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device)
   Entry staged;
   staged.shapes = entry.shapes;
   staged.type = entry.type;
-  staged.bytes = entry.bytes;
-  staged.layer_offsets = entry.layer_offsets;
-  AllocateStorage(staged, tier, device);
+  staged.PrepareStorage();
+  staged.AllocateStorage(tier, device, directory_, accounting_);
   LogEvent("move_staged", &staged);
   // A move only proceeds toward a slower tier, so disk is always the destination, never the source.
   try {
     for (size_t layer = 0; layer < entry.caches.size(); ++layer) {
-      const std::array ranges{Entry::Range{0, 0, entry.layer_offsets[layer + 1] - entry.layer_offsets[layer]}};
+      const std::array ranges{Entry::Range{0, 0, TensorBytes(entry.shapes[layer], entry.type)}};
       staged.Write(layer, *entry.caches[layer], ranges);
     }
     staged.Flush();
@@ -581,9 +601,7 @@ void PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device)
 bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device,
                                    std::string_view component,
                                    size_t component_max_entries) {
-  if (entry->state != State::Empty || entry->accounting) {
-    throw std::logic_error("Prefix snapshot storage may only be allocated once.");
-  }
+  entry->PrepareStorage();
   const bool webgpu = device->GetType() == DeviceType::WEBGPU;
   const bool device_resident = device_resident_ || webgpu;
   if (!webgpu && device->GetType() != DeviceType::CPU && device->GetType() != DeviceType::CUDA) {
@@ -591,17 +609,6 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
   }
   if (!device_resident && limits_[0] != 0 && device->GetType() != DeviceType::CUDA) {
     throw std::runtime_error("A VRAM prefix snapshot budget requires a CUDA device.");
-  }
-  entry->bytes = 0;
-  entry->layer_offsets.clear();
-  entry->layer_offsets.push_back(0);
-  for (const auto& shape : entry->shapes) {
-    const size_t bytes = TensorBytes(shape, entry->type);
-    if (bytes > std::numeric_limits<size_t>::max() - entry->bytes) {
-      throw std::overflow_error("Prefix snapshot payload size overflows size_t.");
-    }
-    entry->bytes += bytes;
-    entry->layer_offsets.push_back(entry->bytes);
   }
   const auto refuse = [&](const char* reason) {
     LogEvent("refused", entry.get(), reason);
@@ -643,10 +650,9 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     Entry staged;
     staged.shapes = entry->shapes;
     staged.type = entry->type;
-    staged.bytes = entry->bytes;
-    staged.layer_offsets = entry->layer_offsets;
+    staged.PrepareStorage();
     try {
-      AllocateStorage(staged, static_cast<Tier>(index), device);
+      staged.AllocateStorage(static_cast<Tier>(index), device, directory_, accounting_);
     } catch (const std::system_error& error) {
       if (static_cast<Tier>(index) != Tier::Disk) throw;
       DisableDisk(error);

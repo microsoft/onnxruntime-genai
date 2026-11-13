@@ -691,7 +691,7 @@ TEST(NemotronBoltGPU, AttributesRealRetentionRefusalsAndEvictionsToInitiatingEng
   ASSERT_NE(model->prefix_cache_, nullptr);
   std::array<std::shared_ptr<Engine>, 2> engines{
       std::make_shared<Engine>(model), std::make_shared<Engine>(model)};
-  constexpr size_t PrefixCacheMetrics::* fields[]{
+  constexpr uint64_t PrefixCacheMetrics::* fields[]{
       &PrefixCacheMetrics::lookups, &PrefixCacheMetrics::queried_tokens,
       &PrefixCacheMetrics::matches, &PrefixCacheMetrics::registered_blocks,
       &PrefixCacheMetrics::evictions, &PrefixCacheMetrics::retention_refusals,
