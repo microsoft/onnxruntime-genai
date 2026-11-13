@@ -186,6 +186,7 @@ struct Config {
     int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
 
     // Multimodal token IDs (used by Qwen-VL, Gemma4, and other VLM/MMM models)
+    // Qwen mRoPE treats zero-valued image/video/vision-start IDs as unset.
     int image_token_id{};
     int audio_token_id{};
     int boa_token_id{};  // Beginning-of-audio token ID
