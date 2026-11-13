@@ -155,6 +155,7 @@ struct SessionInfo : ModelStateMetadata {
 
   std::vector<std::string> GetInputNames() const;
   const OrtSession& GetInputSession(const std::string& name) const;
+  const OrtMemoryInfo& GetInputMemoryInfo(const std::string& name) const;
 
   std::vector<int64_t> GetInputShape(const std::string& name) const override;
   std::vector<int64_t> GetOutputShape(const std::string& name) const override;
@@ -168,6 +169,13 @@ struct SessionInfo : ModelStateMetadata {
     const OrtSession* session;
   };
   std::unordered_map<std::string, TensorInfo> inputs_, outputs_;
+};
+
+struct CacheAllocation {
+  const OrtMemoryInfo* input_location;
+  const OrtMemoryInfo* output_location;
+  DeviceInterface* device;
+  std::unique_ptr<Ort::Allocator> allocator;
 };
 
 struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {
@@ -191,6 +199,12 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                             OrtSessionOptions* session_options, bool is_session_recreation = false);
 
   bool IsPruned() const;
+  static void ValidateCacheLocations(const std::string& input_name, const std::string& output_name,
+                                     const OrtMemoryInfo& input, const OrtMemoryInfo& output);
+  DeviceInterface& GetCacheDevice(const OrtMemoryInfo& location, const std::string& name) const;
+  std::vector<CacheAllocation> GetCacheAllocations(std::span<const std::string> input_names,
+                                                   std::span<const std::string> output_names) const;
+  static std::string DescribeCacheLocation(const OrtMemoryInfo& info);
   const Config::Model::Decoder::DeclaredState* GetDeclaredState() const;
   bool DeclaredStateSharesBuffer() const;
   void ValidateDeclaredStateParams(const GeneratorParams& params) const;

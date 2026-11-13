@@ -1044,6 +1044,16 @@ const OrtSession& SessionInfo::GetInputSession(const std::string& name) const {
   return *input->second.session;
 }
 
+const OrtMemoryInfo& SessionInfo::GetInputMemoryInfo(const std::string& name) const {
+  const auto& session = GetInputSession(name);
+  const auto names = session.GetInputNames();
+  const auto locations = session.GetMemoryInfoForInputs();
+  const auto found = std::find(names.begin(), names.end(), name);
+  if (found == names.end())
+    throw std::runtime_error("Model input was not found in its session: " + name);
+  return *locations[static_cast<size_t>(found - names.begin())];
+}
+
 std::vector<int64_t> SessionInfo::GetInputShape(const std::string& name) const {
   auto type_info = inputs_.find(name);
   if (type_info == inputs_.end())
@@ -1070,6 +1080,75 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
   if (type_info == outputs_.end())
     throw std::runtime_error("Model output was not found: " + name);
   return type_info->second.type_info->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
+}
+
+std::string Model::DescribeCacheLocation(const OrtMemoryInfo& info) {
+  return info.GetAllocatorName() + ":" + std::to_string(info.GetDeviceId()) +
+         " (memory type " + std::to_string(info.GetMemoryType()) + ")";
+}
+
+void Model::ValidateCacheLocations(const std::string& input_name, const std::string& output_name,
+                                   const OrtMemoryInfo& input, const OrtMemoryInfo& output) {
+  // Separate-buffer decode also reuses each present as the next past.
+  if (input.GetAllocatorName() != output.GetAllocatorName() ||
+      input.GetDeviceType() != output.GetDeviceType() ||
+      input.GetDeviceId() != output.GetDeviceId() ||
+      input.GetMemoryType() != output.GetMemoryType()) {
+    throw std::runtime_error("KV cache locations are incompatible: '" + input_name + "' requires " +
+                             DescribeCacheLocation(input) + ", but '" + output_name + "' is produced on " +
+                             DescribeCacheLocation(output) + ". Cross-device cache updates are not supported.");
+  }
+}
+
+DeviceInterface& Model::GetCacheDevice(const OrtMemoryInfo& location, const std::string& name) const {
+  if (location.GetAllocatorName() == "Cpu" &&
+      location.GetDeviceType() == OrtMemoryInfoDeviceType_CPU &&
+      location.GetDeviceId() == 0 && location.GetMemoryType() == OrtMemTypeDefault) {
+    return p_device_kvcache_->GetType() == DeviceType::CPU
+               ? *p_device_kvcache_
+               : *GetDeviceInterface(DeviceType::CPU);
+  }
+  if (p_device_kvcache_->GetType() == DeviceType::CUDA &&
+      location.GetAllocatorName() == "Cuda" &&
+      location.GetDeviceType() == OrtMemoryInfoDeviceType_GPU &&
+      location.GetMemoryType() == OrtMemTypeDefault &&
+      location.GetDeviceId() == p_device_kvcache_->GetAllocator().GetInfo().GetDeviceId()) {
+    return *p_device_kvcache_;
+  }
+  throw std::runtime_error("Unsupported KV cache location for '" + name + "': " + DescribeCacheLocation(location));
+}
+
+std::vector<CacheAllocation> Model::GetCacheAllocations(std::span<const std::string> input_names,
+                                                        std::span<const std::string> output_names) const {
+  if (input_names.empty() || input_names.size() != output_names.size())
+    throw std::runtime_error("Cache location queries require nonempty, paired input/output names.");
+  const auto& session = session_info_.GetInputSession(input_names[0]);
+  const auto session_inputs = session.GetInputNames();
+  const auto session_outputs = session.GetOutputNames();
+  const auto input_locations = session.GetMemoryInfoForInputs();
+  const auto output_locations = session.GetMemoryInfoForOutputs();
+  std::unordered_map<std::string, const OrtMemoryInfo*> inputs, outputs;
+  for (size_t i = 0; i < session_inputs.size(); ++i)
+    inputs.emplace(session_inputs[i], input_locations[i]);
+  for (size_t i = 0; i < session_outputs.size(); ++i)
+    outputs.emplace(session_outputs[i], output_locations[i]);
+
+  std::vector<CacheAllocation> allocations;
+  allocations.reserve(input_names.size());
+  for (size_t i = 0; i < input_names.size(); ++i) {
+    const auto input = inputs.find(input_names[i]);
+    const auto output = outputs.find(output_names[i]);
+    if (input == inputs.end() || output == outputs.end() ||
+        &session_info_.GetInputSession(input_names[i]) != &session) {
+      throw std::runtime_error("KV cache pair '" + input_names[i] + "' / '" + output_names[i] +
+                               "' must belong to the same decoder session.");
+    }
+    ValidateCacheLocations(input->first, output->first, *input->second, *output->second);
+    auto& device = GetCacheDevice(*output->second, output->first);
+    allocations.push_back({input->second, output->second, &device,
+                           Ort::Allocator::Create(session, *output->second)});
+  }
+  return allocations;
 }
 
 Model::DeclaredStateEnvelope::DeclaredStateEnvelope(const Config& config)

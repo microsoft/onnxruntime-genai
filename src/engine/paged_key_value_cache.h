@@ -15,6 +15,7 @@
 #include "prefix_cache.h"
 #include "request.h"
 #include "step_plan.h"
+#include "../models/model.h"
 
 namespace Generators {
 
@@ -267,6 +268,14 @@ struct PagedKeyValueCache {
   };
 
   void BindCache(State& state);
+  void InitializeCacheAllocations(const std::vector<int>& layers);
+  Ort::Allocator& CacheAllocator(size_t index) {
+    return cache_allocations_.empty() ? model_->p_device_kvcache_->GetAllocator() : *cache_allocations_[index].allocator;
+  }
+  DeviceInterface& CacheDevice(size_t index) {
+    return cache_allocations_.empty() ? *model_->p_device_kvcache_ : *cache_allocations_[index].device;
+  }
+  std::pair<OrtValue*, const char*> PublishBlockTables(DeviceSpan<int32_t>& data);
 
   //   The key and the value cache is represented as an array of blocks. Each block contains
   //   a number of slots equal to the block size. Each slot contains num_kv_heads * head_width
@@ -298,6 +307,7 @@ struct PagedKeyValueCache {
                        int32_t* data, size_t columns);
   void RebuildBlockTableIndex() noexcept;
   std::shared_ptr<Model> model_;
+  std::vector<CacheAllocation> cache_allocations_;
   std::vector<LayerCache> cache_;  // Pair of key and value caches for all layers
   // Scale caches in binding order: for each layer of cache_, the key scale then the value scale,
   // skipping a side whose input template is empty. BindCache() lays them out immediately after the
@@ -307,6 +317,11 @@ struct PagedKeyValueCache {
   std::vector<PagedCacheBlockTable> block_tables_;  // Block table for all requests in the cache
   std::unique_ptr<RequestIndex> block_table_index_;
   std::unique_ptr<OrtValue> block_tables_value_;  // Block tables for all requests in the cache
+  struct BlockTableBinding {
+    std::string name;
+    std::unique_ptr<Tensor> tensor;
+  };
+  std::vector<BlockTableBinding> block_table_bindings_;
 
   // Sliding-window layers hold their KV in a ring of `window_ring_blocks_` blocks rather than one
   // block per position, so they get their own much smaller pool and their own block table. The

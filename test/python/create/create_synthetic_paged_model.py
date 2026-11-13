@@ -41,6 +41,7 @@ def _decoder_graph(
     scale_caches=False,
     selected_logits=False,
     num_blocks=NUM_BLOCKS,
+    per_layer_tables=False,
 ):
     i64 = lambda v: np.asarray(v, dtype=np.int64)  # noqa: E731
     initializers = [
@@ -86,7 +87,8 @@ def _decoder_graph(
     node("Div", ["pos", "cB"], ["block_col"])
     node("Mul", ["block_col", "cB"], ["block_col_base"])
     node("Sub", ["pos", "block_col_base"], ["slot_in_block"])
-    node("Cast", ["block_table"], ["block_table_i64"], to=TensorProto.INT64)
+    table_name = f"block_table.{WRITE_LAYER}" if per_layer_tables else "block_table"
+    node("Cast", [table_name], ["block_table_i64"], to=TensorProto.INT64)
     node("Unsqueeze", ["row_id", "axis1"], ["row_id_col"])
     node("Unsqueeze", ["block_col", "axis1"], ["block_col_col"])
     node("Concat", ["row_id_col", "block_col_col"], ["block_gather_index"], axis=1)
@@ -109,7 +111,9 @@ def _decoder_graph(
     node("Identity", [f"past_key_values.{PASSTHROUGH_LAYER}.value"], [f"present.{PASSTHROUGH_LAYER}.value"])
 
     # Read the request's first token and the current token through the cache.
-    node("Gather", ["block_table_i64", "c0"], ["first_block_id"], axis=1)
+    if per_layer_tables:
+        node("Cast", [f"block_table.{PASSTHROUGH_LAYER}"], ["prefix_table_i64"], to=TensorProto.INT64)
+    node("Gather", ["prefix_table_i64" if per_layer_tables else "block_table_i64", "c0"], ["first_block_id"], axis=1)
     node("Mul", ["first_block_id", "cB"], ["first_slot_per_row"])
     node("Gather", ["first_slot_per_row", "row_id"], ["first_slot"], axis=0)
     node("Gather", ["present_key_flat", "first_slot"], ["first_key"], axis=0)
@@ -149,7 +153,10 @@ def _decoder_graph(
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["num_tokens"]),
         helper.make_tensor_value_info("cumulative_sequence_lengths", TensorProto.INT32, ["batch_plus_1"]),
         helper.make_tensor_value_info("past_sequence_lengths", TensorProto.INT32, ["batch"]),
-        helper.make_tensor_value_info("block_table", TensorProto.INT32, ["batch", "max_blocks"]),
+        *[
+            helper.make_tensor_value_info(name, TensorProto.INT32, ["batch", "max_blocks"])
+            for name in ([f"block_table.{layer}" for layer in PAGED_LAYERS] if per_layer_tables else ["block_table"])
+        ],
         helper.make_tensor_value_info("attention_metadata", TensorProto.INT32, [3]),
         *[
             helper.make_tensor_value_info(f"past_key_values.{layer}.key", TensorProto.FLOAT, cache_shape)
@@ -192,9 +199,10 @@ def create_decoder(
     scale_caches=False,
     selected_logits=False,
     num_blocks=NUM_BLOCKS,
+    per_layer_tables=False,
 ):
     model = helper.make_model(
-        _decoder_graph(logits_per_token, scale_caches, selected_logits, num_blocks),
+        _decoder_graph(logits_per_token, scale_caches, selected_logits, num_blocks, per_layer_tables),
         opset_imports=[helper.make_operatorsetid("", 17)],
         ir_version=9,
         producer_name="onnxruntime-genai",
@@ -211,6 +219,7 @@ def create_config(
     selected_logits=False,
     num_blocks=NUM_BLOCKS,
     max_batch_size=MAX_BATCH_SIZE,
+    per_layer_tables=False,
 ):
     config = {
         "model": {
@@ -270,6 +279,9 @@ def create_config(
             decoder["outputs"][f"present_{side}_scale_names"] = f"present.%d.{side}_scale"
     if selected_logits:
         config["model"]["decoder"]["inputs"]["logits_indices"] = "logits_indices"
+    if per_layer_tables:
+        config["model"]["decoder"]["inputs"]["block_table"] = "block_table.%d"
+        config["engine"]["dynamic_batching"]["prefix_caching"] = False
     path = os.path.join(output_dir, "genai_config.json")
     with open(path, "w") as f:
         json.dump(config, f, indent=2)
@@ -284,11 +296,23 @@ def main():
     parser.add_argument("--logits_per_token", action="store_true")
     parser.add_argument("--scale_caches", action="store_true")
     parser.add_argument("--selected_logits", action="store_true")
+    parser.add_argument("--per_layer_tables", action="store_true")
     args = parser.parse_args()
     output_dir = os.path.normpath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    create_decoder(output_dir, args.logits_per_token, args.scale_caches, args.selected_logits)
-    create_config(output_dir, args.scale_caches, args.selected_logits)
+    create_decoder(
+        output_dir,
+        args.logits_per_token,
+        args.scale_caches,
+        args.selected_logits,
+        per_layer_tables=args.per_layer_tables,
+    )
+    create_config(
+        output_dir,
+        args.scale_caches,
+        args.selected_logits,
+        per_layer_tables=args.per_layer_tables,
+    )
 
 
 if __name__ == "__main__":

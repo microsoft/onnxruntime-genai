@@ -75,12 +75,6 @@ struct DefaultKeyValueCacheBase : KeyValueCache {
   int windowed_cache_size_{0};
   int current_length_{0};  // Total sequence length seen by the most recent Update()
 
-  struct CacheAllocation {
-    const OrtMemoryInfo* input_location;
-    const OrtMemoryInfo* output_location;
-    DeviceInterface* device;
-    std::unique_ptr<Ort::Allocator> allocator;
-  };
   // Allocators must outlive the tensors allocated through them.
   std::vector<CacheAllocation> cache_allocations_;
   std::vector<std::shared_ptr<OrtValue>> empty_pasts_;

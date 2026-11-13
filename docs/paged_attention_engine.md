@@ -158,6 +158,16 @@ Dynamic batching limits scheduled rows with `max_batch_size` and limits the tota
 query tokens in one model run with `max_scheduled_tokens`. The token limit defaults
 to 2048. Both limits are positive and independent.
 
+### Paged pool colocation
+
+Flat CPU/CUDA decoders resolve each exposed K/V past/present pair against its originating ORT session. Each pool uses an allocator for that pair's committed memory location, and its past and present bindings share the same allocation. Incompatible locations, unsupported devices or CUDA device IDs fail rather than staging the whole pool through another device. Other providers retain their existing allocation path.
+
+A literal `model.decoder.inputs.block_table` retains a shared logical table. An exported graph can instead expose one table input per layer and configure `"block_table": "block_table.%d"`. The Engine mirrors the same logical block IDs into each input's required CPU/CUDA memory; pool and table locations must agree for these per-layer bindings. This does not rewrite a graph with one shared input into a graph with independent inputs.
+
+Nonprimary pools and per-layer tables initially require explicit `engine.dynamic_batching.num_blocks`, `prefix_caching: false`, and no automatic memory-budget sizing, capture, sliding-window ring, scale caches, hybrid state or auxiliary cache. Nonprimary CPU/CUDA pools additionally require unquantized FP16/BF16. Existing homogeneous shared-table features remain available. Explicit block counts bound pool storage; they are not per-device budget admission or an allocator quota.
+
+Colocation does not add a CPU `PagedAttention` kernel. CPU placement requires an eligible CPU implementation; CPU storage with CUDA attention is offload and is not enabled here. The synthetic CPU table tests use standard ONNX operators to exercise owner bindings, reservations and execution, not a native CPU attention implementation.
+
 ### Device-memory budget and conservative headroom
 
 Set `engine.dynamic_batching.device_memory_budget_bytes` before loading a model
