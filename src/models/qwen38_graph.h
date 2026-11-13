@@ -377,6 +377,7 @@ size_t ResolveQwen38DflashReservedBlocks(const Config& config, size_t block_size
 // `search.max_length`, and `model.qwen38_graph.prefill.chunk`. When `dynamic_batching` resolves to a single slot, records
 // that authoritative choice in `model.qwen38_graph.resolved_max_batch_size` before clearing `engine.dynamic_batching` for the
 // static Engine path. Returns true when `dynamic_batching.num_blocks` configured the KV capacity and context length.
+// Rejects recompute preemption before changing the configuration, since this backend is not paged.
 bool ApplyQwen38DynamicBatchingConfig(Config& config);
 
 // Size in bytes of one element of the dense prefill `logits` output. Only BFLOAT16 and FLOAT are supported; any other

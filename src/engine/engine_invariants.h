@@ -46,6 +46,10 @@ struct RequestStateSnapshot {
   // Caller-facing index into the turn's stop-string list, or -1. Valid (well-formed) whenever it is
   // nonnegative exactly when finish_reason is StopString; see ValidateRequestInvariants().
   int32_t matched_stop_string_index{-1};
+  bool needs_cache_replay{};
+  bool prefix_adoption_staged{};
+  uint64_t preemption_count{};
+  uint64_t recomputed_token_count{};
 };
 
 // Immutable view of one Request's block ownership within the paged cache.

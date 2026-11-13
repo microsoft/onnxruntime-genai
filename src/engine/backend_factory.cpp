@@ -3,6 +3,7 @@
 
 #include "backend_factory.h"
 #include "../logging.h"
+#include "../models/model_state_manifest.h"
 #include "../models/qwen38_graph.h"
 #include "qwen38_graph_executor.h"
 #include "decoders/varlen_decoder_io.h"
@@ -243,9 +244,10 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
   }
   std::shared_ptr<CacheManager> cache_manager =
       CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
-                           dflash2_reserved_memory_bytes + graph_buffer_reserved_bytes,
+                           dflash2_reserved_memory_bytes,
                            dflash2_prefix_checkpoint_bytes,
-                           &dflash2_prefix_checkpoints_enabled);
+                           &dflash2_prefix_checkpoints_enabled,
+                           graph_buffer_reserved_bytes);
   std::shared_ptr<PrefixSnapshotCache> snapshot_cache;
   const auto& batching = model->config_->engine.dynamic_batching;
   const bool webgpu = model->p_device_kvcache_->GetType() == DeviceType::WEBGPU;
@@ -307,6 +309,21 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
 }
 
 }  // namespace
+
+void ValidateRecomputePreemptionModel(const Config& config) {
+  if (!config.engine.dynamic_batching ||
+      !config.engine.dynamic_batching->enable_recompute_preemption) {
+    return;
+  }
+  if (ModelStateManifest{config.model.decoder}.HasFixedStateGroups() ||
+      config.model.decoder.sliding_window ||
+      config.model.mtp.IsEnabled() || !config.model.dflash2.filename.empty() ||
+      config.speculative.ngram_size != 0) {
+    throw std::runtime_error(
+        "Recompute preemption currently supports only full-attention paged KV; "
+        "fixed, sliding-window, model-managed and speculative auxiliary state are unsupported.");
+  }
+}
 
 BackendCapabilities ResolveBackendCapabilities(
     const Model& model, const CacheManager& cache_manager, const Scheduler& scheduler,
@@ -414,6 +431,7 @@ BackendCapabilities ResolveBackendCapabilities(
 
 EngineBackendBundle CreateEngineBackend(std::shared_ptr<Model> model) {
   if (!model) throw std::invalid_argument("Engine backend construction requires a model.");
+  ValidateRecomputePreemptionModel(*model->config_);
   auto& batching = model->config_->engine.dynamic_batching;
   if (batching && batching->device_memory_budget_bytes) {
     if (model->p_device_kvcache_->GetType() != DeviceType::CUDA ||

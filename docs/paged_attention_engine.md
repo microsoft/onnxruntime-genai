@@ -112,7 +112,7 @@ At a high level, one dynamic engine step is:
 ```text
 drain pending Engine events up to caller capacity, if any exist
     |
-plan a runnable batch
+plan a runnable batch, possibly committing validated recompute suspensions
     |
 reserve all paged and fixed decoder state needed by that plan
     |
@@ -131,12 +131,17 @@ commit search state, cache state, and request bookkeeping
 write committed events up to caller capacity and retain overflow
 ```
 
-The step is transactional before publication. Planning, reservation, execution, and fixed-state
+The model step is transactional after planning. Reservation, execution, and fixed-state
 preparation do not change committed state; recoverable failure restores request/search state and
 releases all reservations. Once publication begins, containment is **fail-stop**, not rollback:
 request/search, paged, fixed, and request-bookkeeping publication is ordered and prevalidated, but
 an unexpected internal failure may occur after an earlier component publishes. The Engine then
 becomes permanently unhealthy rather than exposing the partially published state to further steps.
+
+With optional recompute preemption, planning can first publish a separate, validated suspension
+boundary. The model transaction starts after that boundary; rollback retains the suspension and
+does not resurrect released KV. Preemption is off by default and supports only full-attention
+paged KV without fixed, ring, model-managed, or speculative auxiliary state.
 
 ## How the dynamic path is selected
 
@@ -252,6 +257,12 @@ covered only to the extent allowed for by the packaged headroom; it is not an
 allocation-enforced peak limit. Reload-aware accounting and physical
 reclamation are outside this initial scope.
 
+The budget sizes the pool at initialization; it does not enable recompute
+preemption. On a supported layout, preemption releases a suspended Request's
+references to blocks in that same pool. Reclaimable blocks can then be reused
+without resizing the pool, returning its backing allocation to CUDA, or changing
+the configured budget or headroom.
+
 ### Prefix caching
 
 Dynamic batching caches prefixes by default for supported layouts.
@@ -341,7 +352,9 @@ Full-attention drafters still require their entire prefix; their admission behav
 is unchanged.
 
 Admission charges an adopted retained block against reclaimable capacity only when
-that block is actually in the prefix cache's reclaimable set. Fixed-state and draft
+that block contributes to the prefix cache's reclaimable capacity. Ordinary admission
+uses the current reclaimable set; preemption feasibility uses reference counts after
+the proposed resident releases, without changing cache ownership. Fixed-state and draft
 checkpoint leases protect their complete physical ancestry from reclamation. Such a
 protected block already occupies committed pool capacity and is not charged again;
 an exact-fit request may therefore adopt it and reserve the remaining free blocks.
@@ -449,6 +462,8 @@ every branching workload. Target-prefix identity and target KV eviction are unch
 VRAM snapshot capacity is rounded down to whole rings and reserved from the
 shared target/drafter KV budget before target sizing. It is reduced when necessary
 to preserve at least one target block, for both `num_blocks` and automatic sizing.
+Construction-time reserves, including graph-capture buffers, are subtracted before
+choosing device snapshot capacity and remain charged when sizing target blocks.
 RAM and disk do not consume that GPU reserve. CUDA RAM payloads use pinned memory.
 CPU/CUDA capture and restore transfer only selected ring blocks and synchronize before
 publication. WebGPU stages each backing buffer once per layer, gathers/scatters
@@ -733,6 +748,20 @@ the ceiling.
 
 The current turn is executable and owned by the Engine. It normally has one unprocessed token at
 the beginning of a decode step: the token sampled by the previous step.
+
+### `Suspended`
+
+With recompute preemption enabled, an unfinished Turn can temporarily relinquish cache residency.
+The Request keeps its complete logical token sequence, Search and RNG state, Turn ID, generation
+policy, generated-token count, guidance and stop-string state. Its physical processed cursor returns
+to zero. It remains executable and is admitted through bounded prefill, optionally adopting a
+matching cached prefix, before decoding resumes.
+
+`BeginTurn()` remains invalid while suspended. `CancelTurn()` and `Close()` remain valid. After
+cancellation and terminal-event draining, continuation and rewind accept the nonresident Request's
+explicit cache-replay marker even when it had processed real tokens before suspension.
+Turn-complete residents can also relinquish KV, but keep `TurnComplete` and their terminal metadata;
+they do not start replay until the caller begins another Turn.
 
 ### `TurnComplete`
 
@@ -1093,21 +1122,28 @@ every other Engine query, it must be called from the Engine's owner thread and t
 `DynamicBatchScheduler::PlanStep()` skips `TurnComplete` residents and builds candidates from
 executable residents plus waiting requests.
 
-The cache manager checks whether those candidates fit alongside dormant turn-complete requests. If
-retained residency prevents admission or cache growth, the plan reports capacity backpressure; the
-application decides which conversation to release with `Close()`.
+The cache manager checks whether those candidates fit alongside dormant turn-complete requests.
+Without recompute preemption, retained residency that prevents admission or cache growth reports
+capacity backpressure; the application decides which conversation to release with `Close()`.
+Enabled preemption may instead commit validated suspensions during planning as described below.
 
 ### 2. Build the initial step plan
 
 The scheduler snapshots requests that already belong to the paged cache. Executable residents may
 be `Active` or `Assigned`; an `Assigned` resident is a queued continuation.
 
-It then snapshots nonresident waiting requests from the scheduler pool. These are `Assigned` and are marked as newly admitted candidates.
+It then snapshots nonresident waiting requests from the scheduler pool. These are `Assigned` or
+`Suspended` and are marked as newly admitted candidates.
 
 The scheduler orders candidates with decodes first. Order remains stable among
 decodes and among prefills. Each candidate initially contributes one provisional
 token so cache feasibility can be decided before a large prefill consumes the
 global token budget.
+
+When recompute preemption is enabled, committed-step aging precedes this ordering; decode-first
+ordering still breaks ties. Newly submitted Requests start at the current committed epoch, while
+suspended Requests retain their earlier service epoch. An aborted transaction does not advance
+service age or decode credit.
 
 For each candidate, the scheduler records a `RequestStepPlan` containing:
 
@@ -1142,7 +1178,8 @@ residents, including omitted ones, count toward residency capacity. A new
 admission is allowed only when the committed resident count plus selected new
 admissions remains within `max_batch_size`.
 
-Selected entries are compacted to the beginning of the plan. Deferred entries remain unchanged in committed state:
+Selected entries are compacted to the beginning of the plan. Apart from explicitly selected
+preemption victims, deferred entries remain unchanged in committed state:
 
 - An existing request keeps its current block table and stays `Active`.
 - A new request stays `Assigned` and owns no cache blocks.
@@ -1184,6 +1221,13 @@ the request's remaining tokens, then binds those counts before decoder input or
 chunk-completion logic reads the request.
 
 The scheduler also marks whether the step is eligible for CUDA graph capture. A capturable step must be past prefill and must give every request the same number of tokens. Prefill, chunked prefill, mixed prefill/decode, and steps whose requests carry different draft widths all run eagerly.
+
+Before `PlanStep()` returns, enabled recompute preemption validates every selected victim and
+stages prefix adoption before publishing the no-throw cache releases and replay markers. This is
+a separate committed suspension boundary, not part of the model transaction that follows.
+Reservation, checkpointing, and execution start from that post-planning state. A subsequent
+recoverable execution failure leaves victims valid, cold, and marked for replay; rollback neither
+restores their discarded KV nor reverses their suspension counters.
 
 ### 5. Reserve the complete cache transaction
 
@@ -2381,7 +2425,161 @@ The current ordering policy is:
 
 Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. Phase 1 does not rotate service or promote waiting prefills, so sustained decode demand can starve prefill work.
 
+The optional policy below adds committed-step aging and selective KV reclamation. Without the
+explicit opt-in, the ordering and capacity-deferral behavior above remain unchanged.
+
 If no request can run because of temporary capacity, `RunDynamic()` reports `CapacityDeferred` instead of returning `nullptr`. Returning `nullptr` would incorrectly tell the caller that no work remains.
+
+## Recompute preemption
+
+Set these Engine-wide fields in `engine.dynamic_batching`, either in the base configuration or a
+runtime-profile overlay:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enable_recompute_preemption` | `false` | Enable committed-step aging and recompute preemption |
+| `max_preemptions_per_step` | `1` | Maximum residents relinquishing KV in one planning pass |
+| `min_decode_steps_before_preemption` | `8` | Committed decode steps earned before another active suspension |
+
+Both numeric limits must be positive integers representable by the configuration parser. Actual
+victim count is also bounded by resident count. These fields are construction-time policy, not
+mutable per-Request or per-Turn settings.
+
+### Policy selection and compatibility
+
+These are permanent age-based scheduling controls, not temporary aliases for a future foreground
+policy. With `enable_recompute_preemption=false`, the existing default ordering and wait-only
+capacity behavior remain in effect. With `true`, the Engine selects committed-service aging plus
+bounded recompute reclamation (`AgeBasedRecovery`), not just an independently enabled cache
+mechanism. The numeric controls tune only that policy; they remain validated but do not enable
+aging or reclamation when the flag is false.
+
+The base configuration is resolved first, then the selected runtime-profile overlay overrides
+its supplied fields, including an explicit `false`. The Engine fixes the resulting policy at
+construction. `Default` and `AgeBasedRecovery` are descriptive policy names here, not new JSON
+enum values or runtime API options.
+
+Any future explicit runtime policy selector must preserve that meaning and resolve after the
+model/profile settings. If explicit legacy policy controls and an explicit runtime selection
+disagree, construction must reject the combination rather than silently override or reinterpret
+either one. For example, an explicit `true` cannot become `Default` or `ForegroundFirst` through
+another option. With no explicit legacy policy selection, a future runtime option may select a
+supported policy directly. Unsupported choices must be rejected, and an API introducing such a
+selector must report its effective policy and capabilities. No runtime policy selector or
+foreground mode is implemented by this revision.
+
+### Policy scope and host integration
+
+This is **age-based capacity recovery, not host-designated foreground handoff**. Committed service
+age orders waiting work; a fresh interactive request does not automatically outrank an older
+background or suspended request. There are no foreground/background tiers, equal-tier residency
+rules, per-invocation deadlines, replacement identities, or mutable Request importance controls.
+The configuration fields above select this Engine-wide policy, not application urgency.
+
+Preemption is cooperative between complete execution steps; it never interrupts an in-flight
+model call. An unfinished resident still in initial prefill or cache replay is not an eligible
+victim, even at a chunk boundary. Chunk and query-token budgets bound work per step but do not
+provide an interactive latency bound or let a new arrival interrupt lower-priority replay.
+Admission plans retained history and the current execution step, not a foreground output-growth
+entitlement or the entire requested output ceiling.
+
+Hosts should cancel superseded or expired work through the Engine owner using its current Turn ID,
+rather than preserve obsolete work for replay. Cancellation also completes a suspended Turn and
+queues its terminal event without requiring another model token. Suspension itself is not a finish
+reason; a still-valid suspended Turn resumes automatically, whereas an evicted completed session
+remains logically complete until a later `BeginTurn`.
+
+A foreground policy and its host integration require a separate runtime contract for importance,
+deadline/replacement handling, interruption of lower-tier prefill/replay, bounded growth and
+buffering, and consumer backpressure. This opt-in does not supply that contract or make a general
+starvation guarantee. Support for hybrid/windowed reconstruction and hosted auxiliary decoders
+also remains outside the supported subset below; paged-KV reclamation alone does not qualify those
+other state components for eviction.
+
+### Supported state
+
+This version supports full-attention paged KV and its shared prefix-cache references. Engine
+construction rejects opt-in with fixed convolution/recurrent state, sliding-window or model-managed
+state, hosted MTP/DFlash/DSpark, or n-gram speculative configuration. Manual draft proposals are
+also rejected. Static or injected non-reclaiming cache managers reject opt-in rather than ignoring
+it. Target graph-capture buffers remain part of automatic memory sizing but are not auxiliary
+decoder state and do not disable preemption. Those unsupported layouts retain their existing
+behavior when the feature is disabled.
+
+### Plan, validate, then publish
+
+The scheduler first builds the normal feasible plan. For omitted work, it probes that exact
+beneficiary first without releasing anything. If ordering alone could run it, no KV is discarded.
+Otherwise it tries a bounded, deterministic victim set: idle Turn-complete residents first, then
+the most recently serviced eligible residents, breaking ties by latest residency order.
+If that preferred set cannot help, each eligible resident is tried as the first victim, growing
+the set in cyclic policy order up to `max_preemptions_per_step`. This tries every eligible singleton
+and retains cumulative shared-owner sets rather than discarding an individually ineffective owner.
+Per beneficiary, release probes are bounded by eligible resident count times the smaller of that
+count and the victim limit; the search does not enumerate all subsets.
+Active victims must have earned their decode quantum and must not still be rebuilding KV. If
+the entire batch is stalled, one committed generated token since admission is sufficient to permit
+a suspension before the full quantum rather than requiring KV progress to earn eligibility.
+
+`CacheManager::PlanStepAfterReleasing()` dry-runs the current resource planner. It subtracts the
+proposed residency and reference counts without mutating physical ownership. A shared block is
+newly available only when all Request references disappear; a remaining prefix-cache reference
+makes it reclaimable, not immediately free. Adopted retained blocks are charged once and cannot
+also fund private suffix growth. The exact beneficiary must fit after the proposed releases, and
+unrelated new admissions are not added to that probe. An insufficient victim set is discarded
+without releasing any KV.
+
+Every fallible planning, layout, and release-validation operation runs before suspension
+publication. `CommitPreemption()` reuses the validated rewind-release primitives to publish cache
+release and the Request replay boundary without allocation or device work. Shared owners and
+indexed prefix identities remain intact. Search, RNG, Turn counters and logical tokens are not
+rewound or replaced. The physical cursor alone returns to zero.
+
+`PlanStep()` publishes that suspension boundary before returning to the Engine. It is not a
+read-only planning API: a later model-step rollback preserves these committed suspensions.
+
+The selected beneficiary's admission preference survives an execution abort until it commits cache progress
+or its Turn is canceled, closed, or replaced. This avoids immediately returning reclaimed capacity
+to the victim on the caller's next `Run()`. This is an internal planner preference, not application
+priority, and does not add an execution-capacity retry loop.
+
+### Replay and observable behavior
+
+Replay follows the existing chunk and global query-token budgets. Intermediate chunks do not
+sample, emit tokens, advance guidance/stop matching, or count as generated output. The final chunk
+consumes the previously sampled pending token and samples its successor. Prefix adoption during
+the same Turn does not count the replayed history as a second cached prompt. Rollback restores
+staged prefix adoption and leaves all service/fairness counters unchanged.
+
+`Request::PreemptionCount()` counts published suspensions. `RecomputedTokenCount()` counts only
+discarded KV tokens actually re-executed by committed replay steps; cached-prefix adoption does
+not count as recomputation. Cancellation and another eviction during a partial rebuild preserve
+the outstanding discarded-KV boundary, so repeated committed replay work is counted on each pass.
+These internal observations do not change the public event ABI.
+
+The guarantee is identical logical context and preserved sampling state, **not bit-identical
+model output**. Replaying former one-token decodes as prefill changes query shape, disables decode
+graph capture, and can select different floating-point attention kernels. Provider/model
+qualification is still required before production enablement. This mechanism neither swaps KV to
+CPU/disk nor shifts context or discards prompt tokens.
+
+### Coverage and measurement
+
+`test/cpp/engine/recompute_preemption_tests.cpp` covers shared-reference planning, bounded replay,
+seeded RNG continuity, executed synthetic-graph output, aging, cancellation/continuation/rewind,
+idle residency, alternative victim search and its probe bound, preflight allocation failure,
+and retryable/execution-capacity aborts.
+The disabled `RecomputePreemptionBenchmark` lives alongside the existing prefix-cache and scheduler
+microbenchmarks. It measures staggered concurrent serving under a fixed KV budget with production
+policy/cache/Search/event code and scripted logits. Model-step latency excludes event-drain-only
+calls. CPU host timings and tokens/s from this instrument are not LLM or GPU throughput.
+
+Production foreground claims need a separate comparison on actual supported models/providers with
+identical arrival traces, including superseded/expired work and arrivals during prefill or replay.
+Measure valid output delivered before expiry, foreground TTFT/inter-token tails, repeated replay
+work, useful background progress, and total throughput. Neither replay volume nor device utilization
+alone establishes useful interactive progress; the current tests and scripted benchmark do not
+qualify a foreground policy or unsupported model layouts.
 
 ## Static engine path
 
@@ -2420,6 +2618,9 @@ Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`,
 ### Static backends that select their own tokens
 
 A static backend may select and verify tokens internally rather than return logits. It declares planned rows through `ScheduledRequests::BeginBackendStep`, stages owned `BackendRowResult` records, and receives `TokenCommitAck` after the Engine applies EOS, stop strings and turn/session limits. Preparation-only rows produce no token events.
+
+This backend does not support the full-attention paged-KV recompute preemption policy.
+The opt-in is rejected before dynamic-batching settings are mapped or cleared for this backend.
 
 Such a backend owns its fixed-state, replay and device-lifetime contracts; it does not inherit dynamic paging or transactional rollback. Capabilities determine supported policies and request limits. Known device failures must be reported before a slot is reset or reused, and an unsafe failure poisons the shared execution context.
 

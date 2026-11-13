@@ -49,6 +49,34 @@ TEST(EngineBackendFactoryTest, DefaultDecoderBundleKeepsItsExecutionProtocol) {
             bundle.capabilities.configured_max_batch_size);
 }
 
+TEST(EngineBackendFactoryTest, RejectsPreemptionAuxiliaryStateBeforeDependencyMutation) {
+  for (const bool budgeted : {false, true}) {
+    SCOPED_TRACE(budgeted);
+    auto model = LoadDummyDecoderModel();
+    Config::Engine::DynamicBatching batching;
+    batching.num_blocks = 4;
+    batching.enable_recompute_preemption = true;
+    if (budgeted) {
+      batching.device_memory_budget_bytes = 1024;
+      batching.device_memory_headroom_bytes = 0;
+    }
+    model->config_->engine.dynamic_batching = batching;
+    model->config_->model.dflash2.filename = "not-loaded.onnx";
+    model->config_->model.dflash2.main_aux_hidden_states = "must-not-be-published";
+    const auto original_output = model->config_->model.decoder.outputs.aux_hidden_states;
+
+    try {
+      (void)CreateEngineBackend(model);
+      FAIL() << "Preemption must reject auxiliary state before dependency or budget mutation.";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("Recompute preemption"), std::string::npos);
+    }
+    EXPECT_EQ(model->config_->model.decoder.outputs.aux_hidden_states, original_output);
+    EXPECT_EQ(model->config_->engine.dynamic_batching->num_blocks, batching.num_blocks);
+    EXPECT_EQ(model->config_->engine.dynamic_batching->gpu_utilization_factor, batching.gpu_utilization_factor);
+  }
+}
+
 TEST(EngineBackendFactoryTest, DeviceMemoryBudgetRejectsUnsupportedDeviceWithoutChangingSizing) {
   auto model = LoadSyntheticPagedModel();
   auto& batching = *model->config_->engine.dynamic_batching;

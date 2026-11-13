@@ -445,3 +445,48 @@ endif()
 
 add_test(NAME EngineUnitTests COMMAND engine_unit_tests)
 set_tests_properties(EngineUnitTests PROPERTIES LABELS "engine;unit")
+
+# Keep the legacy add-on beside its own executable, never beside the production CUDA add-on.
+# This exercises the real version gate without CUDA or a device.
+if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(device_interface_test_dir "${CMAKE_CURRENT_BINARY_DIR}/device_interface_version/$<CONFIG>")
+  add_library(legacy_device_interface_test_addon SHARED
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/device_interface_version_tests/legacy_cuda_addon.cpp")
+  set_target_properties(legacy_device_interface_test_addon PROPERTIES
+    OUTPUT_NAME "onnxruntime-genai-cuda"
+    RUNTIME_OUTPUT_DIRECTORY "${device_interface_test_dir}"
+    LIBRARY_OUTPUT_DIRECTORY "${device_interface_test_dir}"
+    ARCHIVE_OUTPUT_DIRECTORY "${device_interface_test_dir}"
+    FOLDER "Tests"
+  )
+  add_executable(device_interface_version_tests
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp/device_interface_version_tests/device_interface_version_tests.cpp")
+  target_include_directories(device_interface_version_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp
+  )
+  target_link_libraries(device_interface_version_tests PRIVATE
+    onnxruntime-genai-obj
+    GTest::gtest
+    legacy_device_interface_test_addon
+  )
+  set_target_properties(device_interface_version_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${device_interface_test_dir}"
+    FOLDER "Tests"
+  )
+  if(NOT MSVC)
+    target_compile_options(legacy_device_interface_test_addon PRIVATE "-fvisibility=hidden")
+    target_compile_options(device_interface_version_tests PRIVATE "-fvisibility=hidden")
+  endif()
+  file(GLOB device_interface_test_ort_libraries
+    "${ORT_LIB_DIR}/*.dll" "${ORT_LIB_DIR}/*.so*" "${ORT_LIB_DIR}/*.dylib")
+  if(device_interface_test_ort_libraries)
+    add_custom_command(TARGET device_interface_version_tests POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${device_interface_test_ort_libraries} "$<TARGET_FILE_DIR:device_interface_version_tests>"
+      COMMAND_EXPAND_LISTS
+    )
+  endif()
+  add_test(NAME DeviceInterfaceVersionTests COMMAND device_interface_version_tests)
+  set_tests_properties(DeviceInterfaceVersionTests PROPERTIES LABELS "engine;unit")
+endif()

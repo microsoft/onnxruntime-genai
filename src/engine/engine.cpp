@@ -224,6 +224,15 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   if (!model_executor_) {
     throw std::runtime_error("Engine requires a non-null model executor.");
   }
+  ValidateRecomputePreemptionModel(*model_->config_);
+  if (model_->config_->engine.dynamic_batching &&
+      model_->config_->engine.dynamic_batching->enable_recompute_preemption &&
+      (!cache_manager_->SupportsDynamicBatching() ||
+       !cache_manager_->SupportsRecomputePreemption() ||
+       mtp_model_ || mtp_cache_manager_ || mtp_model_executor_ || dflash2_drafter_)) {
+    throw std::runtime_error(
+        "Recompute preemption requires a compatible dynamic paged cache without auxiliary state.");
+  }
   if (dflash2_prefix_checkpoints_enabled_ && (!dflash2_drafter_ || !snapshot_cache_)) {
     throw std::runtime_error("DFlash prefix snapshots require a drafter and an Engine snapshot cache.");
   }
@@ -1695,7 +1704,7 @@ uint64_t Engine::AdmitTurn(const std::shared_ptr<Request>& request, std::span<co
         request->IsRestartableCanceledTurn() &&
         !cache_manager_->IsResident(request);
     const bool replay_rewound_request =
-        request->NeedsReplayAfterRewind() &&
+        request->NeedsCacheReplay() &&
         !cache_manager_->IsResident(request);
     allow_nonresident =
         restartable_canceled_turn || replay_rewound_request;
@@ -1847,7 +1856,7 @@ void Engine::RewindRequestToStartOfTurn(
   }
   const bool resident = cache_manager_->IsResident(request);
   if (!resident && !request->IsRestartableCanceledTurn() &&
-      !request->NeedsReplayAfterRewind()) {
+      !request->NeedsCacheReplay()) {
     throw std::runtime_error(
         "Cannot rewind a request whose model state is no longer resident.");
   }
@@ -2219,16 +2228,16 @@ void Engine::RunStatic() {
 
 void Engine::RunDynamic() {
   if (scheduler_->HasPendingRequests()) {
-    // A dynamic step is a transaction with six phases:
-    // plan -> reserve state -> checkpoint request state -> execute -> stage sampled tokens -> commit.
-    // Nothing becomes externally visible until the final commit succeeds.
+    // Planning may publish validated KV suspensions as a separate committed boundary.
+    // The following model transaction is reserve -> checkpoint -> execute -> stage tokens -> commit.
+    // Generated-token progress becomes externally visible only after that final commit.
     step_plan_.transaction_id = next_transaction_id_++;
     StepPlanningResult planning_result;
     try {
       // Planning must report ordinary non-executable outcomes through its result. A composite
       // cache consistency failure proves that paged and fixed committed ownership disagree and is
-      // fatal. Incidental failures such as allocation errors have not mutated Engine state and may
-      // propagate without poisoning the Engine.
+      // fatal. Incidental preflight allocation failures publish no suspensions and need not poison
+      // the Engine. Successful planning may already have committed a suspension boundary.
       planning_result = scheduler_->PlanStep(step_plan_);
     } catch (const StepPlanningConsistencyError&) {
       MarkUnhealthyAndThrow(
@@ -2376,10 +2385,10 @@ void Engine::RunDynamic() {
     bool request_transaction_active = false;
     std::unique_ptr<MtpStep> mtp_step;
     const auto rollback_transaction = [&]() {
-      // Request/search state and composite cache state are checkpointed separately. Both must be
-      // restored so a retry observes exactly the state that existed before this Run() call. The
-      // reservation's Release() discards fixed provisional slots and staged banks as well as the
-      // reserved paged blocks.
+      // Request/search state and composite cache state are checkpointed separately. Restore the
+      // post-planning boundary, not the state before Run(): preempted victims remain valid, cold,
+      // and marked for replay. Release() discards the model transaction's fixed provisional slots,
+      // staged banks, and reserved paged blocks without undoing those committed suspensions.
       std::exception_ptr rollback_error;
       if (mtp_step) {
         try {
@@ -2667,6 +2676,7 @@ void Engine::RunDynamic() {
     pending_events_.swap(staged_events_);
     pending_event_index_ = 0;
     ++transaction_metrics_.committed_steps;
+    scheduler_->OnStepCommitted(step_plan_);
   }
 }
 

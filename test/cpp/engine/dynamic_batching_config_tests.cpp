@@ -145,6 +145,53 @@ TEST(DynamicBatchingConfigTest, RuntimeProfileCannotReplaceDeviceMemoryBudget) {
   EXPECT_EQ(config.engine.dynamic_batching->device_memory_budget_bytes, 25769803776ull);
 }
 
+TEST(DynamicBatchingConfigTest, RuntimeProfileCombinesHeadroomAndPreemptionOptOut) {
+  for (const auto bytes : {uint64_t{0}, uint64_t{4294967296}}) {
+    auto config = LoadDynamicConfig(R"({
+      "device_memory_budget_bytes":25769803776,"device_memory_headroom_bytes":2147483648,
+      "enable_recompute_preemption":true,"max_preemptions_per_step":2,
+      "min_decode_steps_before_preemption":3
+    })");
+    OverlayConfig(config, std::string{R"({"runtime_profiles":[{
+      "id":"wait-only-headroom","eligibility":{"minimum_total_device_memory_bytes":0},
+      "overlay":{"engine":{"dynamic_batching":{
+        "enable_recompute_preemption":false,"max_preemptions_per_step":4,
+        "min_decode_steps_before_preemption":5,"device_memory_headroom_bytes":)"} +
+                              std::to_string(bytes) + "}}}}]}");
+    ApplyRuntimeProfile(config, uint64_t{34359738368});
+    const auto& batching = *config.engine.dynamic_batching;
+    EXPECT_EQ(batching.device_memory_budget_bytes, 25769803776ull);
+    EXPECT_EQ(batching.device_memory_headroom_bytes, bytes);
+    EXPECT_FALSE(batching.enable_recompute_preemption);
+    EXPECT_EQ(batching.max_preemptions_per_step, 4u);
+    EXPECT_EQ(batching.min_decode_steps_before_preemption, 5u);
+  }
+}
+
+TEST(DynamicBatchingConfigTest, RuntimeProfileCombinesMediaBudgetsAndPreemptionOptOut) {
+  auto config = LoadDynamicConfig(R"({
+    "media_host_bytes":536870912,"media_device_bytes":134217728,
+    "enable_recompute_preemption":true,"max_preemptions_per_step":2,
+    "min_decode_steps_before_preemption":3
+  })");
+  OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"wait-only-media","eligibility":{"minimum_total_device_memory_bytes":0},
+    "overlay":{"engine":{"dynamic_batching":{
+      "media_host_bytes":4294967296,"media_device_bytes":2097152,
+      "enable_recompute_preemption":false,"max_preemptions_per_step":4,
+      "min_decode_steps_before_preemption":5
+    }}}
+  }]})");
+  ApplyRuntimeProfile(config, uint64_t{34359738368});
+
+  const auto& batching = *config.engine.dynamic_batching;
+  EXPECT_EQ(batching.media_host_bytes, 4294967296ull);
+  EXPECT_EQ(batching.media_device_bytes, 2097152u);
+  EXPECT_FALSE(batching.enable_recompute_preemption);
+  EXPECT_EQ(batching.max_preemptions_per_step, 4u);
+  EXPECT_EQ(batching.min_decode_steps_before_preemption, 5u);
+}
+
 TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {
   const auto config =
       LoadDynamicConfig(R"({ "max_scheduled_tokens": 321 })");
