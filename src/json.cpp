@@ -8,15 +8,16 @@
 namespace JSON {
 static constexpr const char* value_names[] = {"string", "number", "bool", "null"};
 static_assert(std::size(value_names) == std::variant_size_v<Value>);
+static constexpr size_t kMaxNestingDepth = 64;
 
 struct JSON {
   JSON(Element& element, std::string_view document);
 
  private:
   void Parse_Whitespace();
-  void Parse_Object(Element& element);
-  void Parse_Array(Element& element);
-  void Parse_Value(Element& element, std::string_view name);
+  void Parse_Object(Element& element, size_t depth);
+  void Parse_Array(Element& element, size_t depth);
+  void Parse_Value(Element& element, std::string_view name, size_t depth);
 
   double Parse_Number();
   std::string Parse_String();
@@ -51,7 +52,7 @@ void TranslateException(std::string_view name) {
 
 JSON::JSON(Element& element, std::string_view document) : begin_{document.data()}, end_{document.data() + document.size()} {
   try {
-    Parse_Value(element, {});
+    Parse_Value(element, {}, 0);
     element.OnComplete(false);
   } catch (const std::exception& message) {
     // Figure out line number of error by counting carriage returns seen from start to error location
@@ -108,7 +109,7 @@ void JSON::Parse_Whitespace() {
   }
 }
 
-void JSON::Parse_Object(Element& element) {
+void JSON::Parse_Object(Element& element, size_t depth) {
   Parse_Whitespace();
   if (Skip('}')) {
     element.OnComplete(true);
@@ -127,7 +128,7 @@ void JSON::Parse_Object(Element& element) {
       throw std::runtime_error("Expecting :");
     }
 
-    Parse_Value(element, name);
+    Parse_Value(element, name, depth);
 
     char const c = GetChar();
     if (c == ',') {
@@ -144,17 +145,21 @@ void JSON::Parse_Object(Element& element) {
   }
 }
 
-void JSON::Parse_Value(Element& element, std::string_view name) {
+void JSON::Parse_Value(Element& element, std::string_view name, size_t depth) {
   Parse_Whitespace();
   try {
     switch (char const c = GetChar()) {
       case '{': {
+        if (depth >= kMaxNestingDepth)
+          throw std::runtime_error("Maximum JSON nesting depth exceeded");
         auto& element_object = element.OnObject(name);
-        Parse_Object(element_object);
+        Parse_Object(element_object, depth + 1);
       } break;
       case '[': {
+        if (depth >= kMaxNestingDepth)
+          throw std::runtime_error("Maximum JSON nesting depth exceeded");
         auto& element_array = element.OnArray(name);
-        Parse_Array(element_array);
+        Parse_Array(element_array, depth + 1);
       } break;
       case '"': {
         element.OnValue(name, Parse_String());
@@ -193,7 +198,7 @@ void JSON::Parse_Value(Element& element, std::string_view name) {
   Parse_Whitespace();
 }
 
-void JSON::Parse_Array(Element& element) {
+void JSON::Parse_Array(Element& element, size_t depth) {
   Parse_Whitespace();
   if (Skip(']')) {
     element.OnComplete(true);
@@ -201,7 +206,7 @@ void JSON::Parse_Array(Element& element) {
   }
 
   while (true) {
-    Parse_Value(element, {});
+    Parse_Value(element, {}, depth);
     char const c = GetChar();
     if (c == ',') {
       continue;
