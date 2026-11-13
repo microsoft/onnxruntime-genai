@@ -7,6 +7,7 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <limits>
 
 #include "dflash2_drafter.h"
 #include "engine/engine.h"
@@ -73,6 +74,49 @@ TEST(NemotronBolt, RejectsInvalidVerificationGeometry) {
                std::runtime_error);
   EXPECT_THROW(NemotronBoltAcceptedPrefix(std::vector<int32_t>(7), std::vector<int64_t>(7)),
                std::runtime_error);
+}
+
+TEST(NemotronBolt, PrefillPlanningPreservesCheckpointAndAuxiliaryBoundariesAcrossTargetWidths) {
+  const NemotronBoltPrefillPlan plan{8207, 1025, true};
+  EXPECT_EQ(plan.checkpoint, 8200u);
+  EXPECT_EQ(plan.draft_start, 7176u);
+  EXPECT_EQ(plan.auxiliary_start, 7168u);
+  for (size_t rows : {size_t{8}, size_t{1024}, size_t{4095}, size_t{4096}}) {
+    for (size_t restored : {size_t{0}, size_t{4096}, size_t{8200}}) {
+      SCOPED_TRACE(::testing::Message() << "rows=" << rows << ", restored=" << restored);
+      size_t position = restored;
+      size_t captures = 0;
+      while (position < plan.token_count) {
+        const size_t count = plan.NextRows(position, rows);
+        EXPECT_GT(count, 0u);
+        EXPECT_LE(count, rows);
+        if (position < plan.checkpoint) EXPECT_LE(position + count, plan.checkpoint);
+        position += count;
+        if (position == plan.checkpoint) ++captures;
+      }
+      EXPECT_EQ(position, plan.token_count);
+      EXPECT_EQ(captures, restored == plan.checkpoint ? 0u : 1u);
+    }
+  }
+  EXPECT_EQ(plan.NextRows(8192, 4096), 8u);
+  EXPECT_EQ(plan.NextRows(8200, 4096), 7u);
+  const NemotronBoltPrefillPlan uncached{8207, 1025, false};
+  EXPECT_EQ(uncached.auxiliary_start, uncached.draft_start);
+  EXPECT_EQ(uncached.NextRows(8192, 4096), 15u);
+}
+
+TEST(NemotronBolt, PrefillPlanningHandlesShortPromptsAndRejectsNonprogressingChunks) {
+  for (size_t length : {size_t{1}, size_t{7}, size_t{8}, size_t{9}}) {
+    const NemotronBoltPrefillPlan plan{length, 1024, true};
+    EXPECT_EQ(plan.draft_start, 0u);
+    EXPECT_EQ(plan.auxiliary_start, 0u);
+    EXPECT_EQ(plan.NextRows(0, std::numeric_limits<size_t>::max()),
+              plan.checkpoint != 0 ? plan.checkpoint : length);
+    EXPECT_THROW(plan.NextRows(0, 0), std::runtime_error);
+    EXPECT_THROW(plan.NextRows(length, 8), std::runtime_error);
+    EXPECT_THROW(plan.NextRows(std::numeric_limits<size_t>::max(), 8), std::runtime_error);
+  }
+  EXPECT_THROW((NemotronBoltPrefillPlan{0, 1024, true}), std::runtime_error);
 }
 
 TEST(NemotronBolt, HonorsGreedyEquivalentSamplingOptions) {

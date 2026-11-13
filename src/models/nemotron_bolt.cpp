@@ -4,6 +4,7 @@
 #include "engine/request.h"
 #include "search.h"
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <limits>
@@ -68,6 +69,26 @@ struct BoltSearch : GreedySearch_Cpu {
 };
 
 }  // namespace
+
+NemotronBoltPrefillPlan::NemotronBoltPrefillPlan(
+    size_t token_count, size_t context_window, bool checkpointing)
+    : token_count{token_count},
+      checkpoint{checkpointing ? token_count / kBoltVerifyRows * kBoltVerifyRows : 0} {
+  Require(token_count != 0, "prefill requires at least one token");
+  const auto context_start = [context_window](size_t length) {
+    return context_window != 0 && length > context_window
+               ? (length - context_window) / kBoltVerifyRows * kBoltVerifyRows
+               : 0;
+  };
+  draft_start = context_start(token_count);
+  auxiliary_start = checkpoint != 0 ? context_start(checkpoint) : draft_start;
+}
+
+size_t NemotronBoltPrefillPlan::NextRows(size_t position, size_t max_rows) const {
+  Require(position < token_count && max_rows != 0, "invalid prefill chunk");
+  const size_t endpoint = position < checkpoint ? checkpoint : token_count;
+  return std::min(max_rows, endpoint - position);
+}
 
 void ValidateNemotronBoltSearch(const GeneratorParams& params) {
   const auto& s = params.search;
@@ -229,6 +250,10 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
 }
 
 std::unique_ptr<State> NemotronBoltModel::CreateState(DeviceSpan<int32_t>, const GeneratorParams& params) const {
+  return CreateNativeState(params);
+}
+
+std::unique_ptr<NemotronBoltState> NemotronBoltModel::CreateNativeState(const GeneratorParams& params) const {
   ValidateNemotronBoltSearch(params);
   return std::make_unique<NemotronBoltState>(*this, params);
 }
@@ -279,17 +304,6 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
     auto& tensor = AddTensor(name, true, device, info.GetInputDataType(name), info.GetInputShape(name));
     if (name.rfind("past_", 0) == 0) {
       caches_.push_back(&tensor);
-      const StateCheckpointLayout layout{
-          name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0
-              ? StateCheckpointLayout::Kind::Sequence
-              : StateCheckpointLayout::Kind::SelectedRow,
-          name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0 ? 2u : 0u};
-      if (bolt_.prefix_cache_)
-        state_description_.BindBuffer(name, [this, &tensor, layout] {
-          return StateCheckpointDescription::Buffer{
-              static_cast<uint8_t*>(tensor.GetMutableRawData()), tensor.GetByteSpan().size(),
-              tensor.GetShape(), tensor.GetType(), layout, 0, std::nullopt, static_cast<size_t>(state_row_)};
-        });
       output_storage_.push_back("present_" + name.substr(5));
       outputs_.push_back(tensor.GetOrtTensor());
     }
@@ -324,14 +338,7 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
                                              static_cast<int64_t>(model.aux_width_)};
   prefill_aux_ = std::make_unique<Tensor>(model.p_device_, aux.GetType());
   prefill_aux_->CreateTensor(prefill_shape, true);
-  if (bolt_.prefix_cache_) {
-    state_description_.BindBuffer("auxiliary_context", [this] {
-      return StateCheckpointDescription::Buffer{
-          static_cast<uint8_t*>(prefill_aux_->GetMutableRawData()), prefill_aux_->GetByteSpan().size(), prefill_aux_->GetShape(), prefill_aux_->GetType(), {StateCheckpointLayout::Kind::Sequence, 0}, aux_start_};
-    });
-    state_description_.BindValue(state_row_);
-    state_description_.BindValue(anchor_);
-  }
+  BindCheckpointState();
   Reset();
   std::vector<int32_t> dummy(kBoltVerifyRows, 1);
   // Initial graph-enabled executions are not trustworthy. Capture on dummy zero state and discard
@@ -344,6 +351,31 @@ NemotronBoltState::NemotronBoltState(const NemotronBoltModel& model, const Gener
   Reset();
   bolt_.memory_budget_.Refresh();
   unlock();
+}
+
+void NemotronBoltState::BindCheckpointState() {
+  if (!bolt_.prefix_cache_) return;
+  for (const auto& name : input_storage_) {
+    if (name.rfind("past_", 0) != 0) continue;
+    auto* tensor = tensors_.at(name).get();
+    const bool sequence = name.rfind("past_key.", 0) == 0 || name.rfind("past_value.", 0) == 0;
+    const StateCheckpointLayout layout{
+        sequence ? StateCheckpointLayout::Kind::Sequence : StateCheckpointLayout::Kind::SelectedRow,
+        sequence ? 2u : 0u};
+    state_description_.BindBuffer(name, [this, tensor, layout] {
+      return StateCheckpointDescription::Buffer{
+          static_cast<uint8_t*>(tensor->GetMutableRawData()), tensor->GetByteSpan().size(),
+          tensor->GetShape(), tensor->GetType(), layout, 0, std::nullopt, static_cast<size_t>(state_row_)};
+    });
+  }
+  if (prefill_aux_) {
+    state_description_.BindBuffer("auxiliary_context", [this] {
+      return StateCheckpointDescription::Buffer{
+          static_cast<uint8_t*>(prefill_aux_->GetMutableRawData()), prefill_aux_->GetByteSpan().size(), prefill_aux_->GetShape(), prefill_aux_->GetType(), {StateCheckpointLayout::Kind::Sequence, 0}, aux_start_};
+    });
+  }
+  state_description_.BindValue(state_row_);
+  state_description_.BindValue(anchor_);
 }
 
 NemotronBoltState::~NemotronBoltState() {
@@ -417,6 +449,33 @@ void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int3
   ++stats_.draft_forward_passes;
 }
 
+void NemotronBoltState::RestorePrefix(std::span<const int32_t> tokens) {
+  if (!bolt_.prefix_cache_) return;
+  if (auto saved = bolt_.prefix_cache_->Find(tokens)) {
+    bolt_.prefix_cache_->Restore(*saved, state_description_, model_.p_device_);
+    length_ = cached_prompt_tokens_ = saved->tokens.size();
+  }
+}
+
+NemotronBoltState::PrefillResult NemotronBoltState::RunPrefillTarget(
+    std::span<const int32_t> tokens, size_t auxiliary_start, bool want_prediction) {
+  Require(!tokens.empty() && tokens.size() <= kBoltVerifyRows, "prefill target requires one to eight rows");
+  std::vector<int32_t> block(kBoltVerifyRows, tokens.back());
+  std::copy(tokens.begin(), tokens.end(), block.begin());
+  const auto predictions = Verify(block, want_prediction);
+  const size_t end = length_ + tokens.size();
+  if (end > auxiliary_start) {
+    const size_t begin = std::max(length_, auxiliary_start);
+    const size_t row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
+    auto destination = prefill_aux_->GetByteSpan();
+    auto source = aux_view_->GetByteSpan();
+    destination.subspan((begin - auxiliary_start) * row_bytes, (end - begin) * row_bytes)
+        .CopyFrom(source.subspan((begin - length_) * row_bytes, (end - begin) * row_bytes));
+  }
+  return {static_cast<int32_t>(tokens.size() - 1),
+          want_prediction ? static_cast<int32_t>(predictions[tokens.size() - 1]) : 0};
+}
+
 void NemotronBoltState::Prefill(std::span<const int32_t> tokens, PrefixCacheMetrics* cache_events) {
   std::lock_guard lock{bolt_.execution_mutex_};
   Require(!prefilled_ && !tokens.empty(), "AppendTokens requires a fresh or reset generator");
@@ -438,50 +497,33 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens, PrefixCacheMetr
   // sequence (still empty) cannot rewind, so discard all partial state before propagating.
   try {
     bolt_.memory_budget_.Refresh();
-    const size_t window = drafter_->ContextWindow();
-    const auto context_start = [window](size_t length) {
-      return window != 0 && length > window ? ((length - window) / kBoltVerifyRows) * kBoltVerifyRows : 0;
-    };
-    const size_t draft_start = context_start(tokens.size());
-    const size_t checkpoint = bolt_.prefix_cache_ ? tokens.size() / kBoltVerifyRows * kBoltVerifyRows : 0;
-    const size_t aux_start = aux_start_ = checkpoint != 0 ? context_start(checkpoint) : draft_start;
-    const size_t draft_rows = tokens.size() - draft_start;
+    const NemotronBoltPrefillPlan plan{tokens.size(), drafter_->ContextWindow(), bolt_.prefix_cache_ != nullptr};
+    aux_start_ = plan.auxiliary_start;
+    const size_t draft_rows = tokens.size() - plan.draft_start;
     const size_t aux_row_bytes = bolt_.aux_width_ * sizeof(uint16_t);
-    auto aux_src = aux_view_->GetByteSpan();
     auto prefill_dst = prefill_aux_->GetByteSpan();
-    if (bolt_.prefix_cache_) {
-      if (auto saved = bolt_.prefix_cache_->Find(tokens)) {
-        bolt_.prefix_cache_->Restore(*saved, state_description_, model_.p_device_);
-        length_ = cached_prompt_tokens_ = saved->tokens.size();
-      }
-    }
-    for (size_t pos = length_; pos < tokens.size(); pos += kBoltVerifyRows) {
-      const size_t valid = std::min(kBoltVerifyRows, tokens.size() - pos);
-      const bool last_chunk = pos + kBoltVerifyRows >= tokens.size();
-      std::vector<int32_t> block(kBoltVerifyRows, tokens[pos + valid - 1]);
-      std::copy_n(tokens.begin() + pos, valid, block.begin());
-      const bool save = checkpoint != 0 && pos + valid == checkpoint;
-      const auto predictions = Verify(block, last_chunk || save);
-      if (pos >= aux_start) {
-        prefill_dst.subspan((pos - aux_start) * aux_row_bytes, valid * aux_row_bytes)
-            .CopyFrom(aux_src.subspan(0, valid * aux_row_bytes));
-      }
-      if (last_chunk || save) {
-        anchor_ = static_cast<int32_t>(predictions[valid - 1]);
-      }
+    RestorePrefix(tokens);
+    while (length_ < tokens.size()) {
+      const size_t valid = plan.NextRows(length_, kBoltVerifyRows);
+      const size_t end = length_ + valid;
+      const bool save = plan.checkpoint != 0 && end == plan.checkpoint;
+      const bool want_prediction = end == tokens.size() || save;
+      const auto result = RunPrefillTarget(tokens.subspan(length_, valid), plan.auxiliary_start, want_prediction);
+      if (want_prediction) anchor_ = result.prediction;
       length_ += valid;
-      state_row_ = static_cast<int32_t>(valid - 1);
+      state_row_ = result.state_row;
       if (save) {
         bolt_.memory_budget_.Refresh();
-        bolt_.prefix_cache_->Capture(tokens.first(checkpoint), state_description_, model_.p_device_);
+        bolt_.prefix_cache_->Capture(tokens.first(plan.checkpoint), state_description_, model_.p_device_);
       }
     }
     const std::array<int64_t, 2> shape{static_cast<int64_t>(draft_rows), static_cast<int64_t>(bolt_.aux_width_)};
     Tensor features{OrtValue::CreateTensor(*model_.p_device_->GetMemoryInfo(),
-                                           prefill_dst.Span().data() + (draft_start - aux_start) * aux_row_bytes,
+                                           prefill_dst.Span().data() +
+                                               (plan.draft_start - plan.auxiliary_start) * aux_row_bytes,
                                            draft_rows * aux_row_bytes, shape, prefill_aux_->GetType())};
     features.p_device_ = model_.p_device_;
-    Propose(draft_rows, draft_start, anchor_, &features);
+    Propose(draft_rows, plan.draft_start, anchor_, &features);
     model_.p_device_->Synchronize();
     if (tokens.size() < static_cast<size_t>(params_->search.max_length)) {
       pending_.push_back(anchor_);

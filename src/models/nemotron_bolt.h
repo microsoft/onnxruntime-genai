@@ -13,6 +13,16 @@ namespace Generators {
 
 inline constexpr size_t kBoltVerifyRows = 8;
 
+struct NemotronBoltPrefillPlan {
+  NemotronBoltPrefillPlan(size_t token_count, size_t context_window, bool checkpointing);
+  size_t NextRows(size_t position, size_t max_rows) const;
+
+  size_t token_count;
+  size_t checkpoint;
+  size_t draft_start;
+  size_t auxiliary_start;
+};
+
 void ValidateNemotronBoltSearch(const GeneratorParams& params);
 size_t NemotronBoltAcceptedPrefix(std::span<const int32_t> drafts,
                                   std::span<const int64_t> predictions);
@@ -21,9 +31,12 @@ std::vector<int32_t> NemotronBoltRoundTokens(std::span<const int32_t> drafts,
                                              size_t remaining,
                                              std::span<const int> eos);
 
+struct NemotronBoltState;
+
 struct NemotronBoltModel : Model {
   NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env);
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t>, const GeneratorParams& params) const override;
+  std::unique_ptr<NemotronBoltState> CreateNativeState(const GeneratorParams& params) const;
 
   std::unique_ptr<OrtSession> session_;
   std::shared_ptr<Dflash2Model> drafter_model_;
@@ -50,8 +63,17 @@ struct NemotronBoltState : private std::unique_lock<std::mutex>, State {
   size_t CachedPromptTokens() const { return cached_prompt_tokens_; }
 
  private:
+  struct PrefillResult {
+    int32_t state_row;
+    int32_t prediction;
+  };
+
   Tensor& AddTensor(const std::string& name, bool input, DeviceInterface* device,
                     ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
+  void BindCheckpointState();
+  void RestorePrefix(std::span<const int32_t> tokens);
+  PrefillResult RunPrefillTarget(std::span<const int32_t> tokens, size_t auxiliary_start,
+                                 bool want_prediction);
   std::vector<int64_t> Verify(std::span<const int32_t> tokens, bool want_predictions = true);
   void Propose(size_t context_rows, size_t first_position, int32_t anchor, Tensor* aux_override = nullptr);
   void Reset();
