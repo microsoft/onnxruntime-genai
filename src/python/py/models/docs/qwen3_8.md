@@ -52,8 +52,9 @@ token. The device holds `model.qwen38_graph.max_batch_size` slots (default 1), o
 `CreateEngineBackend` (`src/engine/backend_factory.h`) and `CreateQwen38GraphDependencies`
 (`src/engine/qwen38_graph_executor.h`) assemble it:
 
-- Single-slot native prefix reuse is opt-in: set `engine.dynamic_batching.prefix_caching` to `true` and
-  `engine.dynamic_batching.max_batch_size` to `1` (the dynamic-batching default is 16).
+- Single-slot native prefix reuse defaults on when `engine.dynamic_batching.max_batch_size` is `1`
+  (the dynamic-batching default is 16). Set `engine.dynamic_batching.prefix_caching` to `false` to disable it.
+  Target sliding-window metadata requires explicit `true`; a windowed drafter alone does not disable reuse.
   Set `model.qwen38_graph.prefill.chunk` (or `engine.dynamic_batching.max_scheduled_tokens`) explicitly:
   if both `prefill.chunk` and `search.chunk_size` are unset, creating this section supplies its default
   2,048-token scheduling budget as the prefill chunk, replacing the separate dense-prefill default of 8,192.

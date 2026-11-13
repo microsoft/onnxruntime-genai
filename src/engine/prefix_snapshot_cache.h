@@ -107,6 +107,7 @@ class PrefixSnapshotCache {
   uint64_t clock_{};
 };
 
-std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config::Engine::DynamicBatching& config);
+bool IsPrefixCachingRequested(const Config& config);
+std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config& config);
 
 }  // namespace Generators

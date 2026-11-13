@@ -1179,20 +1179,33 @@ TEST(PagedKeyValueCacheManifestTest, PrefixCachingSharesSlidingKVBeyondRingWrap)
   }
 }
 
-TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesSlidingWindowCompatibility) {
+TEST(PagedKeyValueCacheManifestTest, TargetSlidingWindowRequiresOptInRegardlessOfPhysicalStorage) {
+  for (bool window_table : {false, true}) {
+    for (const auto enabled : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+      SCOPED_TRACE(window_table);
+      SCOPED_TRACE(enabled.value_or(false));
+      auto model = LoadSyntheticPagedModel();
+      auto& decoder = model->config_->model.decoder;
+      decoder.sliding_window.emplace();
+      decoder.sliding_window->window_size = 4;
+      decoder.sliding_window->layers = {1};
+      decoder.inputs.block_table_windowed = window_table ? decoder.inputs.block_table : "";
+      model->config_->search.chunk_size = 4;
+      model->config_->engine.dynamic_batching->prefix_caching = enabled;
+      auto cache = MakePagedCache(model);
+      EXPECT_EQ(cache->PrefixCachingEnabled(), enabled.value_or(false));
+      EXPECT_EQ(cache->Snapshot().window_blocks.total_blocks != 0,
+                window_table && !enabled.value_or(false));
+    }
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, WindowedDrafterDoesNotOptOutTheTargetPrefixCache) {
   auto model = LoadSyntheticPagedModel();
-  auto& decoder = model->config_->model.decoder;
-  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
-  decoder.sliding_window->window_size = 4;
-  decoder.sliding_window->layers = {1};
-  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
-  model->config_->search.chunk_size = 4;
-
+  model->config_->model.dflash2.filename = "drafter.onnx";
+  model->config_->model.dflash2.sliding_window = 8;
   EXPECT_FALSE(model->config_->engine.dynamic_batching->prefix_caching.has_value());
-  EXPECT_FALSE(ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0));
-  auto cache = MakePagedCache(model);
-
-  EXPECT_FALSE(cache->PrefixCachingEnabled());
+  EXPECT_TRUE(MakePagedCache(model)->PrefixCachingEnabled());
 }
 
 TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesAuxiliaryCacheCompatibility) {

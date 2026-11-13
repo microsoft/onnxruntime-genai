@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "../models/model_state_manifest.h"
+#include "prefix_snapshot_cache.h"
 #include "sequence_positions.h"
 #include "window_ring.h"
 
@@ -493,7 +494,7 @@ size_t PagedCacheCaptureBlockTableBytes(const std::shared_ptr<Model>& model) {
 bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
                                  size_t auxiliary_bytes_per_block) {
   const auto& batching = *model->config_->engine.dynamic_batching;
-  if (!batching.prefix_caching.value_or(true)) {
+  if (!IsPrefixCachingRequested(*model->config_)) {
     return false;
   }
 

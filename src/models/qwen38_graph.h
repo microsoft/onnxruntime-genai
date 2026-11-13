@@ -26,6 +26,7 @@
 
 #include "engine/backend_capabilities.h"
 #include "engine/prefix_snapshot_cache.h"
+#include "state-checkpoint.h"
 #include "model.h"
 #include "../dflash2_drafter.h"
 #include "qwen38_decode_device.h"
@@ -45,16 +46,12 @@ bool Qwen38PrefixCheckpointEligible(bool dflash, const std::optional<Qwen38Dflas
 bool ShouldCaptureQwen38Prefix(size_t remaining, size_t chunk_tokens, bool dflash,
                                const std::optional<Qwen38DflashPromptFeatures::Chunk>& saved, size_t context_window);
 
-// Packed ranges for fixed-capacity KV/index rows, positions, hidden features, or a full recurrent/dense tensor.
-std::vector<PrefixSnapshotCache::Entry::Range> PlanQwen38PrefixRanges(
-    const std::string& name, const std::vector<int64_t>& shape, size_t element_bytes,
-    size_t tensor_bytes, size_t length, bool index = false);
-
 // A fixed-address device tensor plus the OrtValue that names it in IO bindings.
 struct DevTensor {
   uint8_t* ptr{};
   std::vector<int64_t> shape;
   ONNXTensorElementDataType type{ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED};
+  StateCheckpointLayout checkpoint_layout;
   std::unique_ptr<OrtValue> value;
   size_t Bytes() const;
 };
@@ -821,6 +818,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 
+  std::unique_ptr<StateCheckpointDescription> state_description_;
+  void DescribeState();
   // target state
   std::map<std::string, std::unique_ptr<DevTensor>> store_;                 // in-place KV / positions
   std::map<std::string, std::unique_ptr<DevTensor>> shared_;                // index_key buffers

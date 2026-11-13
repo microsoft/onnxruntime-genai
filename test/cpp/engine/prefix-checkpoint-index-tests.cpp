@@ -111,20 +111,66 @@ TEST(PrefixCheckpointIndexTest, OptionalPublicationFailuresPruneButTransferError
   }
 }
 
-TEST(NativePrefixSnapshotPolicyTest, RequiresOptInAndHonorsExplicitDisables) {
-  Config::Engine::DynamicBatching config;
+TEST(PrefixCheckpointIndexTest, PublicationGrowsGeometricallyBeforeCapture) {
+  struct MovingCheckpoint {
+    MovingCheckpoint(int32_t token, size_t& moves) : tokens{token}, moves{&moves} {}
+    MovingCheckpoint(MovingCheckpoint&& other) noexcept : tokens{std::move(other.tokens)}, moves{other.moves} {
+      ++*moves;
+    }
+    MovingCheckpoint& operator=(MovingCheckpoint&&) noexcept = default;
+    std::span<const int32_t> Tokens() const { return tokens; }
+    bool IsResident() const { return true; }
+    std::vector<int32_t> tokens;
+    size_t* moves;
+  };
+  PrefixCheckpointIndex<MovingCheckpoint> index;
+  PrefixCacheMetrics metrics;
+  size_t moves = 0;
+  for (int32_t token = 1; token <= 128; ++token) {
+    index.TryPublish(metrics, [&]() -> std::optional<MovingCheckpoint> {
+      return MovingCheckpoint{token, moves};
+    });
+    ASSERT_NE(index.Find(std::vector<int32_t>{token}), nullptr);
+  }
+  EXPECT_LT(moves, 128u * 8);
+  EXPECT_EQ(metrics.publication_refusals, 0u);
+}
+
+TEST(NativePrefixSnapshotPolicyTest, DefaultsDependOnTheTargetNotTheDrafterAndRespectExplicitPolicy) {
+  Config config;
   EXPECT_EQ(CreateNativePrefixSnapshotCache(config), nullptr);
-  config.prefix_caching = false;
-  EXPECT_EQ(CreateNativePrefixSnapshotCache(config), nullptr);
-  config.prefix_caching = true;
-  config.max_snapshots = 0;
-  EXPECT_EQ(CreateNativePrefixSnapshotCache(config), nullptr);
-  config.max_snapshots.reset();
-  config.snapshot_cache.explicitly_set = true;
-  EXPECT_EQ(CreateNativePrefixSnapshotCache(config), nullptr);
-  config.snapshot_cache.explicitly_set = false;
-  config.snapshot_cache.directory = "unused-snapshot-directory";
-  EXPECT_EQ(CreateNativePrefixSnapshotCache(config), nullptr);
+  config.engine.dynamic_batching.emplace();
+  for (bool target_windowed : {false, true}) {
+    for (bool drafter_windowed : {false, true}) {
+      for (const auto enabled : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+        SCOPED_TRACE(target_windowed);
+        SCOPED_TRACE(drafter_windowed);
+        SCOPED_TRACE(enabled.value_or(!target_windowed));
+        config.model.decoder.sliding_window.reset();
+        if (target_windowed) {
+          config.model.decoder.sliding_window.emplace();
+          config.model.decoder.sliding_window->window_size = 8;
+          config.model.decoder.sliding_window->layers = {0};
+        }
+        config.model.dflash2.sliding_window = drafter_windowed ? 8 : -1;
+        config.engine.dynamic_batching->prefix_caching = enabled;
+        EXPECT_EQ(CreateNativePrefixSnapshotCache(config) != nullptr, enabled.value_or(!target_windowed));
+      }
+    }
+  }
+}
+
+TEST(NativePrefixSnapshotPolicyTest, ExplicitDisablesOverrideTheDefaultAndTierBudgets) {
+  for (const auto* settings : {
+           R"({"prefix_caching":false,"snapshot_cache":{"ram_bytes":64}})",
+           R"({"max_snapshots":0,"snapshot_cache":{"ram_bytes":64}})",
+           R"({"snapshot_cache":{}})",
+           R"({"snapshot_cache":{"directory":"unused-snapshot-directory"}})"}) {
+    SCOPED_TRACE(settings);
+    Config config;
+    OverlayConfig(config, std::string{R"({"engine":{"dynamic_batching":)"} + settings + "}}");
+    EXPECT_EQ(CreateNativePrefixSnapshotCache(config), nullptr);
+  }
 }
 
 TEST(NativePrefixSnapshotPolicyTest, HonorsConfiguredCountsAndTierBudgets) {
@@ -135,19 +181,19 @@ TEST(NativePrefixSnapshotPolicyTest, HonorsConfiguredCountsAndTierBudgets) {
     size_t retained;
   };
   const Case cases[] = {
-      {R"({"prefix_caching":true,"max_batch_size":1})", Tier::Vram, 1},
-      {R"({"prefix_caching":true,"max_snapshots":2,"snapshot_cache":{"ram_bytes":64}})", Tier::Ram, 2},
-      {R"({"prefix_caching":true,"snapshot_cache":{"vram_bytes":32}})", Tier::Vram, 2},
-      {R"({"prefix_caching":true,"snapshot_cache":{"ram_bytes":32}})", Tier::Ram, 2},
-      {R"({"prefix_caching":true,"snapshot_cache":{"disk_bytes":32}})", Tier::Disk, 2},
-      {R"({"prefix_caching":true,"max_snapshots":3,"snapshot_cache":{"ram_bytes":16}})", Tier::Ram, 1},
-      {R"({"prefix_caching":true,"snapshot_cache":{"ram_bytes":15,"disk_bytes":15}})", Tier::Ram, 0},
+      {R"({"max_batch_size":1})", Tier::Vram, 1},
+      {R"({"max_snapshots":2,"snapshot_cache":{"ram_bytes":64}})", Tier::Ram, 2},
+      {R"({"snapshot_cache":{"vram_bytes":32}})", Tier::Vram, 2},
+      {R"({"snapshot_cache":{"ram_bytes":32}})", Tier::Ram, 2},
+      {R"({"snapshot_cache":{"disk_bytes":32}})", Tier::Disk, 2},
+      {R"({"max_snapshots":3,"snapshot_cache":{"ram_bytes":16}})", Tier::Ram, 1},
+      {R"({"snapshot_cache":{"ram_bytes":15,"disk_bytes":15}})", Tier::Ram, 0},
   };
   for (const auto& [settings, tier, retained] : cases) {
     SCOPED_TRACE(settings);
     Config config;
     OverlayConfig(config, std::string{R"({"engine":{"dynamic_batching":)"} + settings + "}}");
-    auto storage = CreateNativePrefixSnapshotCache(*config.engine.dynamic_batching);
+    auto storage = CreateNativePrefixSnapshotCache(config);
     ASSERT_NE(storage, nullptr);
     CountingCudaDevice cuda;
     auto* device = tier == Tier::Vram ? static_cast<DeviceInterface*>(&cuda) : GetDeviceInterface(DeviceType::CPU);

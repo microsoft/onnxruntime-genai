@@ -258,7 +258,9 @@ reclamation are outside this initial scope.
 
 ### Prefix caching
 
-Dynamic batching caches prefixes by default for supported layouts.
+Dynamic batching caches prefixes by default for supported non-sliding target layouts.
+Target sliding-window models require explicit `prefix_caching: true`; a sliding-window
+drafter alone does not change the target's default.
 Set `engine.dynamic_batching.prefix_caching` to `false` to disable it. A lookup
 compares both the token contents and the complete parent-block identity; hash
 equality alone is never accepted as a match. The final prompt token always runs
@@ -2423,37 +2425,42 @@ Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`,
 
 ### Enabling prefix caching for another native backend
 
-Native backends share snapshot storage and checkpoint publication, not an execution layout.
+Native backends share state-description-driven capture/restore, snapshot storage, and
+checkpoint publication, not an execution layout.
 Qwen and Bolt use the following internal integration contract:
 
 1. Configure snapshot storage and memory limits before clearing or normalizing the public
    `engine.dynamic_batching` section. Keep model-specific capacity and chunk mapping separate.
-   Pass the configured settings to `CreateNativePrefixSnapshotCache` and
+   Pass the full model configuration to `CreateNativePrefixSnapshotCache` and the batching settings to
    `NativeDeviceMemoryBudget::Configure`. Configure the budget before loading weights/sessions;
    the base Model captures its before-load free-memory baseline. Refresh after native warmup and
    before checkpoint admission, including when prefix caching is disabled.
 2. Define safe capture boundaries and the complete resumable state. Include token identity,
    pending predictions, positions, recurrent state, and any speculative-context features, not
-   just KV tensors. The backend declares its packed ranges; `Entry::AddPackedBuffer` checks sizes
-   and accounts for them, and shared `Entry::Write`/`Read` perform tier-independent transfers.
+   just KV tensors. Register `StateCheckpointDescription` bindings alongside the existing state
+   allocations: whole buffers, sequence prefixes (including compressed rows), selected committed
+   rows, owned tensor maps, and typed host values. Bind live address/extent getters so restoration
+   does not depend on the source allocation surviving. The shared implementation plans packed
+   ranges, validates destination compatibility before copying, and performs tier-independent transfers.
 3. Use `PrefixCheckpointIndex<Entry>` with entries exposing `Tokens()` and `IsResident()`.
    `Find` returns a borrowed match without creating a lease or refreshing recency. Acquire a
    strong checkpoint reference before restoring; touch storage only after successful adoption.
    Keep identity model-local and preserve the backend's owner scope: Qwen indexes belong to an
-   Engine session, while Bolt's index belongs to the Model and is shared with Generators.
+   Engine session, while Bolt uses `StateCheckpointCache` at Model scope, shared with Generators.
 4. Publish through `TryPublish`: prepare token identity before capture, return an optional entry,
    and use a non-throwing move for final publication. The shared helper reserves index capacity,
    handles optional allocation/spill failures, and prunes/counts stale entries even after refusal.
-   The backend records the refusal reason and remains responsible for stream synchronization and
-   discarding partially written storage before a transfer exception escapes. Device/restore
+   `StateCheckpointDescription` discards partially written storage before a transfer exception
+   escapes; the caller preserves the backend's synchronization and handoff requirements. Device/restore
    failures must still fail execution; optional caching must not corrupt live state.
 5. Restore the backend's full state and perform its required handoff. Separate dense prefill
    restores dynamically sized dense tensors before rebuilding packed decode storage; unified
    prefill restores its already-active packed buffers. Do not retain idle packed buffers as a
    substitute for dense state, and do not infer a new model's layout from tensor names alone.
 
-The shared index/policy tests cover identity, lease/recency behavior, tier/count settings and
-publication failure cleanup once. A new backend should add focused tests for its boundary rules,
+The shared index/policy and `state-checkpoint-tests.cpp` suites cover identity, lease/recency,
+tier/count settings, layouts, typed host state, owned-map recreation, and publication failure cleanup.
+A new backend should add focused tests for its boundary rules,
 state geometry and restore/handoff, plus native inference parity and cached-token accounting.
 The tiny Qwen CUDA fixture exercises real dense ONNX prefill, RAM/disk checkpoint restoration,
 compression-boundary handoff and resumed decode through the public native device interface of a
@@ -2472,14 +2479,14 @@ and per-turn token limits. A new turn replays the Request's authoritative histor
 speculative tokens from the previous turn. As with other fixed-slot backends, displaced Requests
 cannot continue until their history is explicitly replayed in a new Request.
 
-Prefix reuse is opt-in and shared by Generators and Engines using the same Model:
+Prefix reuse defaults on when single-slot native memory/snapshot policy is configured, and is
+shared by Generators and Engines using the same Model:
 
 ```json
 {
   "engine": {
     "dynamic_batching": {
       "max_batch_size": 1,
-      "prefix_caching": true,
       "max_snapshots": 2,
       "snapshot_cache": {
         "ram_bytes": 2147483648
@@ -2525,6 +2532,8 @@ original block boundaries. The longest exact token-prefix match is used; diverge
 prefilled normally. Snapshots survive Request close and Generator reset/destruction, but not Model
 destruction. Snapshot allocation or spill-publication failures refuse caching without failing
 generation; restoration and device errors still fail the operation.
+The eight-token alignment is an execution boundary, not a capture frequency: at most one checkpoint
+is captured per prefill, and an already-resident exact checkpoint is not republished.
 
 Engine turn usage reports only cached tokens belonging to the current input, not replayed history
 from earlier turns. `prefix_cache_stats` reports successful Engine adoptions. The classic Generator

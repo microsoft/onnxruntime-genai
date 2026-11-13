@@ -268,15 +268,22 @@ void PrefixSnapshotCache::Entry::AddPackedBuffer(std::span<const Range> ranges) 
   bytes += packed;
 }
 
-std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config::Engine::DynamicBatching& config) {
-  const auto& limits = config.snapshot_cache;
-  if (!config.prefix_caching.value_or(false) || config.max_snapshots.value_or(1) == 0 ||
+bool IsPrefixCachingRequested(const Config& config) {
+  return config.engine.dynamic_batching &&
+         config.engine.dynamic_batching->prefix_caching.value_or(!config.model.decoder.sliding_window.has_value());
+}
+
+std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config& config) {
+  if (!IsPrefixCachingRequested(config)) return nullptr;
+  const auto& batching = *config.engine.dynamic_batching;
+  const auto& limits = batching.snapshot_cache;
+  if (batching.max_snapshots.value_or(1) == 0 ||
       (limits.Configured() && !limits.Enabled()))
     return nullptr;
   const bool resident = !limits.Configured();
   return std::make_shared<PrefixSnapshotCache>(
       std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
-      config.max_snapshots.value_or(resident ? 1 : std::numeric_limits<size_t>::max()),
+      batching.max_snapshots.value_or(resident ? 1 : std::numeric_limits<size_t>::max()),
       std::filesystem::path{fs::path{limits.directory}.c_str()}, resident);
 }
 
@@ -507,13 +514,23 @@ void PrefixSnapshotCache::AllocateStorage(Entry& entry, Tier tier, DeviceInterfa
     auto* storage_device = tier == Tier::Vram ? device : GetDeviceInterface(DeviceType::CPU);
     for (const auto& shape : entry.shapes) {
       auto tensor = std::make_unique<Tensor>(storage_device, entry.type);
-      if (tier == Tier::Ram && device->GetType() == DeviceType::CUDA) {
+      if ((tier == Tier::Ram || tier == Tier::Vram) && device->GetType() == DeviceType::CUDA) {
         const size_t bytes = TensorBytes(shape, entry.type);
-        auto buffer = device->AllocatePinnedHost(bytes);
-        auto value = OrtValue::CreateTensor(storage_device->GetAllocator().GetInfo(), buffer.get(),
-                                            bytes, shape, entry.type);
+        auto& allocator = storage_device->GetAllocator();
+        std::shared_ptr<void> buffer;
+        if (tier == Tier::Vram) {
+          // Arena Alloc retains backing after demotion. Reserve bypasses that pool and Free
+          // releases the allocation, so logical snapshot reclamation also reclaims device memory.
+          if (!allocator.Reserve) throw std::bad_alloc{};
+          auto* memory = allocator.Reserve(&allocator, bytes);
+          if (!memory) throw std::bad_alloc{};
+          buffer = std::shared_ptr<void>(memory, [&allocator](void* pointer) { allocator.Free(pointer); });
+        } else {
+          buffer = device->AllocatePinnedHost(bytes);
+        }
+        tensor->ort_tensor_ = OrtValue::CreateTensor(storage_device->GetAllocator().GetInfo(), buffer.get(),
+                                                     bytes, shape, entry.type);
         entry.host_buffers.push_back(std::move(buffer));
-        tensor = std::make_unique<Tensor>(std::move(value));
       } else {
         try {
           tensor->CreateTensor(shape);

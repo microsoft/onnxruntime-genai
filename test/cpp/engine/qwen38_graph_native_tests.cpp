@@ -106,14 +106,14 @@ TEST_F(Qwen38GraphNativeTest, DeviceMemoryBudgetValidatesFixedStateWithOrWithout
   }
 }
 
-TEST_F(Qwen38GraphNativeTest, UtilizationLimitControlsActualSnapshotReuseAfterNormalization) {
+TEST_F(Qwen38GraphNativeTest, UtilizationLimitControlsDefaultOnSnapshotReuseAfterNormalization) {
   for (bool retain_snapshots : {false, true}) {
     SCOPED_TRACE(retain_snapshots);
     auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-qwen38");
     config->engine.dynamic_batching.emplace();
     auto& batching = *config->engine.dynamic_batching;
     batching.max_batch_size = 1;
-    batching.prefix_caching = true;
+    ASSERT_FALSE(batching.prefix_caching.has_value());
     batching.gpu_utilization_factor = retain_snapshots ? 1.0f : std::numeric_limits<float>::min();
     auto model = CreateModel(GetOrtEnv(), std::move(config));
     ASSERT_FALSE(model->config_->engine.dynamic_batching);
