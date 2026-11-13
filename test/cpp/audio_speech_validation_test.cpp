@@ -69,6 +69,20 @@ TEST(AudioSpeechValidationTests, NemotronEncoderOutputRankValidation) {
   EXPECT_NE(rank_error.find("rank 3"), std::string::npos);
 }
 
+TEST(AudioSpeechValidationTests, NemotronInt64ControlInputValidation) {
+  for (const char* name : {
+           "Encoder cache_last_channel_len",
+           "Encoder input_lengths",
+           "Decoder targets",
+       }) {
+    EXPECT_NO_THROW(Generators::ValidateNemotronInt64Type(
+        name, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64));
+    EXPECT_THROW(Generators::ValidateNemotronInt64Type(
+                     name, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32),
+                 std::runtime_error);
+  }
+}
+
 TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
   Generators::Config config;
   config.model.type = "nemotron_speech";

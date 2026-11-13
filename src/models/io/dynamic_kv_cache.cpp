@@ -66,8 +66,12 @@ void DynamicKeyValueCache::RewindTo(size_t index) {
     RewindPastTensorsTo<int8_t>(index);
   } else if (type_ == Ort::TypeToTensorType<uint8_t> || type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN) {
     RewindPastTensorsTo<uint8_t>(index);
-  } else {
+  } else if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
     RewindPastTensorsTo<Ort::Float16_t>(index);
+  } else if (type_ == Ort::TypeToTensorType<Ort::BFloat16_t>) {
+    RewindPastTensorsTo<Ort::BFloat16_t>(index);
+  } else {
+    throw std::runtime_error("Unsupported KV cache tensor type during rewind");
   }
 }
 
@@ -100,11 +104,10 @@ void DefaultKeyValueCacheBase::RewindPastTensorsTo(size_t index) {
       auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), *past, type_);
       auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), present, type_);
 
-      for (int j = 0; j < batch_x_num_heads; j++) {
-        auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
-        auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
-        past_data.CopyFrom(present_data);
-      }
+      KeyValueCacheDetail::CopyRows(past_span, present_span,
+                                    static_cast<size_t>(batch_x_num_heads),
+                                    static_cast<size_t>(old_length_x_head_size),
+                                    static_cast<size_t>(new_length_x_head_size));
       pasts_[i] = std::move(past);
       state_.inputs_[input_index_ + i] = pasts_[i].get();
     }
@@ -124,11 +127,10 @@ void DefaultKeyValueCacheBase::RewindPastTensorsTo(size_t index) {
       auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), *past, type_);
       auto present_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), present, type_);
 
-      for (int j = 0; j < batch_x_num_heads; j++) {
-        auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
-        auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
-        past_data.CopyFrom(present_data);
-      }
+      KeyValueCacheDetail::CopyRows(past_span, present_span,
+                                    static_cast<size_t>(batch_x_num_heads),
+                                    static_cast<size_t>(old_length_x_head_size),
+                                    static_cast<size_t>(new_length_x_head_size));
       pasts_[i] = std::move(past);
       state_.inputs_[input_index_ + i] = pasts_[i].get();
     }
