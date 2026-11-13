@@ -1206,13 +1206,26 @@ def test_dynamic_grouped_conv_preserves_offsets_masks_and_initial_state(tmp_path
         expected_weight = kernels[side].reshape(2, builder.hidden_size).flip(0).T.unsqueeze(1).to(torch_dtype)
         np.testing.assert_array_equal(weight, expected_weight.float().numpy())
     ranges = {node.name: node for node in builder.graph if node.op_type == "Range"}
-    assert set(ranges) == {"/dflash2/conv_mask/Range", "/dflash2/conv_offsets/Range"}
+    assert set(ranges) == {
+        "/dflash2/conv_mask/Range",
+        "/dflash2/conv_offsets/Range",
+        "/dflash2/conv_offsets/BoundaryRange",
+    }
     step = ranges["/dflash2/conv_offsets/Range"].inputs[2].producer().attributes["value"].as_tensor().numpy()
     assert step == builder.block_size
     offsets = convs[0].inputs[2].producer().inputs[0].producer()
     assert offsets.op_type == "Concat"
     assert offsets.inputs[0] is ranges["/dflash2/conv_offsets/Range"].outputs[0]
-    assert offsets.inputs[1].producer().op_type == "Reshape"
+    last = offsets.inputs[1].producer()
+    assert last.op_type == "Slice"
+    boundary_range = ranges["/dflash2/conv_offsets/BoundaryRange"]
+    assert last.inputs[0] is boundary_range.outputs[0]
+    end = boundary_range.inputs[1].producer()
+    assert end.op_type == "Add"
+    assert end.inputs[0] is ranges["/dflash2/conv_offsets/Range"].inputs[1]
+    assert end.inputs[1].producer().attributes["value"].as_tensor().numpy() == 1
+    for value, expected in zip(last.inputs[1:], ([-1], [np.iinfo(np.int64).max], [0]), strict=True):
+        np.testing.assert_array_equal(value.producer().attributes["value"].as_tensor().numpy(), expected)
     mask = convs[0].inputs[7].producer().inputs[0].producer().inputs[0].producer()
     assert mask.op_type == "Greater"
     assert mask.inputs[0].producer().op_type == "Mod"
