@@ -79,7 +79,9 @@ struct NemotronBoltState : State {
   void Reset();
 
   const NemotronBoltModel& bolt_;
+  // Primary graph bindings (persistent caches, scalars, and R=target_rows_ I/O buffers).
   std::map<std::string, std::unique_ptr<Tensor>> tensors_;
+  // Zero-copy 1-row OrtValue views into `tensors_` for opt-in `single_token_decode_` R=1 replay.
   std::map<std::string, std::unique_ptr<Tensor>> single_token_tensors_;
   std::vector<size_t> single_token_input_indices_, single_token_output_indices_;
   std::vector<std::string> input_storage_, output_storage_;

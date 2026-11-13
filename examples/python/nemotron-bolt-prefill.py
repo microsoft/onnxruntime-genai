@@ -2,7 +2,8 @@
 
 Preserves all weight payloads via hardlinks (zero weight repacking) and keeps R=8 CUDA-graph
 speculative verification intact while enabling large-chunk prefill with selective logit_rows
-and aux_rows gathering.
+and aux_rows gathering. Temporary conversion helper until the Olive recipe emits dynamic-prefill
+packages directly (remove before merging into main).
 """
 
 from __future__ import annotations
