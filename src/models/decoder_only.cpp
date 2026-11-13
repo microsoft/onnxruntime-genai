@@ -147,7 +147,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
       ple_state_(CreatePleState(*this)),
       indexer_cache_(CreateIndexerCache(*this)),
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
-  input_ids_.Add();
+  input_ids_->Add();
   position_inputs_->Add();
   const auto& rope_context_name = model_.rope_context_input_;
   if (!rope_context_name.empty()) {
@@ -209,6 +209,22 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   size_t num_tokens = next_tokens.size();
   const auto& chunk_size_opt = params_->search.chunk_size;
 
+  const auto& sliding_window = model_.config_->model.decoder.sliding_window;
+  if (sliding_window.has_value() && sliding_window->slide_inputs && num_tokens > 1) {
+    const size_t window_size = static_cast<size_t>(sliding_window->window_size);
+    const size_t num_windows = (num_tokens + window_size - 1) / window_size;
+    if (model_.config_->model.decoder.run_options.has_value()) {
+      State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+    }
+    for (size_t i = 0; i < num_windows; ++i) {
+      const int window_total_length =
+          total_length - static_cast<int>((num_windows - 1 - i) * window_size);
+      UpdateInputsOutputs(next_tokens, next_indices, window_total_length);
+      State::Run(*model_.session_decoder_, false);
+    }
+    return logits_.Get(all_tokens_valid);
+  }
+
   if (rope_context_length_)
     *rope_context_length_->GetTensorMutableData<int64_t>() = total_length;
   const bool replaying_rope_cache = rope_context_length_ && num_tokens == static_cast<size_t>(total_length);
@@ -231,7 +247,7 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
   // MTP speculative decoding also captures the 2-token verify shape (max_graph_capture_length == 2),
   // each captured length getting its own annotation id / static buffers.
-  const int seq_len = static_cast<int>(input_ids_.GetShape()[1]);
+  const int seq_len = static_cast<int>(input_ids_->GetShape()[1]);
   const bool graph_capture_this_run =
       params_->use_graph_capture && seq_len >= 1 && seq_len <= params_->max_graph_capture_length &&
       (!indexer_cache_ || !indexer_cache_->UsesHostSequenceLength());
@@ -363,24 +379,25 @@ void DecoderOnly_State::CropToAccepted(size_t new_length, size_t recurrent_posit
 }
 
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
-  input_ids_.Update(next_tokens);
-  size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
+  input_ids_->Update(next_tokens);
+  size_t new_length = static_cast<size_t>(input_ids_->GetShape()[1]);
 
   // Determine effective lengths for position_ids and KV cache based on sliding window config
   int position_length = total_length;
   int kv_cache_length = total_length;
 
-  if (model_.config_->model.decoder.sliding_window.has_value() &&
-      model_.config_->model.decoder.sliding_window->window_size > 0) {
-    const int window_size = model_.config_->model.decoder.sliding_window->window_size;
+  const auto& sliding_window = model_.config_->model.decoder.sliding_window;
+  const bool slide_inputs = sliding_window.has_value() && sliding_window->slide_inputs;
+  if (sliding_window.has_value() && sliding_window->window_size > 0) {
+    const int window_size = sliding_window->window_size;
 
     // Position IDs are clamped when slide_inputs is true
-    if (model_.config_->model.decoder.sliding_window->slide_inputs) {
+    if (slide_inputs) {
       position_length = std::min(total_length, window_size);
     }
 
     // KV cache is clamped when slide_key_value_cache is true
-    if (model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
+    if (sliding_window->slide_key_value_cache) {
       kv_cache_length = std::min(total_length, window_size);
     }
   }
@@ -400,7 +417,12 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
     hidden_states_output_->Update(static_cast<int>(new_length));
   if (recurrent_state_)
     recurrent_state_->SetForwardLength(static_cast<int>(new_length));
-  logits_.Update(next_tokens, new_length);
+  if (slide_inputs) {
+    auto next_windowed_tokens = WrapTensor<int32_t>(*model_.p_device_inputs_, *input_ids_->Get());
+    logits_.Update(next_windowed_tokens, new_length);
+  } else {
+    logits_.Update(next_tokens, new_length);
+  }
 }
 
 }  // namespace Generators

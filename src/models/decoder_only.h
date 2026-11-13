@@ -82,7 +82,7 @@ struct DecoderOnly_State : State {
 
   const DecoderOnly_Model& model_;
 
-  DefaultInputIDs input_ids_{*this};
+  std::unique_ptr<InputIDs> input_ids_{CreateInputIDs(*this)};
   Logits logits_{*this};
   std::unique_ptr<KeyValueCache> kv_cache_;
   std::unique_ptr<RecurrentState> recurrent_state_;

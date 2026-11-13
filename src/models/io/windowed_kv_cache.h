@@ -58,7 +58,8 @@ struct WindowedKeyValueCache : KeyValueCache {
 
   void SlideLayer(size_t layer_idx);
   void TransitionLayerToTokenGeneration(size_t layer_idx);
-  void UpdateLayer(DeviceSpan<int32_t> beam_indices, int total_length, size_t layer_idx);
+  void TransitionLayerToPrefill(size_t layer_idx);
+  void UpdateLayer(DeviceSpan<int32_t> beam_indices, int total_length, size_t step_width, size_t layer_idx);
 
   DeviceInterface& Device() { return *model_.p_device_kvcache_; }
   Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
@@ -70,6 +71,7 @@ struct WindowedKeyValueCache : KeyValueCache {
   State& state_;
   const Model& model_{state_.model_};
   const size_t layer_count_;
+  size_t configured_window_size_{};
 
   std::vector<LayerState> per_layer_states_;
 
