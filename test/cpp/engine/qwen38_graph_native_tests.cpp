@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 #include <array>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -22,50 +21,6 @@
 #include "scoped-environment-variable.h"
 
 #if USE_CUDA
-
-namespace Generators {
-
-struct Qwen38GraphNativeTestAccess {
-  struct PackedState {
-    std::vector<int64_t> positions;
-    std::vector<float> keys;
-    std::vector<uint16_t> pending;
-    std::vector<int32_t> lengths;
-  };
-
-  static void EnableDensePrefill(Qwen38GraphModel& model) {
-    auto& prefill = model.config_->model.qwen38_graph.prefill;
-    prefill.enabled = true;
-    prefill.chunk = 4;
-    model.session_dense_ = model.CreateSession(GetOrtEnv(), "dense-prefill.onnx", model.session_options_.get());
-    model.session_head_kv_ = model.CreateSession(GetOrtEnv(), "decoder-handoff.onnx", model.session_options_.get());
-    const std::filesystem::path root{MODEL_PATH "engine/synthetic-qwen38"};
-    model.qsa_constants_ = std::make_unique<Qwen38QsaConstants>(
-        *model.plane_, root / "qsa.txt", root, model.p_device_->GetCudaStream());
-    model.engine_->BuildFastPrefill();
-    model.engine_->Reset();
-  }
-
-  template <typename T>
-  static std::vector<T> Read(Qwen38GraphEngine& engine, const DevTensor& tensor) {
-    std::vector<T> values(tensor.Bytes() / sizeof(T));
-    engine.SyncStream();
-    engine.model_.p_device_->CopyDeviceToHost(values.data(), tensor.ptr, tensor.Bytes());
-    return values;
-  }
-
-  static PackedState Handoff(Qwen38GraphEngine& engine) {
-    engine.FastHandoff();
-    return {
-        Read<int64_t>(engine, *engine.store_.at("past_position_ids")),
-        Read<float>(engine, *engine.shared_.at("past_key_values.0.index_key")),
-        Read<uint16_t>(engine, *engine.banks_[0].tensors.at("past_key_values.0.index_buffer")),
-        Read<int32_t>(engine, *engine.banks_[0].tensors.at("past_key_values.0.index_lengths")),
-    };
-  }
-};
-
-}  // namespace Generators
 
 namespace Generators::test {
 namespace {
@@ -151,14 +106,14 @@ TEST_F(Qwen38GraphNativeTest, DeviceMemoryBudgetValidatesFixedStateWithOrWithout
   }
 }
 
-TEST_F(Qwen38GraphNativeTest, UtilizationLimitControlsActualSnapshotReuseAfterNormalization) {
+TEST_F(Qwen38GraphNativeTest, UtilizationLimitControlsDefaultOnSnapshotReuseAfterNormalization) {
   for (bool retain_snapshots : {false, true}) {
     SCOPED_TRACE(retain_snapshots);
     auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-qwen38");
     config->engine.dynamic_batching.emplace();
     auto& batching = *config->engine.dynamic_batching;
     batching.max_batch_size = 1;
-    batching.prefix_caching = true;
+    ASSERT_FALSE(batching.prefix_caching.has_value());
     batching.gpu_utilization_factor = retain_snapshots ? 1.0f : std::numeric_limits<float>::min();
     auto model = CreateModel(GetOrtEnv(), std::move(config));
     ASSERT_FALSE(model->config_->engine.dynamic_batching);
@@ -182,7 +137,18 @@ TEST_F(Qwen38GraphNativeTest, SeparateDenseSnapshotsRestoreAndHandoffAcrossCompr
     SCOPED_TRACE(disk);
     auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-qwen38");
     config->model.decoder.filename = "decoder-handoff.onnx";
-    config->model.qwen38_graph.warmup = true;
+    auto& graph = config->model.qwen38_graph;
+    graph.warmup = true;
+    graph.fold.enabled = true;
+    graph.fold.head_r2.filename = "head-r2.onnx";
+    graph.mtp.enabled = true;
+    graph.mtp.prefill_head = true;
+    graph.prefill.enabled = true;
+    graph.prefill.chunk = 4;
+    graph.prefill.dense.filename = "dense-prefill.onnx";
+    graph.prefill.head_kv.filename = "head-kv.onnx";
+    graph.prefill.constants = "qsa.txt";
+    graph.prefill.warmup_lengths = {3, 4, 5};
     config->engine.dynamic_batching.emplace();
     auto& batching = *config->engine.dynamic_batching;
     batching.max_batch_size = 1;
@@ -194,21 +160,18 @@ TEST_F(Qwen38GraphNativeTest, SeparateDenseSnapshotsRestoreAndHandoffAcrossCompr
     auto model = std::dynamic_pointer_cast<Qwen38GraphModel>(CreateModel(GetOrtEnv(), std::move(config)));
     ASSERT_NE(model, nullptr);
     auto lease = model->AcquireDevice();
-    // The tiny target is not folded; attach real dense/head sessions and invoke its handoff explicitly.
-    Qwen38GraphNativeTestAccess::EnableDensePrefill(*model);
-    auto& device = dynamic_cast<Qwen38GraphEngine&>(*lease);
-    const auto check_packed = [](const Qwen38GraphNativeTestAccess::PackedState& packed, size_t length) {
-      EXPECT_EQ(packed.lengths, (std::vector<int32_t>{static_cast<int32_t>(length / 4), static_cast<int32_t>(length % 4)}));
-      for (size_t i = 0; i < packed.positions.size(); ++i)
-        EXPECT_EQ(packed.positions[i], i < length ? static_cast<int64_t>(i) : 0);
-      for (size_t i = 0; i < packed.keys.size(); ++i)
-        EXPECT_NEAR(packed.keys[i], i / 128 < length / 4 && i % 128 == 0 ? std::sqrt(128.0f) : 0.0f, 0.02f);
-      for (size_t i = 0; i < length % 4 * 128; ++i)
-        EXPECT_EQ(packed.pending[i], i % 128 == 0 ? uint16_t{0x4300} : uint16_t{0});
-    };
-    const auto decode = [&] {
+    Qwen38DecodeDevice& device = *lease;
+    const auto decode = [&](size_t length) {
+      // The folded graph checks the actual packed target/head state and publishes
+      // validation failures through WaitCycle; parity alone could miss symmetric corruption.
       device.BeginDecode(true);
       const auto record = device.WaitCycle();
+      EXPECT_EQ(record.pred0, static_cast<int64_t>(length + 20));
+      EXPECT_EQ(record.pred1, static_cast<int64_t>(length + 21));
+      EXPECT_EQ(record.pred2, static_cast<int64_t>(length + 22));
+      EXPECT_EQ(record.accepted_count, 0);
+      EXPECT_EQ(record.new_pending, static_cast<int64_t>(length + 20));
+      EXPECT_EQ(record.new_length, static_cast<int64_t>(length + 1));
       device.Advance(record, false);
       return std::array<int64_t, 4>{record.pred0, record.pred1, record.new_pending, record.new_length};
     };
@@ -224,32 +187,24 @@ TEST_F(Qwen38GraphNativeTest, SeparateDenseSnapshotsRestoreAndHandoffAcrossCompr
       const auto* storage = dynamic_cast<const PrefixSnapshotCache::Entry*>(saved.get());
       ASSERT_NE(storage, nullptr);
       EXPECT_EQ(storage->tier, disk ? PrefixSnapshotCache::Tier::Disk : PrefixSnapshotCache::Tier::Ram);
-      EXPECT_EQ(storage->bytes, 32u + length * (8u + 128u * 2u));
-      EXPECT_EQ(storage->shapes.size(), 4u);
-      const auto cold = Qwen38GraphNativeTestAccess::Handoff(device);
-      check_packed(cold, length);
-      const auto cold_output = decode();
+      EXPECT_EQ(storage->bytes, 32u + length * (8u + 128u * 2u + 2u));
+      EXPECT_EQ(storage->shapes.size(), 5u);
+      const auto cold_output = decode(length);
 
       device.Reset();
       device.RestorePrefix(*saved, prompt);
       EXPECT_EQ(device.PendingToken(), pending);
-      const auto warm = Qwen38GraphNativeTestAccess::Handoff(device);
-      check_packed(warm, length);
-      EXPECT_EQ(warm.positions, cold.positions);
-      EXPECT_EQ(warm.keys, cold.keys);
-      EXPECT_EQ(decode(), cold_output);
+      EXPECT_EQ(decode(length), cold_output);
 
       device.Reset();
       device.RestorePrefix(*saved, prompt);
       const std::vector<int32_t> suffix(5, 0);
       device.PrefillChunk(suffix);
       EXPECT_EQ(device.PendingToken(), static_cast<int32_t>(length + suffix.size() + 9));
-      check_packed(Qwen38GraphNativeTestAccess::Handoff(device), length + suffix.size());
-      const auto continued = decode();
+      const auto continued = decode(length + suffix.size());
       device.Reset();
       device.PrefillChunk(std::vector<int32_t>(length + suffix.size(), 0));
-      check_packed(Qwen38GraphNativeTestAccess::Handoff(device), length + suffix.size());
-      EXPECT_EQ(decode(), continued);
+      EXPECT_EQ(decode(length + suffix.size()), continued);
     }
   }
 }

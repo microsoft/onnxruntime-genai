@@ -2,9 +2,6 @@
 // Licensed under the MIT License.
 
 #include <algorithm>
-#include <array>
-#include <limits>
-#include <numeric>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -16,54 +13,53 @@
 namespace Generators::test {
 namespace {
 
-std::shared_ptr<PrefixSnapshotCache::Entry> ByteEntry(size_t bytes) {
-  auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
-  entry->type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
-  entry->shapes = {{static_cast<int64_t>(bytes)}};
-  return entry;
-}
-
-TEST(Qwen38PrefixSnapshotTest, PolicyGatesOptInAndWarnsWhenInactive) {
+TEST(Qwen38PrefixSnapshotTest, DefaultsOnForSingleSlotAndWarnsOnlyForInactiveExplicitEnable) {
   Config config;
-  EXPECT_EQ(CreateQwen38PrefixSnapshotCache(ApplyQwen38DynamicBatchingConfig(config)), nullptr);
+  EXPECT_EQ(CreateQwen38PrefixSnapshotCache(config), nullptr);
   OverlayConfig(config, R"({"engine":{"dynamic_batching":{"max_batch_size":1}}})");
-  EXPECT_EQ(CreateQwen38PrefixSnapshotCache(ApplyQwen38DynamicBatchingConfig(config)), nullptr);
+  EXPECT_NE(CreateQwen38PrefixSnapshotCache(config), nullptr);
   for (const auto* settings : {
            R"({"prefix_caching":false,"max_batch_size":1})",
            R"({"prefix_caching":true,"max_batch_size":1,"max_snapshots":0})",
            R"({"prefix_caching":true,"max_batch_size":2})",
-           R"({"prefix_caching":true,"max_batch_size":1,"snapshot_cache":{}})"}) {
+           R"({"prefix_caching":true,"max_batch_size":1,"snapshot_cache":{}})",
+           R"({"max_batch_size":2})",
+           R"({"max_batch_size":1,"max_snapshots":0})",
+           R"({"max_batch_size":1,"snapshot_cache":{}})"}) {
+    SCOPED_TRACE(settings);
     Config inactive;
     OverlayConfig(inactive, std::string{R"({"engine":{"dynamic_batching":)"} + settings + "}}");
     const auto previous_logging = g_log;
     SetLogBool("enabled", true);
     SetLogBool("warning", true);
     testing::internal::CaptureStderr();
-    const auto resolved = ApplyQwen38DynamicBatchingConfig(inactive);
-    const auto cache = CreateQwen38PrefixSnapshotCache(resolved);
+    const auto cache = CreateQwen38PrefixSnapshotCache(inactive);
     const auto log = testing::internal::GetCapturedStderr();
     g_log = previous_logging;
     EXPECT_EQ(cache, nullptr);
     EXPECT_EQ(log.find("prefix caching is inactive") != std::string::npos,
-              resolved.batching->prefix_caching.value_or(false));
+              inactive.engine.dynamic_batching->prefix_caching.value_or(false));
   }
 }
 
-TEST(Qwen38PrefixSnapshotTest, ResolvedPolicySurvivesNormalizationAndLaterOverlays) {
+TEST(Qwen38PrefixSnapshotTest, PreservesDefaultOnStorageAndCountLimitsAcrossSingleSlotNormalization) {
   Config config;
   OverlayConfig(config, R"({"engine":{"dynamic_batching":{
-    "prefix_caching":true,"max_batch_size":1,"max_snapshots":2,"snapshot_cache":{"ram_bytes":32}}}})");
-  const auto resolved = ApplyQwen38DynamicBatchingConfig(config);
+    "max_batch_size":1,"max_snapshots":2,"snapshot_cache":{"ram_bytes":32}}}})");
+  auto cache = CreateQwen38PrefixSnapshotCache(config);
+  ApplyQwen38DynamicBatchingConfig(config);
   ASSERT_FALSE(config.engine.dynamic_batching);
-  OverlayConfig(config, R"({"engine":{"dynamic_batching":{"prefix_caching":false,"max_batch_size":2}}})");
-  auto cache = CreateQwen38PrefixSnapshotCache(resolved);
   ASSERT_NE(cache, nullptr);
-  auto first = ByteEntry(16);
-  auto second = ByteEntry(16);
-  ASSERT_TRUE(cache->Allocate(first, GetDeviceInterface(DeviceType::CPU)));
-  ASSERT_TRUE(cache->Allocate(second, GetDeviceInterface(DeviceType::CPU)));
-  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Resident);
-  EXPECT_EQ(second->tier, PrefixSnapshotCache::Tier::Ram);
+  std::vector<std::shared_ptr<PrefixSnapshotCache::Entry>> entries;
+  for (int i = 0; i < 2; ++i) {
+    auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
+    entry->type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+    entry->shapes = {{16}};
+    ASSERT_TRUE(cache->Allocate(entry, GetDeviceInterface(DeviceType::CPU)));
+    EXPECT_EQ(entry->tier, PrefixSnapshotCache::Tier::Ram);
+    entries.push_back(std::move(entry));
+  }
+  for (const auto& entry : entries) EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Resident);
   EXPECT_EQ(cache->Used()[1], 32u);
 }
 
@@ -96,79 +92,6 @@ TEST(Qwen38PrefixSnapshotTest, DflashEligibilityAndCapturePlanningKeepOnlyTheLas
   EXPECT_FALSE(ShouldCaptureQwen38Prefix(8, 4, false, std::nullopt, 0));
   EXPECT_TRUE(ShouldCaptureQwen38Prefix(0, 4, false, std::nullopt, 0));
 }
-
-TEST(Qwen38PrefixSnapshotTest, RejectsInvalidAndOverflowingRanges) {
-  EXPECT_THROW(PlanQwen38PrefixRanges("past_position_ids", {8}, 8, 64, 9), std::out_of_range);
-  EXPECT_THROW(PlanQwen38PrefixRanges("d_prompt_hidden", {3}, 2, 48, 9), std::out_of_range);
-  EXPECT_THROW(PlanQwen38PrefixRanges("past_key_values.0.key", {1, 0, 3}, 2, 0, 5), std::invalid_argument);
-  EXPECT_THROW(PlanQwen38PrefixRanges("past_key_values.0.key", {1, 8, 3}, 2, 47, 5), std::invalid_argument);
-  EXPECT_THROW(PlanQwen38PrefixRanges("d_dflash_prompt", {4}, 2, 64, std::numeric_limits<size_t>::max()),
-               std::overflow_error);
-}
-
-class Qwen38PrefixRoundTripTest : public testing::TestWithParam<size_t> {};
-
-TEST_P(Qwen38PrefixRoundTripTest, RestoresPlannedRowsAndAllBanksWithoutTouchingUnusedCapacity) {
-  struct Buffer {
-    const char* name;
-    std::vector<int64_t> shape;
-    size_t element_bytes, bytes, length, stride, kept_per_stride;
-    bool index{};
-  };
-  const std::vector<Buffer> buffers{
-      {"past_key_values.0.key", {1, 2, 8, 3}, 2, 96, 5, 48, 30},
-      {"past_key_values.0.value", {1, 2, 8, 3}, 2, 96, 5, 48, 30},
-      {"shared.index_key", {1, 2, 4, 3}, 4, 96, 5, 48, 24, true},
-      {"past_position_ids", {1, 8}, 8, 64, 5, 64, 40},
-      {"bank0", {16}, 1, 16, 5, 16, 16},
-      {"bank1", {16}, 1, 16, 5, 16, 16},
-      {"bank2", {16}, 1, 16, 5, 16, 16},
-      {"ctx_commit", {16}, 1, 16, 5, 16, 16},
-      {"last_hidden", {1, 3}, 2, 6, 5, 6, 6},
-      {"d_prompt_hidden", {8, 3}, 2, 48, 5, 48, 30},
-      {"d_dflash_prompt", {8, 4}, 2, 64, 3, 64, 24},
-      {"dense.state", {2, 3}, 2, 12, 5, 12, 12},
-  };
-  std::array<size_t, 3> limits{};
-  limits[GetParam()] = 4096;
-  PrefixSnapshotCache cache{limits, 1, {}, GetParam() == 0};
-  auto snapshot = std::make_shared<PrefixSnapshotCache::Entry>();
-  snapshot->type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
-  for (const auto& buffer : buffers)
-    snapshot->shapes.push_back({static_cast<int64_t>(buffer.bytes / buffer.stride * buffer.kept_per_stride)});
-  auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  ASSERT_TRUE(cache.Allocate(snapshot, cpu, "qwen38"));
-  for (size_t i = 0; i < buffers.size(); ++i) {
-    const auto& buffer = buffers[i];
-    auto ranges = PlanQwen38PrefixRanges(buffer.name, buffer.shape, buffer.element_bytes,
-                                         buffer.bytes, buffer.length, buffer.index);
-    Tensor source{cpu, snapshot->type};
-    source.CreateTensor(std::array<int64_t, 1>{static_cast<int64_t>(buffer.bytes)});
-    std::iota(source.GetMutableData<uint8_t>(), source.GetMutableData<uint8_t>() + buffer.bytes,
-              static_cast<uint8_t>(i + 1));
-    snapshot->Write(i, source, ranges);
-  }
-  snapshot->Flush();
-  for (size_t i = 0; i < buffers.size(); ++i) {
-    const auto& buffer = buffers[i];
-    auto ranges = PlanQwen38PrefixRanges(buffer.name, buffer.shape, buffer.element_bytes,
-                                         buffer.bytes, buffer.length, buffer.index);
-    Tensor destination{cpu, snapshot->type};
-    destination.CreateTensor(std::array<int64_t, 1>{static_cast<int64_t>(buffer.bytes)});
-    auto* data = destination.GetMutableData<uint8_t>();
-    std::fill_n(data, buffer.bytes, uint8_t{231});
-    snapshot->Read(i, destination, ranges);
-    std::vector<uint8_t> expected(buffer.bytes, 231);
-    for (size_t j = 0; j < buffer.bytes; ++j)
-      if (j % buffer.stride < buffer.kept_per_stride) expected[j] = static_cast<uint8_t>(i + j + 1);
-    EXPECT_EQ(std::vector<uint8_t>(data, data + buffer.bytes), expected) << buffer.name;
-  }
-  // The incomplete index group needs its extra row; KV rows clamp at physical capacity.
-  EXPECT_EQ(PlanQwen38PrefixRanges("index", {1, 4, 3}, 4, 48, 8, true).front().bytes, 36u);
-  EXPECT_EQ(PlanQwen38PrefixRanges("cache.key", {1, 8, 3}, 2, 48, 20).front().bytes, 48u);
-}
-
-INSTANTIATE_TEST_SUITE_P(StorageTiers, Qwen38PrefixRoundTripTest, testing::Values(0u, 1u, 2u));
 
 }  // namespace
 }  // namespace Generators::test

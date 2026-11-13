@@ -5,6 +5,7 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <random>
 #include <sstream>
@@ -24,6 +25,7 @@
 #include "dflash2_drafter.h"
 #include "engine/cache_manager.h"
 #include "engine/engine.h"
+#include "engine/native-device-memory-budget.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
 #include "ep/webgpu/session_options.h"
@@ -2869,6 +2871,8 @@ TEST(PrefixSnapshotCacheTest, OrtAllocationFailurePreservesAccountingAndAllowsRe
   auto allocator = Ort::Allocator::Create(*model->session_decoder_, cpu->GetAllocator().GetInfo());
   static_cast<OrtAllocator&>(*allocator).Alloc =
       [](OrtAllocator*, size_t) -> void* { throw std::bad_alloc{}; };
+  static_cast<OrtAllocator&>(*allocator).Reserve =
+      [](OrtAllocator*, size_t) -> void* { throw std::bad_alloc{}; };
   CheckpointAllocationDevice failing_device{*cpu, true, allocator.get()};
   PrefixSnapshotCache cache{{16, 0, 0}, 1};
   auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
@@ -2883,6 +2887,55 @@ TEST(PrefixSnapshotCacheTest, OrtAllocationFailurePreservesAccountingAndAllowsRe
   EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Resident);
   EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{16, 0, 0}));
 }
+
+#if USE_CUDA
+TEST(PrefixSnapshotCacheTest, CudaSizeChurnReclaimsPhysicalBackingBeforeBudgetRefresh) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto* device = model->p_device_;
+  ASSERT_EQ(device->GetType(), DeviceType::CUDA);
+  size_t initial_free, total;
+  device->Synchronize();
+  device->GetAvailableMemory(initial_free, total);
+  model->device_memory_budget_initial_free_bytes_ = initial_free;
+  constexpr size_t mib = 1024 * 1024;
+  Config::Engine::DynamicBatching settings;
+  settings.device_memory_budget_bytes = 64 * mib;
+  settings.device_memory_headroom_bytes = 4 * mib;
+  auto cache = std::make_shared<PrefixSnapshotCache>(
+      std::array<size_t, 3>{64 * mib, 64 * mib, 0}, 1);
+  NativeDeviceMemoryBudget budget{*model};
+  budget.Configure(settings, cache);
+  for (size_t size : {16 * mib, 32 * mib, 8 * mib, 24 * mib}) {
+    SCOPED_TRACE(size);
+    ASSERT_NO_THROW(budget.Refresh());
+    auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
+    entry->type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+    entry->shapes = {{static_cast<int64_t>(size)}};
+    ASSERT_TRUE(cache->Allocate(entry, device));
+    ASSERT_EQ(entry->tier, PrefixSnapshotCache::Tier::Vram);
+    device->Synchronize();
+    size_t resident_free;
+    device->GetAvailableMemory(resident_free, total);
+    const auto allowance = NativeSnapshotDeviceMemoryLimit(
+        settings, initial_free, resident_free, cache->Used()[0]);
+    std::cout << "snapshot_churn bytes=" << size << " physical_free=" << resident_free
+              << " logical_vram=" << cache->Used()[0] << " limit=" << *allowance << '\n';
+    ASSERT_NO_THROW(budget.Refresh());
+    ASSERT_TRUE(cache->SetDeviceMemoryLimit(0, device));
+    device->Synchronize();
+    size_t reclaimed_free;
+    device->GetAvailableMemory(reclaimed_free, total);
+    std::cout << "snapshot_reclaimed physical_free=" << reclaimed_free
+              << " logical_vram=" << cache->Used()[0] << " limit=0\n";
+    EXPECT_EQ(cache->Used()[0], 0u);
+    EXPECT_GE(reclaimed_free, resident_free + size);
+    EXPECT_NO_THROW(budget.Refresh());
+  }
+}
+#endif
 
 TEST(PrefixSnapshotCacheTest, VramReservationPreservesTargetBlockAndConfiguredLimit) {
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");

@@ -10,8 +10,9 @@
 #include <string_view>
 #include <unordered_set>
 
-#include "../models/model_state_manifest.h"
 #include "../dflash2_drafter.h"
+#include "../models/model_state_manifest.h"
+#include "prefix_snapshot_cache.h"
 #include "sequence_positions.h"
 #include "window_ring.h"
 
@@ -499,7 +500,7 @@ size_t PagedCacheCaptureBlockTableBytes(const std::shared_ptr<Model>& model) {
 bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
                                  size_t auxiliary_bytes_per_block) {
   const auto& batching = *model->config_->engine.dynamic_batching;
-  if (!batching.prefix_caching.value_or(true)) {
+  if (!IsPrefixCachingRequested(*model->config_)) {
     return false;
   }
 
@@ -512,8 +513,7 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
     unsupported_layout =
         "Prefix caching does not yet support an Engine-hosted DSpark drafter.";
   } else if (auxiliary_bytes_per_block != 0 &&
-             !(batching.prefix_caching.value_or(false) &&
-               !model->config_->model.dflash2.filename.empty() &&
+             !(!model->config_->model.dflash2.filename.empty() &&
                model->config_->model.dflash2.sliding_window == 0 &&
                !model->config_->model.mtp.IsEnabled() &&
                !ModelStateManifest{model->config_->model.decoder}.HasFixedStateGroups())) {

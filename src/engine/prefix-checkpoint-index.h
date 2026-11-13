@@ -50,7 +50,13 @@ class PrefixCheckpointIndex {
   void TryPublish(PrefixCacheMetrics& metrics, Capture&& capture) {
     static_assert(std::is_nothrow_move_constructible_v<Entry>, "Checkpoint publication must not allocate payloads.");
     try {
-      entries_.reserve(entries_.size() + 1);
+      if (entries_.size() == entries_.capacity()) {
+        const auto capacity = entries_.capacity();
+        const auto maximum = entries_.max_size();
+        if (capacity == maximum) throw std::bad_alloc{};
+        entries_.reserve(capacity == 0 ? 1 : capacity > maximum - capacity ? maximum
+                                                                           : capacity * 2);
+      }
       if (auto entry = capture()) Publish(std::move(*entry));
     } catch (const std::bad_alloc&) {
       ++metrics.publication_refusals;

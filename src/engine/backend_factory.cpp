@@ -257,7 +257,7 @@ EngineDependencies CreateDecoderDependencies(std::shared_ptr<Model> model) {
         "WebGPU does not support tiered prefix snapshot byte budgets; ignoring these limits "
         "and retaining device-resident snapshots subject to count limits.");
   }
-  if (batching && batching->prefix_caching.value_or(true) && batching->dflash2_max_snapshots != 0 &&
+  if (IsPrefixCachingRequested(*model->config_) && batching->dflash2_max_snapshots != 0 &&
       (!batching->max_snapshots || *batching->max_snapshots != 0) &&
       (device_resident || batching->snapshot_cache.Enabled())) {
     const auto& limits = batching->snapshot_cache;
