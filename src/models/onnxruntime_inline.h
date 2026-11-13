@@ -971,6 +971,8 @@ inline void OrtSession::SetEpDynamicOptions(const char* const* keys, const char*
 
 #if ORT_API_VERSION >= 27
 inline void OrtSession::ReleaseCapturedGraph(int graph_annotation_id) {
+  if (Ort::api_version < 27)
+    throw std::runtime_error("ONNX Runtime API 27 or later is required to release captured graphs");
   Ort::ThrowOnError(Ort::api->SessionReleaseCapturedGraph(this, graph_annotation_id));
 }
 #endif

@@ -11,6 +11,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -374,7 +375,8 @@ size_t ResolveQwen38DflashReservedBlocks(const Config& config, size_t block_size
 
 // Maps `engine.dynamic_batching` (`block_size`, `num_blocks`, `max_batch_size`, `max_scheduled_tokens`,
 // `dflash2_max_snapshots`) and `search.chunk_size` onto `model.qwen38_graph.kv_capacity`, `model.context_length`,
-// `search.max_length`, and `model.qwen38_graph.prefill.chunk`. When `dynamic_batching` resolves to a single slot, records
+// `search.max_length`, and `model.qwen38_graph.prefill.chunk` (capping oversized dense-prefill chunks when
+// `max_scheduled_tokens <= 2048`). When `dynamic_batching` resolves to a single slot, records
 // that authoritative choice in `model.qwen38_graph.resolved_max_batch_size` before clearing `engine.dynamic_batching` for the
 // static Engine path. Returns true when `dynamic_batching.num_blocks` configured the KV capacity and context length.
 bool ApplyQwen38DynamicBatchingConfig(Config& config);
@@ -388,11 +390,24 @@ size_t Qwen38DenseLogitsElementBytes(ONNXTensorElementDataType type);
 // `type` (see Qwen38DenseLogitsElementBytes).
 int Qwen38ArgmaxLogits(const void* row, ONNXTensorElementDataType type, size_t count);
 
+// Reads the cache inputs (`past_key_values.*` and `past_position_ids`) and their declared tensor shapes from the ONNX
+// protobuf of `model_file` or `model_bytes` without reading any initializer. Symbolic (`dim_param` or unset) dimensions
+// become -1, matching SessionInfo::GetInputShape. Returns nullopt when the model cannot be opened or is not a valid
+// protobuf ONNX graph (for example an ORT-format model), in which case the caller falls back to the configured capacity
+// before session creation and to the session's inputs afterwards.
+std::optional<std::vector<Qwen38CacheInput>> ReadQwen38OnnxCacheInputs(const std::filesystem::path& model_file);
+std::optional<std::vector<Qwen38CacheInput>> ReadQwen38OnnxCacheInputs(std::span<const std::byte> model_bytes);
+
 // Derives the KV capacity of a loaded target graph from its static past_key_values.<n>.key|value cache length (shape[2]),
 // falling back to past_position_ids (shape[1]) only when no static key/value cache input is present. Single-slot graphs may
 // pad past_position_ids beyond the KV cache (e.g. 33040 positions for 33028 KV rows), so using the KV cache length preserves
 // compatibility with ValidateQwen38CacheShapes.
 int64_t ResolveQwen38GraphKvCapacity(const std::vector<Qwen38CacheInput>& inputs);
+
+// True when `inputs` declares no static KV capacity (`ResolveQwen38GraphKvCapacity(inputs) <= 0`) and has at least one
+// `past_key_values.<n>.key|value` input with symbolic cache length (`shape[2] < 0`) or `past_position_ids` with symbolic
+// sequence length (`shape[1] < 0`).
+bool HasQwen38SymbolicKvCapacity(const std::vector<Qwen38CacheInput>& inputs);
 
 // MoE expert offload (ORT QMoE offload v4) as requested by the decoder's "session.moe.offload.*" config entries. A key
 // that is configured more than once counts with its last value, the one the session options end up with. The mode and
@@ -444,15 +459,29 @@ std::unique_ptr<OrtRunOptions> CreateQwen38OffloadWarmupRunOptions(const Qwen38M
 OrtRunOptions* SelectQwen38TargetRunOptions(const Qwen38OrtRunHints& hints, OrtRunOptions* direction_options,
                                             OrtRunOptions* offload_warmup_options, bool& warmup_captured);
 
-// Estimated KV capacity of the Flash-Next package's tier-named target graphs (2k, 8k, 16k, 32k, 64k, 128k), available
+// Estimated KV capacity of the Flash-Next package's tier-named target graphs (2k, 8k, 16k, 32k, 64k, 128k, 256k), available
 // before the session exists. These fixed padded capacities are not read from the graph. Other file names fall back to
-// model.qwen38_graph.kv_capacity for budget estimation. SyncQwen38GraphContext derives the actual capacity, context length
+// ResolveQwen38TargetBudget for budget estimation. SyncQwen38GraphContext derives the actual capacity, context length
 // and generation budget from the loaded graph; model logging reports a capacity mismatch when adaptive offload is enabled.
 struct Qwen38ContextTier {
-  std::string_view name;  // "2k", "8k", "16k", "32k", "64k", "128k"
+  std::string_view name;  // "2k", "8k", "16k", "32k", "64k", "128k", "256k"
   int kv_capacity{};
 };
 std::optional<Qwen38ContextTier> Qwen38ContextTierForTarget(const std::string& target_filename);
+
+// Resolves the pre-session context tier and KV capacity budget for `target_filename`:
+//  - A tier-named graph (`model_<tier>.onnx`) takes that tier and its padded capacity.
+//  - A non-tier graph (`model.onnx`, `model_dynamic_ctx.onnx`) adopts an explicit `ORT_QWEN38_CONTEXT_LENGTH` tier only
+//    when `target_cache_inputs` confirms symbolic KV cache dimensions (`HasQwen38SymbolicKvCapacity`).
+//  - Fixed-graph fallbacks (e.g. `ORT_QWEN38_CONTEXT_LENGTH=2k` falling back to a static 32K `model.onnx`) retain the
+//    graph's actual static capacity when `target_cache_inputs` provides one, or `configured_kv_capacity` otherwise.
+struct Qwen38TargetBudget {
+  std::optional<Qwen38ContextTier> context_tier;
+  int kv_capacity{};
+};
+Qwen38TargetBudget ResolveQwen38TargetBudget(
+    const std::string& target_filename, bool explicit_context_env, const std::string& context_request,
+    int configured_kv_capacity, const std::optional<std::vector<Qwen38CacheInput>>& target_cache_inputs);
 
 // The fold head graph that matches a 64k target: a head still named mtp.onnx becomes mtp_64k.onnx when the package has it,
 // because the head's cache capacity must equal the target's. Any other head, or another tier, is returned unchanged. The

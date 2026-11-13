@@ -6,6 +6,7 @@
 #include "models/parallel_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
+#include "models/qwen_vl_state.h"
 #include "models/threadpool.h"
 #include <array>
 #include <cstring>
@@ -189,8 +190,8 @@ ProcessImagePrompt(const Processor& processor, const Generators::Tokenizer& toke
       int64_t t = image_grid_thw_data[i * 3 + 0];
       int64_t h = image_grid_thw_data[i * 3 + 1];
       int64_t w = image_grid_thw_data[i * 3 + 2];
-      int64_t tokens = (t * h * w) / (spatial_merge_size * spatial_merge_size);
-      total_image_tokens += tokens;
+      int64_t tokens = GetQwenGridTokenCount(t, h, w, spatial_merge_size);
+      total_image_tokens = CheckedQwenVisionSum(total_image_tokens, tokens);
     }
   }
 
@@ -254,7 +255,7 @@ std::vector<int32_t> QwenImageProcessor::ExpandImagePrompt(const Tokenizer& toke
       int64_t t = image_grid_thw_data[image_idx * 3 + 0];
       int64_t h = image_grid_thw_data[image_idx * 3 + 1];
       int64_t w = image_grid_thw_data[image_idx * 3 + 2];
-      int64_t num_pads = (t * h * w) / (spatial_merge_size * spatial_merge_size);
+      int64_t num_pads = GetQwenGridTokenCount(t, h, w, spatial_merge_size);
 
       // Add vision_start, image_pad tokens, and vision_end
       modified_text += vision_start_token;

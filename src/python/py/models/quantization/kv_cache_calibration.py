@@ -8,10 +8,10 @@ Quantizing the KV cache (``extra_options["kv_cache_quant_scheme"]``) requires pe
 scales, supplied to the builder through ``extra_options["kv_cache_scale_file"]``. This
 module produces that file.
 
-It runs an **FP16-KV baseline** ONNX model (the same model built without
+It runs an **FP16/BF16-KV baseline** ONNX model (the same model built without
 ``kv_cache_quant_scheme``) over a set of calibration sequences, captures the
 ``present.<layer>.key`` / ``present.<layer>.value`` outputs -- post-RoPE K and raw V,
-exactly the tensors the quantized ``GroupQueryAttention`` node quantizes -- and computes
+exactly the tensors the quantized attention node quantizes -- and computes
 per-channel (or per-tensor) symmetric scales::
 
     scale = threshold / qmax     (qmax = 128 for INT8, 8 for INT4, 448 for FP8 E4M3)
@@ -39,8 +39,9 @@ Typical two-step flow::
     python -m onnxruntime_genai.models.builder -m <hf_model> -o <final_dir> -p int4 -e cuda \
         --extra_options kv_cache_quant_scheme=int8_per_channel kv_cache_scale_file=kv_scales.json
 
-Layer count, KV head count and head size are auto-detected from the baseline model's
-``past_key_values.*`` inputs, so the tool is model-agnostic.
+Layer count, KV head count and head size are auto-detected from the baseline model.
+Dense ``past_key_values.*`` and paged ``past_keys_*``/``past_values_*`` layouts are
+supported. Paged capture preserves GPU cache aliases and reads only populated slots.
 
 **Rotary models:** keep ``k_rotary_envelope=True`` (the default). K is quantized *after*
 RoPE, and the low-frequency RoPE dimensions barely rotate inside a short calibration
@@ -52,6 +53,9 @@ chain-of-thought workloads.
 
 from __future__ import annotations
 
+import argparse
+import ctypes
+import importlib
 import json
 import logging
 import os
@@ -204,9 +208,9 @@ def _get_quant_type_max(quant_type: str) -> float:
     """Return the qmax divisor for the given quant_type (int8/int4/fp8 prefix like int8_per_channel)."""
     qmax = {"int8": 128.0, "int4": 8.0, "fp8": 448.0}
 
-    for key in qmax:
+    for key, maximum in qmax.items():
         if quant_type.startswith(key):
-            return qmax[key]
+            return maximum
 
     raise ValueError(f"Unsupported kv_cache quant_type '{quant_type}' (expect int8/int4/fp8 prefix).")
 
@@ -304,18 +308,23 @@ def _detect_kv_shape(sess, model_path: str) -> tuple[int, int]:
     fall back to ``genai_config.json`` next to the model for whatever is not concrete.
     """
     num_kv_heads = head_size = None
+    paged = any(meta.name == "cumulative_sequence_lengths" for meta in sess.get_inputs())
     for meta in sess.get_inputs():
         # Only the attention cache carries the [batch, num_kv_heads, past_seq_len, head_size]
         # layout. Hybrid models also expose `past_key_values.<layer>.conv_state`
         # and `.recurrent_state` inputs, which are 4-D/5-D linear-attention state buffers with a
         # completely different meaning, so match on the `.key`/`.value` suffix rather than on the
         # `past_key_values.` prefix alone.
-        if not (meta.name.startswith("past_key_values.") and meta.name.endswith((".key", ".value"))):
+        if not (
+            (meta.name.startswith("past_key_values.") and meta.name.endswith((".key", ".value")))
+            or (paged and meta.name.startswith(("past_keys_", "past_values_")))
+        ):
             continue
         shape = meta.shape
         if len(shape) == 4:
-            if isinstance(shape[1], int):
-                num_kv_heads = shape[1]
+            head_axis = 2 if paged else 1
+            if isinstance(shape[head_axis], int):
+                num_kv_heads = shape[head_axis]
             if isinstance(shape[3], int):
                 head_size = shape[3]
         break
@@ -383,10 +392,11 @@ def _mse_threshold(
 
 
 def _numpy_dtype(ort_type: str) -> np.dtype:
-    """Map the ONNX Runtime input type strings used by builder models to NumPy dtypes."""
+    """Map ORT types to NumPy storage; BF16 uses uint16 bits for I/O binding."""
     dtypes = {
         "tensor(float)": np.dtype(np.float32),
         "tensor(float16)": np.dtype(np.float16),
+        "tensor(bfloat16)": np.dtype(np.uint16),
         "tensor(int32)": np.dtype(np.int32),
         "tensor(int64)": np.dtype(np.int64),
     }
@@ -394,6 +404,113 @@ def _numpy_dtype(ort_type: str) -> np.dtype:
         return dtypes[ort_type]
     except KeyError as error:
         raise ValueError(f"Unsupported calibration model input type '{ort_type}'.") from error
+
+
+def is_kv_cache_input(name):
+    return name.startswith(("past_keys_", "past_values_")) or (
+        name.startswith("past_key_values.") and name.endswith((".key", ".value"))
+    )
+
+
+def run_calibration_batch(session, output_names, feeds):
+    """Capture floating caches while preserving BF16 bits and paged GPU aliases."""
+    input_types = {meta.name: meta.type for meta in session.get_inputs()}
+    paged = "cumulative_sequence_lengths" in input_types
+    if not paged and "tensor(bfloat16)" not in input_types.values():
+        return session.run(output_names, feeds)
+    arrays = {name: np.ascontiguousarray(values) for name, values in feeds.items()}
+    binding = session.io_binding()
+    cache_buffers = {}
+    cache_device = "cuda" if paged and "CUDAExecutionProvider" in session.get_providers() else "cpu"
+    ort = importlib.import_module("onnxruntime") if paged else None
+    for name, values in arrays.items():
+        if paged and is_kv_cache_input(name):
+            buffer = ort.OrtValue.ortvalue_from_numpy(values, cache_device, 0)
+            cache_buffers[name] = buffer
+            dtype = 16 if input_types[name] == "tensor(bfloat16)" else values.dtype
+            binding.bind_input(name, cache_device, 0, dtype, values.shape, buffer.data_ptr())
+        elif input_types[name] == "tensor(bfloat16)":
+            binding.bind_input(name, "cpu", 0, 16, values.shape, values.ctypes.data)
+        else:
+            binding.bind_cpu_input(name, values)
+    output_aliases = {}
+    for name in output_names:
+        input_name = name.replace("present_keys_", "past_keys_", 1).replace("present_values_", "past_values_", 1)
+        if name.startswith("present."):
+            input_name = "past_key_values." + name.removeprefix("present.")
+        if input_name in cache_buffers:
+            buffer = cache_buffers[input_name]
+            dtype = 16 if input_types[input_name] == "tensor(bfloat16)" else arrays[input_name].dtype
+            binding.bind_output(name, cache_device, 0, dtype, arrays[input_name].shape, buffer.data_ptr())
+            output_aliases[name] = buffer
+        else:
+            binding.bind_output(name, "cpu")
+    session.run_with_iobinding(binding)
+    binding.synchronize_outputs()
+    outputs = []
+    for name, output in zip(output_names, binding.get_outputs(), strict=True):
+        if name in output_aliases:
+            values = output_aliases[name].numpy()
+            outputs.append((values.astype(np.uint32) << 16).view(np.float32) if output.data_type() == "tensor(bfloat16)" else values)
+        elif output.data_type() == "tensor(bfloat16)":
+            shape = output.shape()
+            storage = (ctypes.c_uint16 * int(np.prod(shape))).from_address(output.data_ptr())
+            bits = np.ctypeslib.as_array(storage).reshape(shape).astype(np.uint32)
+            outputs.append((bits << 16).view(np.float32))
+        else:
+            outputs.append(output.numpy())
+    return outputs
+
+
+def make_paged_calibration_feeds(input_metas, input_ids, block_size=None):
+    """Allocate contiguous single-sequence prefill pages and their scheduler metadata."""
+    seq_len = input_ids.size
+    feeds = {
+        "input_ids": input_ids.reshape(-1).astype(_numpy_dtype(input_metas["input_ids"].type), copy=False),
+        "cumulative_sequence_lengths": np.asarray([0, seq_len], dtype=np.int32),
+        "past_sequence_lengths": np.asarray([0], dtype=np.int32),
+    }
+    for name, meta in input_metas.items():
+        if is_kv_cache_input(name):
+            if len(meta.shape) != 4:
+                raise ValueError(f"Paged calibration requires rank-4 attention caches, got {meta.shape}.")
+            cache_shape = list(meta.shape[1:])
+            if not isinstance(cache_shape[0], int):
+                cache_shape[0] = block_size
+            if any(type(dim) is not int or dim <= 0 for dim in cache_shape):
+                raise ValueError(
+                    "Paged calibration requires concrete cache block/head dimensions; configure symbolic "
+                    f"block_size in genai_config.json engine.dynamic_batching.block_size, got {meta.shape}."
+                )
+            num_blocks = (seq_len + cache_shape[0] - 1) // cache_shape[0]
+            feeds[name] = np.zeros((num_blocks, *cache_shape), dtype=_numpy_dtype(meta.type))
+        elif name.startswith("past_key_values."):
+            feeds[name] = np.zeros(
+                tuple(1 if not isinstance(dim, int) else dim for dim in meta.shape),
+                dtype=_numpy_dtype(meta.type),
+            )
+    if not any(
+        name.startswith("past_keys_") or (name.startswith("past_key_values.") and name.endswith(".key"))
+        for name in feeds
+    ):
+        raise ValueError("Paged calibration model has no key-cache inputs.")
+    for name in ("block_table", "block_table_windowed"):
+        if name in input_metas:
+            feeds[name] = np.arange(num_blocks, dtype=_numpy_dtype(input_metas[name].type)).reshape(1, -1)
+    if "attention_metadata" in input_metas:
+        feeds["attention_metadata"] = np.asarray([seq_len, seq_len, 1], dtype=np.int32)
+    if "position_ids" in input_metas:
+        meta = input_metas["position_ids"]
+        positions = np.arange(seq_len, dtype=_numpy_dtype(meta.type))
+        if len(meta.shape) == 2:
+            position_axes = meta.shape[0]
+            if type(position_axes) is not int or position_axes <= 0:
+                raise ValueError("Rank-2 packed position_ids must have a concrete positive leading dimension.")
+            positions = np.broadcast_to(positions, (position_axes, seq_len)).copy()
+        elif len(meta.shape) != 1:
+            raise ValueError(f"Unsupported packed position_ids shape {meta.shape}.")
+        feeds["position_ids"] = positions
+    return feeds
 
 
 def calibrate_kv_scales(
@@ -412,7 +529,7 @@ def calibrate_kv_scales(
     k_rotary_envelope: bool = True,
     corpus: list[str] | None = None,
 ) -> str:
-    """Run the FP16-KV baseline and write calibrated symmetric KV scales to ``out_json``.
+    """Run the floating-KV baseline and write calibrated symmetric KV scales to ``out_json``.
 
     ``num_layers``, ``num_kv_heads`` and ``head_size`` are auto-detected from the model when
     left as ``None``.
@@ -425,7 +542,8 @@ def calibrate_kv_scales(
     quantile of ``|x|``) or ``mse`` (the clip point minimizing the round-trip quantization
     error, see :func:`_mse_threshold`; not available for FP8). ``percentile`` and ``mse`` buffer
     up to ``sample_budget`` token rows per layer, strided evenly across every calibration
-    sequence so the estimate is not biased towards early positions.
+    sequence so the estimate is not biased towards early positions. BF16 and FP32 cache outputs
+    retain FP32 sample storage so finite values outside FP16 range remain calibratable.
 
     ``k_rotary_envelope`` calibrates the K threshold on the rotation-invariant pair norm
     (see :func:`_pair_envelope`) instead of the raw post-RoPE values. Without it, the K scales
@@ -438,7 +556,7 @@ def calibrate_kv_scales(
     Returns the path to the written scale file.
     """
     import onnxruntime as ort  # noqa: PLC0415
-    from transformers import AutoTokenizer  # noqa: PLC0415
+    import transformers  # noqa: PLC0415
 
     quant_type = quant_type.lower()
     valid_quant_types = {
@@ -468,10 +586,17 @@ def calibrate_kv_scales(
     # Keep non-prepacked MatMulNBits nodes on the same fpA_intB kernel family as prepacked nodes.
     os.environ.setdefault("ORT_FPA_INTB_GEMM", "1")
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    tokenizer_file = Path(tokenizer_path) / "tokenizer.json"
+    tokenizer = (
+        transformers.PreTrainedTokenizerFast(tokenizer_file=str(tokenizer_file))
+        if tokenizer_file.is_file()
+        else transformers.AutoTokenizer.from_pretrained(tokenizer_path)
+    )
 
     so = ort.SessionOptions()
     so.log_severity_level = 3
+    so.intra_op_num_threads = 4
+    so.inter_op_num_threads = 1
     available_providers = ort.get_available_providers()
     providers = [
         provider
@@ -494,6 +619,14 @@ def calibrate_kv_scales(
     if k_rotary_envelope and head_size % 2 != 0:
         raise ValueError(f"k_rotary_envelope requires an even head_size, got {head_size}.")
 
+    input_metas = {meta.name: meta for meta in sess.get_inputs()}
+    paged = "cumulative_sequence_lengths" in input_metas
+    paged_block_size = None
+    if paged:
+        config_path = Path(model_path).parent / "genai_config.json"
+        if config_path.is_file():
+            with config_path.open(encoding="utf-8") as file:
+                paged_block_size = json.load(file).get("engine", {}).get("dynamic_batching", {}).get("block_size")
     output_names = [o.name for o in sess.get_outputs()]
     present_keys = {
         int(name.split(".")[1]): name
@@ -505,6 +638,17 @@ def calibrate_kv_scales(
         for name in output_names
         if name.startswith("present.") and name.endswith(".value") and name.split(".")[1].isdigit()
     }
+    if paged:
+        present_keys.update(
+            (int(name.removeprefix("present_keys_")), name)
+            for name in output_names
+            if name.startswith("present_keys_") and name.removeprefix("present_keys_").isdigit()
+        )
+        present_values.update(
+            (int(name.removeprefix("present_values_")), name)
+            for name in output_names
+            if name.startswith("present_values_") and name.removeprefix("present_values_").isdigit()
+        )
     if num_layers is None:
         num_layers = len(present_keys)
     if num_layers <= 0:
@@ -528,12 +672,17 @@ def calibrate_kv_scales(
     read_names = [present_keys[i] for i in layer_ids] + [present_values[i] for i in layer_ids]
     channels = num_kv_heads * head_size
 
-    input_metas = {meta.name: meta for meta in sess.get_inputs()}
-    for required_name in ("input_ids", "attention_mask"):
+    required_inputs = ("input_ids", "block_table", "past_sequence_lengths") if paged else ("input_ids", "attention_mask")
+    for required_name in required_inputs:
         if required_name not in input_metas:
             raise ValueError(f"Calibration model is missing required input '{required_name}'.")
-    past_metas = [meta for meta in input_metas.values() if meta.name.startswith("past_key_values.")]
+    past_metas = [
+        meta for meta in input_metas.values()
+        if meta.name.startswith("past_key_values.") or (paged and meta.name.startswith(("past_keys_", "past_values_")))
+    ]
     supported_inputs = {"input_ids", "attention_mask", "position_ids", *(meta.name for meta in past_metas)}
+    if paged:
+        supported_inputs.update({"block_table", "block_table_windowed", "cumulative_sequence_lengths", "past_sequence_lengths", "attention_metadata"})
     rope_context_input = sess.get_modelmeta().custom_metadata_map.get("com.microsoft.genai.rope_context_length_input")
     if rope_context_input is not None:
         rope_context_meta = input_metas.get(rope_context_input)
@@ -558,12 +707,16 @@ def calibrate_kv_scales(
     v_amax = np.zeros((num_layers, channels), dtype=np.float32)
     need_samples = method in {"percentile", "mse"}
     per_seq_budget = max(1, sample_budget // max(1, len(seqs)))
+    sample_dtype = np.float32 if any(
+        getattr(meta, "type", None) in {"tensor(bfloat16)", "tensor(float)"}
+        for meta in sess.get_outputs() if meta.name in read_names
+    ) else np.float16
     k_buf = [[] for _ in range(num_layers)] if need_samples else None
     v_buf = [[] for _ in range(num_layers)] if need_samples else None
 
     for pi, input_ids in enumerate(seqs):
         seq_len = input_ids.shape[1]
-        feeds = {
+        feeds = make_paged_calibration_feeds(input_metas, input_ids, paged_block_size) if paged else {
             "input_ids": input_ids.astype(_numpy_dtype(input_metas["input_ids"].type), copy=False),
             "attention_mask": np.ones(
                 (1, seq_len), dtype=_numpy_dtype(input_metas["attention_mask"].type)
@@ -571,7 +724,7 @@ def calibrate_kv_scales(
         }
         if rope_context_input is not None:
             feeds[rope_context_input] = np.asarray(seq_len, dtype=np.int64)
-        if "position_ids" in input_metas:
+        if "position_ids" in input_metas and not paged:
             position_meta = input_metas["position_ids"]
             position_ids = np.arange(seq_len, dtype=_numpy_dtype(position_meta.type)).reshape(1, seq_len)
             if len(position_meta.shape) == 3:
@@ -583,6 +736,8 @@ def calibrate_kv_scales(
                 raise ValueError(f"Unsupported position_ids shape {position_meta.shape}.")
             feeds["position_ids"] = position_ids
         for meta in past_metas:
+            if paged:
+                continue
             if meta.name.endswith((".key", ".value")):
                 # Empty attention cache: prefill starts from zero past tokens.
                 feeds[meta.name] = np.zeros(
@@ -597,20 +752,24 @@ def calibrate_kv_scales(
                     tuple(1 if not isinstance(dim, int) else dim for dim in meta.shape),
                     dtype=_numpy_dtype(meta.type),
                 )
-        outputs = sess.run(read_names, feeds)
+        outputs = run_calibration_batch(sess, read_names, feeds)
 
         for i in range(num_layers):
-            k = outputs[i].astype(np.float32).reshape(num_kv_heads, seq_len, head_size)
-            v = outputs[num_layers + i].astype(np.float32).reshape(num_kv_heads, seq_len, head_size)
-            k = np.transpose(k, (1, 0, 2)).reshape(seq_len, channels)
-            v = np.transpose(v, (1, 0, 2)).reshape(seq_len, channels)
+            if paged:
+                k = outputs[i].astype(np.float32).reshape(-1, channels)[:seq_len]
+                v = outputs[num_layers + i].astype(np.float32).reshape(-1, channels)[:seq_len]
+            else:
+                k = outputs[i].astype(np.float32).reshape(num_kv_heads, seq_len, head_size)
+                v = outputs[num_layers + i].astype(np.float32).reshape(num_kv_heads, seq_len, head_size)
+                k = np.transpose(k, (1, 0, 2)).reshape(seq_len, channels)
+                v = np.transpose(v, (1, 0, 2)).reshape(seq_len, channels)
             if k_rotary_envelope:
                 k = _pair_envelope(k, num_kv_heads, head_size)
             k_amax[i] = np.maximum(k_amax[i], np.abs(k).max(axis=0))
             v_amax[i] = np.maximum(v_amax[i], np.abs(v).max(axis=0))
             if need_samples:
-                k_buf[i].append(_subsample(k, per_seq_budget).astype(np.float16))
-                v_buf[i].append(_subsample(v, per_seq_budget).astype(np.float16))
+                k_buf[i].append(_subsample(k, per_seq_budget).astype(sample_dtype))
+                v_buf[i].append(_subsample(v, per_seq_budget).astype(sample_dtype))
         logger.info("[%d/%d] seq_len=%d k_amax<L0>=%.4f v_amax<L0>=%.4f", pi + 1, len(seqs), seq_len, k_amax[0].max(), v_amax[0].max())
 
     # A NaN/Inf anywhere in the captured KV poisons the whole channel's threshold, so fail loudly
@@ -626,6 +785,8 @@ def calibrate_kv_scales(
         for i in range(num_layers):
             ks = np.concatenate(k_buf[i], axis=0).astype(np.float32)
             vs = np.concatenate(v_buf[i], axis=0).astype(np.float32)
+            if not np.isfinite(ks).all() or not np.isfinite(vs).all():
+                raise ValueError("Calibration sample buffers contain non-finite cache values.")
             if method == "percentile":
                 k_thr[i] = np.percentile(np.abs(ks), percentile, axis=0)
                 v_thr[i] = np.percentile(np.abs(vs), percentile, axis=0)
@@ -698,11 +859,9 @@ def _load_corpus_file(path: str) -> list[str]:
 
 
 def _main() -> None:
-    import argparse
-
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    p = argparse.ArgumentParser(description="Calibrate symmetric KV-cache scales from an FP16-KV ONNX model.")
-    p.add_argument("--model", required=True, help="Path to the FP16-KV baseline model.onnx (or its directory).")
+    p = argparse.ArgumentParser(description="Calibrate symmetric KV-cache scales from a floating-KV ONNX model.")
+    p.add_argument("--model", required=True, help="Path to the FP16/BF16-KV baseline model.onnx (or its directory).")
     p.add_argument("--tokenizer", required=True, help="HF model id/path for the tokenizer.")
     p.add_argument("--out", required=True, help="Output scale JSON path.")
     p.add_argument("--quant-type", default="int8_per_channel")

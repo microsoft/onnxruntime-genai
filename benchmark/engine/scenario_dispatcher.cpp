@@ -92,7 +92,8 @@ void RegisterExecutionProviderLibraries(const std::vector<ScenarioConfig>& confi
 
     std::cout << "[dispatcher] Registering " << registration_name << " execution provider library: "
               << provider_library.string() << std::endl;
-    OgaRegisterExecutionProviderLibrary(registration_name, provider_library.c_str());
+    const auto provider_library_utf8 = provider_library.u8string();
+    OgaRegisterExecutionProviderLibrary(registration_name, reinterpret_cast<const char*>(provider_library_utf8.c_str()));
   }
 }
 

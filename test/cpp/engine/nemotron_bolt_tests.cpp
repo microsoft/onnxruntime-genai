@@ -7,6 +7,8 @@
 #include <fstream>
 #include <functional>
 
+#include <nlohmann/json.hpp>
+
 #include "dflash2_drafter.h"
 #include "models/nemotron_bolt.h"
 #include "search.h"
@@ -14,6 +16,14 @@
 namespace Generators::test {
 
 struct NemotronBoltTestAccess {
+  static std::vector<uint8_t> SelectedLogits(NemotronBoltState& state) {
+    const size_t row_bytes = static_cast<size_t>(state.bolt_.config_->model.vocab_size) * sizeof(uint16_t);
+    // Keep the wrapped buffer's host mirror alive until the vector has been copied.
+    auto selected = state.tensors_.at("logits")->GetByteSpan().subspan(static_cast<size_t>(state.state_row_) * row_bytes, row_bytes);
+    const auto bytes = selected.CopyDeviceToCpu();
+    return {bytes.begin(), bytes.end()};
+  }
+
   static void ForceRejectedDrafts(NemotronBoltState& state) {
     state.drafts_.assign(7, 0);
   }
@@ -159,6 +169,240 @@ TEST(NemotronBolt, RejectsUnsupportedSearchInsteadOfIgnoringIt) {
   EXPECT_THROW(CreateSearch(*invalid_sliding), std::runtime_error);
 }
 
+TEST(NemotronBolt, TargetOnlySearchDoesNotRequireCapture) {
+  Config config;
+  config.model.type = "nemotron_bolt";
+  config.speculative.max_draft_tokens = 0;
+  auto params = std::make_shared<GeneratorParams>(config);
+  for (bool capture : {false, true}) {
+    params->use_graph_capture = capture;
+    EXPECT_NO_THROW(ValidateNemotronBoltSearch(*params));
+  }
+  params->speculative.max_draft_tokens = 7;
+  params->use_graph_capture = false;
+  EXPECT_THROW(ValidateNemotronBoltSearch(*params), std::runtime_error);
+}
+
+TEST(NemotronBolt, RejectsUnsupportedPackageDraftCountBeforeLoadingSessions) {
+  for (int draft_tokens : {Config{}.speculative.max_draft_tokens, -1, 1, 6, 8}) {
+    auto config = std::make_unique<Config>();
+    config->model.type = "nemotron_bolt";
+    config->model.decoder.filename = "must-not-load.onnx";
+    config->speculative.max_draft_tokens = draft_tokens;
+    try {
+      NemotronBoltModel model{std::move(config), GetOrtEnv()};
+      FAIL() << "Unsupported package draft count " << draft_tokens << " was accepted";
+    } catch (const std::runtime_error& error) {
+      EXPECT_STREQ(error.what(), "nemotron_bolt: speculative.max_draft_tokens must be 0 or 7");
+    }
+  }
+}
+
+TEST(NemotronBolt, ParsesTargetOnlyRegardlessOfJsonMemberOrder) {
+  for (const auto document : {
+           R"({"speculative":{"max_draft_tokens":0},"model":{"type":"nemotron_bolt","context_length":16,"vocab_size":128}})",
+           R"({"model":{"type":"nemotron_bolt","context_length":16,"vocab_size":128},"speculative":{"max_draft_tokens":0}})"}) {
+    Config config{fs::path{}, {}, document};
+    EXPECT_EQ(config.speculative.max_draft_tokens, 0);
+    EXPECT_NO_THROW(OverlayConfig(config, R"({"speculative":{"max_draft_tokens":0}})"));
+  }
+  EXPECT_THROW((Config{fs::path{}, {}, R"({"speculative":{"max_draft_tokens":0},"model":{"type":"llama","context_length":16}})"}),
+               std::runtime_error);
+}
+
+TEST(NemotronBolt, PublicSpeculativeSetterAllowsZeroOnlyForBolt) {
+  for (const char* type : {"nemotron_bolt", "llama"}) {
+    Config config;
+    config.model.type = type;
+    GeneratorParams params{config};
+    ASSERT_NO_THROW(params.SetSpeculativeNumber("max_draft_tokens", 7));
+    if (config.model.type == "nemotron_bolt") {
+      EXPECT_NO_THROW(params.SetSpeculativeNumber("max_draft_tokens", 0));
+      EXPECT_EQ(params.GetSpeculativeNumber("max_draft_tokens"), 0);
+    } else {
+      EXPECT_THROW(params.SetSpeculativeNumber("max_draft_tokens", 0), std::exception);
+      EXPECT_EQ(params.GetSpeculativeNumber("max_draft_tokens"), 7);
+    }
+    for (double invalid : {-1.0, 0.5, 17.0}) {
+      EXPECT_THROW(params.SetSpeculativeNumber("max_draft_tokens", invalid), std::exception);
+    }
+  }
+}
+
+TEST(NemotronBolt, ValidatesTargetOnlyAfterMergingConfiguration) {
+  const std::string base = R"({"speculative":{"max_draft_tokens":0},"model":{"type":"llama","context_length":16,"vocab_size":128}})";
+  const std::string bolt = R"({"model":{"type":"nemotron_bolt"}})";
+  Config config{fs::path{}, bolt, base};
+  EXPECT_EQ(config.speculative.max_draft_tokens, 0);
+  EXPECT_EQ(config.model.type, "nemotron_bolt");
+  EXPECT_THROW(OverlayConfig(config, R"({"model":{"type":"llama"}})"), std::runtime_error);
+  EXPECT_EQ(config.model.type, "nemotron_bolt");
+  EXPECT_NO_THROW(OverlayConfig(config, R"({"model":{"type":"llama"},"speculative":{"max_draft_tokens":7}})"));
+  EXPECT_EQ(config.model.type, "llama");
+  EXPECT_EQ(config.speculative.max_draft_tokens, 7);
+  EXPECT_THROW((Config{fs::path{}, R"({"model":{"type":"llama"}})",
+                       R"({"model":{"type":"nemotron_bolt","context_length":16},"speculative":{"max_draft_tokens":0}})"}),
+               std::runtime_error);
+  try {
+    OverlayConfig(config, R"({"speculative":{"max_draft_tokens":-1}})");
+    FAIL() << "Negative draft width was accepted";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("must be between 0 and 16"), std::string::npos);
+  }
+}
+
+TEST(NemotronBolt, PreservesDrafterOptimizerExclusions) {
+  const std::string fusion = "GatherSliceToSplitFusion";
+  for (const auto& [existing, expected] :
+       std::vector<std::pair<std::optional<std::string>, std::string>>{
+           {std::nullopt, fusion},
+           {"", fusion},
+           {"OtherFusion", "OtherFusion;" + fusion},
+           {"OtherFusion;", "OtherFusion;" + fusion},
+           {fusion, fusion},
+           {fusion + ";OtherFusion", fusion + ";OtherFusion"},
+           {"OtherFusion;" + fusion + ";", "OtherFusion;" + fusion + ";"},
+           {"GatherSliceToSplitFusionSuffix", "GatherSliceToSplitFusionSuffix;" + fusion}}) {
+    Config config;
+    config.model.vocab_size = 128;
+    auto& drafter = config.model.dflash2;
+    drafter.filename = "drafter.onnx";
+    drafter.num_hidden_layers = drafter.num_key_value_heads = drafter.head_size = 1;
+    drafter.block_size = 8;
+    drafter.num_draft_tokens = 7;
+    drafter.selector_top_k = 1;
+    drafter.sliding_window = 8;
+    drafter.session_options.emplace();
+    auto& entries = drafter.session_options->config_entries;
+    if (existing) {
+      entries.emplace_back("optimization.disable_specified_optimizers", "SupersededFusion");
+      entries.emplace_back("optimization.disable_specified_optimizers", *existing);
+    }
+    const auto projected = CreateNemotronBoltDrafterConfig(config);
+    const auto& merged = projected->model.decoder.session_options.config_entries;
+    if (existing) EXPECT_EQ(merged.front(), entries.front());
+    const auto exclusion = std::find_if(merged.rbegin(), merged.rend(), [](const auto& option) {
+      return option.first == "optimization.disable_specified_optimizers";
+    });
+    ASSERT_NE(exclusion, merged.rend());
+    EXPECT_EQ(exclusion->second, expected);
+  }
+}
+
+class NemotronBoltRuntimePolicyTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    Ort::InitApi();
+    saved_version_ = Ort::runtime_api_version;
+    saved_api_version_ = Ort::api_version;
+  }
+  void TearDown() override {
+    Ort::runtime_api_version = saved_version_;
+    Ort::api_version = saved_api_version_;
+  }
+
+ private:
+  uint32_t saved_version_{};
+  uint32_t saved_api_version_{};
+};
+
+#if ORT_API_VERSION >= 27
+TEST_F(NemotronBoltRuntimePolicyTest, ReleaseWrapperRejectsOlderNegotiatedTables) {
+  Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, "{}"};
+  const auto path = config.ResolvePath(config.model.decoder.filename);
+  auto session = OrtSession::Create(GetOrtEnv(), path.c_str(), nullptr);
+  Ort::api_version = 26;
+  try {
+    session->ReleaseCapturedGraph(0);
+    FAIL() << "Release used an unsupported API table";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "ONNX Runtime API 27 or later is required to release captured graphs");
+  }
+}
+#endif
+
+TEST_F(NemotronBoltRuntimePolicyTest, RequiresSafeCaptureInBothProjectedSessions) {
+  Config config;
+  config.model.vocab_size = 128;
+  auto& drafter = config.model.dflash2;
+  drafter.filename = "drafter.onnx";
+  drafter.num_hidden_layers = drafter.num_key_value_heads = drafter.head_size = 1;
+  drafter.block_size = 8;
+  drafter.num_draft_tokens = 7;
+  drafter.selector_top_k = 1;
+  drafter.sliding_window = 8;
+  SetProviderOption(config, "cuda", "enable_cuda_graph", "1");
+  for (uint32_t version : {18u, 26u, 27u, 31u}) {
+    Ort::api_version = version;
+    for (const std::string override : {"", "0", "1"}) {
+      drafter.session_options.reset();
+      if (!override.empty()) {
+        drafter.session_options.emplace();
+        drafter.session_options->provider_options.push_back({"cuda", {{"enable_cuda_graph", override}}});
+      }
+      const auto projected = CreateNemotronBoltDrafterConfig(config);
+      const auto& target_options = config.model.decoder.session_options;
+      const auto& draft_options = projected->model.decoder.session_options;
+#if ORT_API_VERSION >= 27
+      if (version >= 27) {
+        EXPECT_NO_THROW(ValidateNemotronBoltGraphCapture(target_options, true));
+        if (override != "0") {
+          EXPECT_NO_THROW(ValidateNemotronBoltGraphCapture(draft_options, true));
+        } else {
+          EXPECT_THROW(ValidateNemotronBoltGraphCapture(draft_options, true), std::runtime_error);
+        }
+        continue;
+      }
+#endif
+      EXPECT_THROW(ValidateNemotronBoltGraphCapture(target_options, true), std::runtime_error);
+      EXPECT_THROW(ValidateNemotronBoltGraphCapture(draft_options, true), std::runtime_error);
+    }
+    Config::SessionOptions eager;
+    EXPECT_NO_THROW(ValidateNemotronBoltGraphCapture(eager, false));
+    EXPECT_THROW(ValidateNemotronBoltGraphCapture(eager, true), std::runtime_error);
+  }
+}
+
+TEST_F(NemotronBoltRuntimePolicyTest, PreservesLogicalDrafterLengthsAndExplicitSanitizerPolicy) {
+  for (uint32_t version : {0u, 31u, 32u, 33u}) {
+    SCOPED_TRACE(version);
+    Ort::runtime_api_version = version;
+    for (const std::string policy : {"", "0", "1"}) {
+      SCOPED_TRACE(policy);
+      Config config;
+      config.model.vocab_size = 128;
+      auto& drafter = config.model.dflash2;
+      drafter.filename = "drafter.onnx";
+      drafter.num_hidden_layers = drafter.num_key_value_heads = drafter.head_size = 1;
+      drafter.block_size = 8;
+      drafter.num_draft_tokens = 7;
+      drafter.selector_top_k = 1;
+      drafter.sliding_window = 8;
+      drafter.session_options.emplace();
+      constexpr auto key = "session.paged_attention.skip_input_sanitizer";
+      if (!policy.empty()) {
+        drafter.session_options->config_entries.emplace_back(key, policy);
+      }
+      const auto projected = CreateNemotronBoltDrafterConfig(config);
+      const auto& entries = projected->model.decoder.session_options.config_entries;
+      const auto length_policy = std::find_if(entries.begin(), entries.end(), [](const auto& option) {
+        return option.first == key;
+      });
+      if (version < 32 && policy.empty()) {
+        EXPECT_EQ(length_policy, entries.end());
+      } else {
+        ASSERT_NE(length_policy, entries.end());
+        EXPECT_EQ(length_policy->second, policy.empty() ? "1" : policy);
+        EXPECT_EQ(std::count_if(entries.begin(), entries.end(), [](const auto& option) {
+                    return option.first == key;
+                  }),
+                  1);
+      }
+      EXPECT_EQ(drafter.session_options->config_entries.size(), policy.empty() ? 0u : 1u);
+    }
+  }
+}
+
 TEST(NemotronBolt, PublicTokenCommitAndResetHaveNoLookaheadLeak) {
   Config config;
   config.model.type = "nemotron_bolt";
@@ -234,11 +478,112 @@ TEST(NemotronBolt, PromptAtBudgetIsImmediatelyDone) {
   EXPECT_THROW(search->CommitToken(21), std::runtime_error);
 }
 
+std::unique_ptr<Config> BoltTestConfig(const char* path) {
+  auto config = std::make_unique<Config>(fs::path{path}, "{}");
+  for (auto* session : {&config->model.decoder.session_options,
+                        config->model.dflash2.session_options
+                            ? &*config->model.dflash2.session_options
+                            : nullptr}) {
+    if (!session) continue;
+    session->intra_op_num_threads = 1;
+    session->inter_op_num_threads = 1;
+    for (auto& provider : session->provider_options) {
+      if (provider.name != "cuda") continue;
+      auto warmup = std::find_if(provider.options.begin(), provider.options.end(),
+                                 [](const auto& option) {
+                                   return option.first == "min_num_runs_before_cuda_graph_capture";
+                                 });
+      if (warmup != provider.options.end()) {
+        if (warmup->second != "2")
+          throw std::runtime_error("Bolt diagnostic requires exactly two CUDA graph warmups");
+        // The built-in EP fixes this count at two; only the plugin EP accepts the option.
+        provider.options.erase(warmup);
+      }
+    }
+    if (std::getenv("ORTGENAI_BOLT_BUILTIN")) {
+      session->custom_ops_library.reset();
+      session->custom_ops_libraries.clear();
+    }
+  }
+  return config;
+}
+
 // Optional real-graph correctness coverage. No models or GPU are needed for the tests above.
+TEST(NemotronBoltGPU, TargetOnlyCaptureAndReset) {
+  const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
+  if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_TEST_MODEL to a native Bolt package";
+  auto config = BoltTestConfig(path);
+  config->speculative.max_draft_tokens = 0;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto& bolt = dynamic_cast<NemotronBoltModel&>(*model);
+  ASSERT_FALSE(bolt.drafter_model_);
+  const std::vector<int32_t> prompt{
+      10, 25708, 1010, 11, 1010, 10, 3263, 1010, 18746, 1261, 17616, 2254, 1455,
+      29196, 5627, 1261, 3310, 1395, 1261, 5796, 92145, 1044, 1454, 1261, 4958,
+      17984, 1046, 11, 1010, 10, 1503, 19464, 1010, 12, 13};
+  std::vector<int32_t> expected;
+  std::vector<uint8_t> expected_logits;
+  for (bool capture : {false, true}) {
+    auto params = std::make_shared<GeneratorParams>(*model);
+    params->use_graph_capture = capture;
+    params->search.max_length = static_cast<int>(prompt.size()) + 32;
+    Generator generator{*model, *params};
+    for (int request = 0; request < 2; ++request) {
+      std::vector<uint8_t> logits;
+      generator.AppendTokens(prompt);
+      while (!generator.IsDone()) {
+        generator.GenerateNextToken();
+        const auto row = NemotronBoltTestAccess::SelectedLogits(
+            dynamic_cast<NemotronBoltState&>(*generator.state_));
+        logits.insert(logits.end(), row.begin(), row.end());
+      }
+      const auto sequence = generator.GetSequence(0).CopyDeviceToCpu();
+      const std::vector<int32_t> result(sequence.begin(), sequence.end());
+      if (expected.empty()) {
+        expected = result;
+        expected_logits = logits;
+      }
+      EXPECT_EQ(result, expected);
+      EXPECT_EQ(logits.size(), expected_logits.size());
+      EXPECT_TRUE(logits == expected_logits);
+      const auto stats = generator.GetSpeculativeStats();
+      EXPECT_EQ(stats.draft_forward_passes, 0);
+      EXPECT_EQ(stats.rounds, 0);
+      EXPECT_EQ(stats.effective_k, 0);
+      EXPECT_EQ(stats.tokens_emitted, result.size() - prompt.size());
+      generator.RewindToLength(0);
+      EXPECT_EQ(generator.TokenCount(), 0);
+    }
+  }
+  if (const char* output = std::getenv("ORTGENAI_BOLT_OUTPUT")) {
+    std::ofstream tokens{std::string{output} + ".tokens"};
+    for (int32_t token : expected) tokens << token << "\n";
+    std::ofstream logits{std::string{output} + ".logits", std::ios::binary};
+    logits.write(reinterpret_cast<const char*>(expected_logits.data()),
+                 static_cast<std::streamsize>(expected_logits.size()));
+    ASSERT_TRUE(tokens && logits);
+  }
+#if defined(__linux__)
+  if (std::getenv("ORTGENAI_BOLT_BUILTIN")) {
+    std::ifstream maps{"/proc/self/maps"};
+    ASSERT_TRUE(maps);
+    const std::string libraries{std::istreambuf_iterator<char>{maps}, {}};
+    EXPECT_EQ(libraries.find("libbolt"), std::string::npos);
+  }
+#endif
+}
+
 TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
   const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
   if (!path) GTEST_SKIP() << "Set ORTGENAI_BOLT_TEST_MODEL to a native Bolt package";
-  auto model = CreateModel(GetOrtEnv(), path);
+  auto model = CreateModel(GetOrtEnv(), BoltTestConfig(path));
+  auto& bolt = dynamic_cast<NemotronBoltModel&>(*model);
+  ASSERT_TRUE(bolt.drafter_model_);
+  ASSERT_EQ(bolt.shared_initializer_entries_.size(), 2);
+  ASSERT_EQ(bolt.drafter_model_->shared_initializer_entries_.size(), 2);
+  for (size_t i = 0; i < bolt.shared_initializer_entries_.size(); ++i)
+    EXPECT_EQ(bolt.shared_initializer_entries_[i].get(),
+              bolt.drafter_model_->shared_initializer_entries_[i].get());
   // A real, non-thinking chat asking for a palindrome function. Length 35 also exercises a
   // three-row final prefill chunk and its nonzero recurrent/anchor row.
   const std::vector<int32_t> prompt{
@@ -283,6 +628,8 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
       EXPECT_EQ(stats.tokens_buffered, 0);
       EXPECT_GT(stats.full_accept_rounds, 0);
       EXPECT_GT(stats.partial_accept_rounds, 0);
+      EXPECT_EQ(stats.zero_accept_rounds + stats.partial_accept_rounds + stats.full_accept_rounds,
+                stats.rounds);
       generator.RewindToLength(0);
       EXPECT_EQ(generator.TokenCount(), 0);
     }
@@ -314,13 +661,37 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
   const auto target_only = NemotronBoltTestAccess::TargetOnly(
       dynamic_cast<NemotronBoltState&>(*serial.state_), 32);
   EXPECT_TRUE(std::equal(target_only.begin(), target_only.end(), baseline.begin() + prompt.size()));
+  for (bool capture : {false, true}) {
+    auto ordinary_params = std::make_shared<GeneratorParams>(*model);
+    ordinary_params->speculative.max_draft_tokens = 0;
+    ordinary_params->use_graph_capture = capture;
+    ordinary_params->search.max_length = static_cast<int>(prompt.size()) + 32;
+    Generator ordinary{*model, *ordinary_params};
+    for (int request = 0; request < 2; ++request) {
+      ordinary.AppendTokens(prompt);
+      while (!ordinary.IsDone()) ordinary.GenerateNextToken();
+      const auto sequence = ordinary.GetSequence(0).CopyDeviceToCpu();
+      EXPECT_TRUE(std::equal(sequence.begin(), sequence.end(), baseline.begin(), baseline.end()));
+      const auto stats = ordinary.GetSpeculativeStats();
+      EXPECT_EQ(stats.draft_forward_passes, 0);
+      EXPECT_EQ(stats.rounds, 0);
+      EXPECT_EQ(stats.effective_k, 0);
+      EXPECT_EQ(stats.tokens_emitted, 32);
+      EXPECT_EQ(stats.tokens_buffered, 0);
+      ordinary.RewindToLength(0);
+    }
+  }
   {
     Generator generator{*model, *params};
     generator.AppendTokens(prompt);
     generator.GenerateNextToken();
     NemotronBoltTestAccess::ForceRejectedDrafts(dynamic_cast<NemotronBoltState&>(*generator.state_));
     generator.GenerateNextToken();
-    EXPECT_EQ(generator.GetSpeculativeStats().zero_accept_rounds, 1);
+    const auto stats = generator.GetSpeculativeStats();
+    EXPECT_EQ(stats.zero_accept_rounds, 1);
+    EXPECT_EQ(stats.partial_accept_rounds, 0);
+    EXPECT_EQ(stats.full_accept_rounds, 0);
+    EXPECT_EQ(stats.rounds, 1);
     while (!generator.IsDone()) generator.GenerateNextToken();
     const auto sequence = generator.GetSequence(0).CopyDeviceToCpu();
     EXPECT_TRUE(std::equal(sequence.begin(), sequence.end(), baseline.begin()));
@@ -347,6 +718,101 @@ TEST(NemotronBoltGPU, SequentialGeneratorsResetAndPublicBoundaries) {
         dynamic_cast<NemotronBoltState&>(*generator.state_), long_result.size());
     EXPECT_EQ(long_result, expected);
   }
+#if defined(__linux__)
+  if (std::getenv("ORTGENAI_BOLT_BUILTIN")) {
+    std::ifstream maps{"/proc/self/maps"};
+    ASSERT_TRUE(maps);
+    const std::string libraries{std::istreambuf_iterator<char>{maps}, {}};
+    EXPECT_EQ(libraries.find("libbolt"), std::string::npos);
+  }
+#endif
+}
+
+TEST(NemotronBoltGPU, RealPromptOrdinaryAndSpeculative) {
+  const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
+  const char* cases_path = std::getenv("ORTGENAI_BOLT_TEST_CASES");
+  const char* output = std::getenv("ORTGENAI_BOLT_OUTPUT");
+  if (!path || !cases_path || !output)
+    GTEST_SKIP() << "Set model, exact token fixtures and owned output path";
+  std::ifstream input{cases_path};
+  ASSERT_TRUE(input);
+  nlohmann::json fixtures;
+  input >> fixtures;
+  ASSERT_FALSE(fixtures.at("cases").empty());
+  std::ofstream report{std::string{output} + ".jsonl"};
+  ASSERT_TRUE(report);
+  auto model = CreateModel(GetOrtEnv(), BoltTestConfig(path));
+  for (const auto& fixture : fixtures.at("cases")) {
+    const auto case_id = fixture.at("case_id").get<std::string>();
+    SCOPED_TRACE(case_id);
+    const auto prompt = fixture.at("prompt_ids").get<std::vector<int32_t>>();
+    const auto budget = fixture.at("max_new_tokens").get<size_t>();
+    ASSERT_FALSE(prompt.empty());
+    ASSERT_GT(budget, 0);
+    ASSERT_LE(budget, 512);
+    std::array<std::vector<int32_t>, 2> generated;
+    nlohmann::json modes = nlohmann::json::array();
+    for (size_t mode = 0; mode < generated.size(); ++mode) {
+      auto params = std::make_shared<GeneratorParams>(*model);
+      params->speculative.max_draft_tokens = mode == 0 ? 0 : 7;
+      params->use_graph_capture = true;
+      params->search.max_length = static_cast<int>(prompt.size() + budget);
+      Generator generator{*model, *params};
+      generator.AppendTokens(prompt);
+      while (!generator.IsDone()) generator.GenerateNextToken();
+      const auto sequence = generator.GetSequence(0).CopyDeviceToCpu();
+      ASSERT_GE(sequence.size(), prompt.size());
+      EXPECT_TRUE(std::equal(prompt.begin(), prompt.end(), sequence.begin()));
+      generated[mode].assign(sequence.begin() + prompt.size(), sequence.end());
+      ASSERT_FALSE(generated[mode].empty());
+      EXPECT_LE(generated[mode].size(), budget);
+      const auto& eos = model->config_->model.eos_token_id;
+      const bool ended_with_eos = std::find(eos.begin(), eos.end(), generated[mode].back()) != eos.end();
+      EXPECT_TRUE(ended_with_eos || generated[mode].size() == budget);
+      const auto stats = generator.GetSpeculativeStats();
+      EXPECT_EQ(stats.tokens_emitted, generated[mode].size());
+      EXPECT_EQ(stats.dflash2_failures, 0);
+      EXPECT_EQ(stats.dflash2_disables, 0);
+      if (mode == 0) {
+        EXPECT_EQ(stats.rounds, 0);
+        EXPECT_EQ(stats.draft_forward_passes, 0);
+      } else if (generated[mode].size() > 1) {
+        EXPECT_GT(stats.rounds, 0);
+        EXPECT_GT(stats.draft_forward_passes, 0);
+      }
+      modes.push_back({
+          {"k", params->speculative.max_draft_tokens},
+          {"generated_ids", generated[mode]},
+          {"ended_with_eos", ended_with_eos},
+          {"reached_output_cap", generated[mode].size() == budget},
+          {"rounds", stats.rounds},
+          {"draft_forward_passes", stats.draft_forward_passes},
+          {"acceptance_length_histogram", stats.acceptance_length_histogram},
+          {"dflash2_failures", stats.dflash2_failures},
+          {"dflash2_disables", stats.dflash2_disables},
+          {"tokens_emitted", stats.tokens_emitted},
+          {"tokens_buffered", stats.tokens_buffered},
+      });
+    }
+    report << nlohmann::json{
+                  {"case_id", case_id},
+                  {"prompt_tokens", prompt.size()},
+                  {"same_generated_ids", generated[0] == generated[1]},
+                  {"modes", modes}}
+                  .dump()
+           << "\n";
+    report.flush();
+    ASSERT_TRUE(report);
+    EXPECT_EQ(generated[0], generated[1]);
+  }
+#if defined(__linux__)
+  if (std::getenv("ORTGENAI_BOLT_BUILTIN")) {
+    std::ifstream maps{"/proc/self/maps"};
+    ASSERT_TRUE(maps);
+    const std::string libraries{std::istreambuf_iterator<char>{maps}, {}};
+    EXPECT_EQ(libraries.find("libbolt"), std::string::npos);
+  }
+#endif
 }
 
 TEST(NemotronBolt, GgufInitializersConfigParsingAndPathValidation) {

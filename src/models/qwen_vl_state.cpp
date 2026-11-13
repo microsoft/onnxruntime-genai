@@ -118,6 +118,9 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   const auto feature_info = image_features->GetTensorTypeAndShapeInfo();
   const auto pixel_shape = pixel_info->GetShape();
   const auto feature_shape = feature_info->GetShape();
+  if (pixel_shape.size() != 2 || feature_shape.size() != 2) {
+    throw std::runtime_error("Qwen pixel_values and image_features must have rank 2");
+  }
   const auto pixel_type = pixel_info->GetElementType();
   const auto feature_type = feature_info->GetElementType();
   const int64_t patch_dim = pixel_shape[1];
@@ -125,7 +128,10 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   const size_t pixel_element_size = Ort::SizeOf(pixel_type);
   const size_t feature_element_size = Ort::SizeOf(feature_type);
   const int64_t merge_size = model_.config_->model.vision.spatial_merge_size;
-  const int64_t merge_square = merge_size * merge_size;
+  if (merge_size <= 0) {
+    throw std::runtime_error("Qwen spatial_merge_size must be positive");
+  }
+  const int64_t merge_square = CheckedQwenVisionProduct(merge_size, merge_size);
   const int64_t total_patches = pixel_shape[0];
   const int64_t total_features = feature_shape[0];
 
@@ -135,9 +141,10 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   bool all_temporal_dims_one = true;
   for (int64_t image = 0; image < num_images_; ++image) {
     const int64_t grid_tokens =
-        grid_data[image * 3] * grid_data[image * 3 + 1] * grid_data[image * 3 + 2];
-    total_grid_tokens += grid_tokens;
-    total_hw += grid_data[image * 3 + 1] * grid_data[image * 3 + 2];
+        GetQwenGridTokenCount(grid_data[image * 3], grid_data[image * 3 + 1], grid_data[image * 3 + 2]);
+    total_grid_tokens = CheckedQwenVisionSum(total_grid_tokens, grid_tokens);
+    total_hw = CheckedQwenVisionSum(
+        total_hw, CheckedQwenVisionProduct(grid_data[image * 3 + 1], grid_data[image * 3 + 2]));
     max_grid_tokens = std::max(max_grid_tokens, grid_tokens);
     all_temporal_dims_one = all_temporal_dims_one && grid_data[image * 3] == 1;
   }
@@ -157,7 +164,7 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     const int64_t temporal = grid_data[image * 3];
     const int64_t height = grid_data[image * 3 + 1];
     const int64_t width = grid_data[image * 3 + 2];
-    const int64_t grid_tokens = temporal * height * width;
+    const int64_t grid_tokens = GetQwenGridTokenCount(temporal, height, width);
     const int64_t num_patches = patch_layout.ImagePatchCount(grid_tokens, height, width);
     const int64_t num_features = grid_tokens / merge_square;
     const int64_t image_patch_offset = patch_layout.ImagePatchOffset(image, patch_offset);
@@ -167,12 +174,12 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
                                ") is not divisible by spatial_merge_size^2 (" +
                                std::to_string(merge_square) + ") for image " + std::to_string(image));
     }
-    if (image_patch_offset + num_patches > total_patches) {
+    if (CheckedQwenVisionSum(image_patch_offset, num_patches) > total_patches) {
       throw std::runtime_error("patch_offset (" + std::to_string(image_patch_offset) + ") + num_patches (" +
                                std::to_string(num_patches) + ") exceeds pixel_values dim 0 (" +
                                std::to_string(total_patches) + ")");
     }
-    if (feature_offset + num_features > total_features) {
+    if (CheckedQwenVisionSum(feature_offset, num_features) > total_features) {
       throw std::runtime_error("feat_offset (" + std::to_string(feature_offset) + ") + num_feats (" +
                                std::to_string(num_features) + ") exceeds image_features dim 0 (" +
                                std::to_string(total_features) + ")");
@@ -181,15 +188,22 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     const std::array<int64_t, 2> image_pixel_shape{num_patches, patch_dim};
     const std::array<int64_t, 2> image_grid_shape{1, 3};
     const std::array<int64_t, 2> image_feature_shape{num_features, hidden_size};
+    const auto pixel_bytes = [&](int64_t patches) {
+      return static_cast<size_t>(CheckedQwenVisionProduct(
+          CheckedQwenVisionProduct(patches, patch_dim), static_cast<int64_t>(pixel_element_size)));
+    };
+    const auto feature_bytes = [&](int64_t features) {
+      return static_cast<size_t>(CheckedQwenVisionProduct(
+          CheckedQwenVisionProduct(features, hidden_size), static_cast<int64_t>(feature_element_size)));
+    };
     auto image_pixel_values = pixel_values->CreateTensorView(
-        static_cast<size_t>(image_patch_offset * patch_dim) * pixel_element_size,
-        static_cast<size_t>(num_patches * patch_dim) * pixel_element_size, image_pixel_shape, pixel_type);
+        pixel_bytes(image_patch_offset),
+        pixel_bytes(num_patches), image_pixel_shape, pixel_type);
     auto image_grid = grid->CreateTensorView(
         static_cast<size_t>(image * 3) * sizeof(int64_t), 3 * sizeof(int64_t),
         image_grid_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
     auto image_feature_values = image_features->CreateTensorView(
-        static_cast<size_t>(feature_offset * hidden_size) * feature_element_size,
-        static_cast<size_t>(num_features * hidden_size) * feature_element_size,
+        feature_bytes(feature_offset), feature_bytes(num_features),
         image_feature_shape, feature_type);
 
     inputs_[pixel_values_index] = image_pixel_values.get();
@@ -197,8 +211,8 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     outputs_[0] = image_feature_values.get();
     State::Run(*model_.vision_session_);
 
-    patch_offset += num_patches;
-    feature_offset += num_features;
+    patch_offset = CheckedQwenVisionSum(patch_offset, num_patches);
+    feature_offset = CheckedQwenVisionSum(feature_offset, num_features);
   }
 
   inputs_[pixel_values_index] = pixel_values;

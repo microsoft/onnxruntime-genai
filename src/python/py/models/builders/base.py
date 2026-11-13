@@ -2180,8 +2180,8 @@ class Model:
         self.node_names = set()
 
     @classmethod
-    def save_onnx_model(cls, model, path, callback=None):
-        """Save weights and supported tensor attributes to one private data file."""
+    def save_onnx_model(cls, model, path, callback=None, *, inline_small_initializers=False):
+        """Save private weight data, optionally keeping tiny imported shape initializers inline."""
         path = os.fspath(path)
         data_name = os.path.basename(path) + ".data"
         staged_data_name = data_name + ".saving"
@@ -2191,7 +2191,12 @@ class Model:
         for function in model.functions.values():
             graphs.extend([function.graph, *function.graph.subgraphs()])
         initializers = [
-            value for graph in graphs for value in graph.initializers.values() if value.const_value is not None
+            value for graph in graphs for value in graph.initializers.values()
+            if value.const_value is not None and (not inline_small_initializers or value.const_value.nbytes > 256)
+        ]
+        inline_initializers = [
+            (value, value.const_value) for graph in graphs for value in graph.initializers.values()
+            if inline_small_initializers and isinstance(value.const_value, ir.ExternalTensor) and value.const_value.nbytes <= 256
         ]
         attributes = [
             (node, attribute)
@@ -2225,6 +2230,11 @@ class Model:
         backups = []
         installed = []
         try:
+            for value, tensor in inline_initializers:
+                value.const_value = ir.Tensor(
+                    tensor.numpy(), dtype=tensor.dtype, name=tensor.name,
+                    doc_string=tensor.doc_string, metadata_props=tensor.metadata_props,
+                )
             for node, attribute in constant_attributes:
                 tensor = attribute.as_tensor()
                 node.attributes[attribute.name] = ir.AttrTensor(
@@ -2275,6 +2285,8 @@ class Model:
             for destination in backups:
                 os.remove(destination + ".bak")
         finally:
+            for value, tensor in inline_initializers:
+                value.const_value = tensor
             for value, tensor in zip(initializers, original_tensors, strict=True):
                 value.const_value = tensor
             for node, attribute in [*attributes, *constant_attributes]:
@@ -2406,7 +2418,12 @@ class Model:
 
         # Save any constants as nodes
         for input_name in inputs:
-            if input_name.startswith("/model/constants") and input_name not in self.node_names:
+            if not input_name.startswith("/model/constants"):
+                continue
+            value = self.values.get(input_name)
+            if value is None or (
+                value.producer() is None and value.const_value is None and not value.is_graph_input()
+            ):
                 self.make_constant(input_name)
 
         # Resolve values from names
@@ -2447,11 +2464,18 @@ class Model:
         del self.values[name]
         return output_name
 
-    def make_value(self, name, dtype: ir.DataType | int | None = None, shape: Sequence[int | str] | ir.Shape | None = None) -> ir.Value:
+    def make_value(
+        self,
+        name,
+        dtype: ir.DataType | int | None = None,
+        shape: Sequence[int | str] | ir.Shape | None = None,
+        *,
+        value_type: ir.TypeProtocol | None = None,
+    ) -> ir.Value:
         """Obtain or create an IR value by value name.
 
         If the value does not exist a new one is created.
-        If dtype or shape is provided, it will be set on the value.
+        A complete value_type is copied before applying optional dtype or shape overrides.
 
         Args:
             name: The name of the value.
@@ -2461,6 +2485,8 @@ class Model:
             # None value
             return ir.Value(name="")
         value = self.values.setdefault(name, ir.Value(name=name))
+        if value_type is not None:
+            value.type = copy.deepcopy(value_type)
         if dtype is not None:
             value.dtype = ir.DataType(dtype)
         if shape is not None:
