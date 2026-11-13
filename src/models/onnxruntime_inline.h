@@ -1313,6 +1313,12 @@ inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& inf
   return std::unique_ptr<OrtValue>{out};
 }
 
+inline std::unique_ptr<OrtValue> OrtValue::CreateTensorView(size_t byte_offset, size_t byte_count,
+                                                            std::span<const int64_t> shape, ONNXTensorElementDataType type) {
+  auto* data = static_cast<uint8_t*>(GetTensorMutableRawData()) + byte_offset;
+  return CreateTensor(GetTensorMemoryInfo(), data, byte_count, shape, type);
+}
+
 template <typename T>
 inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(OrtAllocator& allocator, std::span<const int64_t> shape) {
   return CreateTensor(allocator, shape, Ort::TypeToTensorType<T>);

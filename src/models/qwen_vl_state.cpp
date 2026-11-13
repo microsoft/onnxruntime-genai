@@ -181,14 +181,14 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     const std::array<int64_t, 2> image_pixel_shape{num_patches, patch_dim};
     const std::array<int64_t, 2> image_grid_shape{1, 3};
     const std::array<int64_t, 2> image_feature_shape{num_features, hidden_size};
-    auto image_pixel_values = CreateQwenTensorView(
-        *pixel_values, static_cast<size_t>(image_patch_offset * patch_dim) * pixel_element_size,
+    auto image_pixel_values = pixel_values->CreateTensorView(
+        static_cast<size_t>(image_patch_offset * patch_dim) * pixel_element_size,
         static_cast<size_t>(num_patches * patch_dim) * pixel_element_size, image_pixel_shape, pixel_type);
-    auto image_grid = CreateQwenTensorView(
-        *grid, static_cast<size_t>(image * 3) * sizeof(int64_t), 3 * sizeof(int64_t),
+    auto image_grid = grid->CreateTensorView(
+        static_cast<size_t>(image * 3) * sizeof(int64_t), 3 * sizeof(int64_t),
         image_grid_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-    auto image_feature_values = CreateQwenTensorView(
-        *image_features, static_cast<size_t>(feature_offset * hidden_size) * feature_element_size,
+    auto image_feature_values = image_features->CreateTensorView(
+        static_cast<size_t>(feature_offset * hidden_size) * feature_element_size,
         static_cast<size_t>(num_features * hidden_size) * feature_element_size,
         image_feature_shape, feature_type);
 

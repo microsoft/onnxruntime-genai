@@ -1009,6 +1009,11 @@ struct OrtValue {
   static std::unique_ptr<OrtValue> CreateTensor(const OrtMemoryInfo& info, void* p_data, size_t p_data_byte_count, std::span<const int64_t> shape,
                                                 ONNXTensorElementDataType type);
 
+  // Borrows a byte range with this tensor's memory info. The caller must keep the source buffer alive
+  // and ensure the range and shape fit within it.
+  std::unique_ptr<OrtValue> CreateTensorView(size_t byte_offset, size_t byte_count,
+                                             std::span<const int64_t> shape, ONNXTensorElementDataType type);
+
   /** \brief Creates a tensor using a supplied OrtAllocator. Wraps OrtApi::CreateTensorAsOrtValue.
    * \tparam T The numeric datatype. This API is not suitable for strings.
    * \param allocator The allocator to use.
