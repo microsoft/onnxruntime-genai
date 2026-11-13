@@ -204,6 +204,13 @@ jobs:
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Align the Python CUDA plugin with the native tests
+        run: |
+          # The released Python shim bundles an older plugin without the nightly kernels.
+          $cudaPythonLibrary = python -c "import onnxruntime_ep_cuda; print(onnxruntime_ep_cuda.get_library_path())"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$env:GITHUB_WORKSPACE\ort\ep\onnxruntime_providers_cuda.dll" $cudaPythonLibrary -Force -ErrorAction Stop
+
       - name: Run the synthetic Engine Python tests
         run: |
           python -m pytest -sv test/python/test_onnxruntime_genai_engine.py
