@@ -1313,73 +1313,12 @@ TEST(PagedKeyValueCacheManifestTest, TargetSlidingWindowRequiresOptInRegardlessO
   }
 }
 
-TEST(PagedKeyValueCacheManifestTest, DraftersInheritTheTargetPrefixCachingPolicy) {
-  for (int window : {0, 8}) {
-    for (auto enabled : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
-      SCOPED_TRACE(window);
-      SCOPED_TRACE(enabled.has_value() ? (enabled.value() ? "enabled" : "disabled") : "default");
-      auto model = LoadSyntheticPagedModel();
-      model->config_->model.dflash2.filename = "drafter.onnx";
-      model->config_->model.dflash2.sliding_window = window;
-      model->config_->engine.dynamic_batching->prefix_caching = enabled;
-      PagedKeyValueCache cache{model, /*auxiliary_bytes_per_block=*/window == 0 ? 1u : 0u};
-      EXPECT_EQ(cache.PrefixCachingEnabled(), enabled.value_or(true));
-    }
-  }
-}
-
-TEST(PagedKeyValueCacheManifestTest, MappedDflashMetadataDoesNotReserveSnapshotVram) {
+TEST(PagedKeyValueCacheManifestTest, WindowedDrafterDoesNotOptOutTheTargetPrefixCache) {
   auto model = LoadSyntheticPagedModel();
   model->config_->model.dflash2.filename = "drafter.onnx";
-  model->config_->model.dflash2.sliding_window = 0;
-  auto& batching = *model->config_->engine.dynamic_batching;
-  batching.prefix_caching = true;
-  batching.num_blocks = 8;
-  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
-  auto reference = CacheManager::Create(model, block_bytes);
-  const size_t target_blocks = reference->Snapshot().total_blocks;
-  ASSERT_GT(target_blocks, 0u);
-  reference.reset();
-  batching.snapshot_cache.vram_bytes = std::numeric_limits<size_t>::max();
-  auto cache = CacheManager::Create(model, block_bytes);
-  EXPECT_TRUE(cache->PrefixCachingEnabled());
-  EXPECT_EQ(cache->DraftCheckpointVramBytes(), 0u);
-  EXPECT_EQ(cache->Snapshot().total_blocks, target_blocks);
-}
-
-TEST(PagedKeyValueCacheManifestTest, MappedDflashReservesOnlyWholeWindowSnapshotsWithinCountLimits) {
-  CountingCudaDevice device;
-  auto model = LoadSyntheticPagedModel();
-  struct RestoreDevice {
-    ~RestoreDevice() { model.p_device_kvcache_ = original; }
-    Model& model;
-    DeviceInterface* original;
-  } restore{*model, std::exchange(model->p_device_kvcache_, &device)};
-  model->config_->model.dflash2.filename = "drafter.onnx";
-  model->config_->model.dflash2.sliding_window = 0;
-  auto& decoder = model->config_->model.decoder;
-  decoder.sliding_window.emplace();
-  decoder.sliding_window->window_size = 4;
-  decoder.sliding_window->layers = {4};
-  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
-  model->config_->search.chunk_size = 4;
-  auto& batching = *model->config_->engine.dynamic_batching;
-  batching.prefix_caching = true;
-  batching.max_batch_size = 2;
-  batching.dflash2_max_snapshots = 3;
-  const size_t bytes = PagedWindowPrefixCheckpointBytes(model);
-  ASSERT_GT(bytes, 0u);
-  for (const size_t count : {1u, 2u, 3u}) {
-    SCOPED_TRACE(count);
-    batching.max_snapshots = count;
-    batching.snapshot_cache.vram_bytes = 3 * bytes + bytes / 2;
-    auto cache = CacheManager::Create(model, 1);
-    EXPECT_EQ(cache->DraftCheckpointVramBytes(), std::min(count, size_t{2}) * bytes);
-    cache.reset();
-    batching.snapshot_cache.vram_bytes = bytes + bytes / 2;
-    cache = CacheManager::Create(model, 1);
-    EXPECT_EQ(cache->DraftCheckpointVramBytes(), bytes);
-  }
+  model->config_->model.dflash2.sliding_window = 8;
+  EXPECT_FALSE(model->config_->engine.dynamic_batching->prefix_caching.has_value());
+  EXPECT_TRUE(MakePagedCache(model)->PrefixCachingEnabled());
 }
 
 TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesAuxiliaryCacheCompatibility) {
@@ -2169,6 +2108,75 @@ TEST(PagedKeyValueCacheManifestTest, RejectsEmptyLegacyPagedGroup) {
         }
       },
       std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, DraftersInheritTheTargetPrefixCachingPolicy) {
+  for (int window : {0, 8}) {
+    for (auto enabled : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+      SCOPED_TRACE(window);
+      SCOPED_TRACE(enabled.has_value() ? (enabled.value() ? "enabled" : "disabled") : "default");
+      auto model = LoadSyntheticPagedModel();
+      model->config_->model.dflash2.filename = "drafter.onnx";
+      model->config_->model.dflash2.sliding_window = window;
+      model->config_->engine.dynamic_batching->prefix_caching = enabled;
+      PagedKeyValueCache cache{model, /*auxiliary_bytes_per_block=*/window == 0 ? 1u : 0u};
+      EXPECT_EQ(cache.PrefixCachingEnabled(), enabled.value_or(true));
+    }
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, MappedDflashMetadataDoesNotReserveSnapshotVram) {
+  auto model = LoadSyntheticPagedModel();
+  model->config_->model.dflash2.filename = "drafter.onnx";
+  model->config_->model.dflash2.sliding_window = 0;
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.num_blocks = 8;
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+  auto reference = CacheManager::Create(model, block_bytes);
+  const size_t target_blocks = reference->Snapshot().total_blocks;
+  ASSERT_GT(target_blocks, 0u);
+  reference.reset();
+  batching.snapshot_cache.vram_bytes = std::numeric_limits<size_t>::max();
+  auto cache = CacheManager::Create(model, block_bytes);
+  EXPECT_TRUE(cache->PrefixCachingEnabled());
+  EXPECT_EQ(cache->DraftCheckpointVramBytes(), 0u);
+  EXPECT_EQ(cache->Snapshot().total_blocks, target_blocks);
+}
+
+TEST(PagedKeyValueCacheManifestTest, MappedDflashReservesOnlyWholeWindowSnapshotsWithinCountLimits) {
+  CountingCudaDevice device;
+  auto model = LoadSyntheticPagedModel();
+  struct RestoreDevice {
+    ~RestoreDevice() { model.p_device_kvcache_ = original; }
+    Model& model;
+    DeviceInterface* original;
+  } restore{*model, std::exchange(model->p_device_kvcache_, &device)};
+  model->config_->model.dflash2.filename = "drafter.onnx";
+  model->config_->model.dflash2.sliding_window = 0;
+  auto& decoder = model->config_->model.decoder;
+  decoder.sliding_window.emplace();
+  decoder.sliding_window->window_size = 4;
+  decoder.sliding_window->layers = {4};
+  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+  model->config_->search.chunk_size = 4;
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.max_batch_size = 2;
+  batching.dflash2_max_snapshots = 3;
+  const size_t bytes = PagedWindowPrefixCheckpointBytes(model);
+  ASSERT_GT(bytes, 0u);
+  for (const size_t count : {1u, 2u, 3u}) {
+    SCOPED_TRACE(count);
+    batching.max_snapshots = count;
+    batching.snapshot_cache.vram_bytes = 3 * bytes + bytes / 2;
+    auto cache = CacheManager::Create(model, 1);
+    EXPECT_EQ(cache->DraftCheckpointVramBytes(), std::min(count, size_t{2}) * bytes);
+    cache.reset();
+    batching.snapshot_cache.vram_bytes = bytes + bytes / 2;
+    cache = CacheManager::Create(model, 1);
+    EXPECT_EQ(cache->DraftCheckpointVramBytes(), bytes);
+  }
 }
 
 }  // namespace
