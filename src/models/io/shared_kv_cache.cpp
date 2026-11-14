@@ -8,6 +8,7 @@
 namespace Generators {
 
 void SharedKeyValueCache::Update(DeviceSpan<int32_t> /*beam_indices*/, int total_length) {
+  state_.ValidateDeclaredState(total_length);
   current_length_ = total_length;
 }
 

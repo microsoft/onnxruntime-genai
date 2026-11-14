@@ -163,6 +163,8 @@ struct Generator : LeakChecked<Generator> {
   std::vector<ExtraInput> extra_inputs_;
   void SetInputs(const NamedTensors& inputs);
   std::shared_ptr<const Model> model_;
+  // Released after state_/search_ so a completed but still-resident generator keeps its cache lease.
+  std::shared_ptr<const void> declared_state_lease_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;

@@ -13,6 +13,7 @@
 #include <fstream>
 #include <sstream>
 #include <limits>
+#include <locale>
 #include <cmath>
 #include <stdexcept>
 #include <utility>
@@ -1195,6 +1196,25 @@ struct Encoder_Element : JSON::Element {
   EncoderOutputs_Element outputs_{v_.outputs};
 };
 
+struct DeclaredState_Element : JSON::Element {
+  explicit DeclaredState_Element(Config::Model::Decoder::DeclaredState& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "max_batch_size") {
+      v_.max_batch_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "max_sequence_length") {
+      v_.max_sequence_length = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "max_live_instances") {
+      v_.max_live_instances = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Decoder::DeclaredState& v_;
+};
+
 struct Decoder_Element : JSON::Element {
   explicit Decoder_Element(Config::Model::Decoder& v) : v_{v} {}
 
@@ -1239,6 +1259,12 @@ struct Decoder_Element : JSON::Element {
   }
 
   Element& OnObject(std::string_view name) override {
+    if (name == "declared_state") {
+      if (!v_.declared_state)
+        v_.declared_state.emplace();
+      declared_state_ = std::make_unique<DeclaredState_Element>(*v_.declared_state);
+      return *declared_state_;
+    }
     if (name == "session_options") {
       return session_options_;
     }
@@ -1289,6 +1315,7 @@ struct Decoder_Element : JSON::Element {
 
  private:
   Config::Model::Decoder& v_;
+  std::unique_ptr<DeclaredState_Element> declared_state_;
   SessionOptions_Element session_options_{v_.session_options};
   std::unique_ptr<RunOptions_Element> run_options_;
   DecoderInputs_Element inputs_{v_.inputs};
@@ -3852,6 +3879,95 @@ static std::string EscapeJsonString(std::string_view s) {
   return result;
 }
 
+static std::string DeclaredStateName(std::string name) {
+  const auto placeholder = name.find("%d");
+  if (placeholder == std::string::npos || name.find_first_of("{}") != std::string::npos ||
+      name.find('%') != placeholder || name.find('%', placeholder + 2) != std::string::npos) {
+    throw std::runtime_error("K1 cache names require exactly one %d layer placeholder: " + name);
+  }
+  name.replace(placeholder, 2, "{layer}");
+  return name;
+}
+
+void ValidateDeclaredStateConfig(const Config& config) {
+  const auto& decoder = config.model.decoder;
+  if (!decoder.declared_state)
+    return;
+
+  const auto& limits = *decoder.declared_state;
+  if (limits.max_batch_size != 1 || limits.max_live_instances != 1 ||
+      limits.max_sequence_length <= 0 || limits.max_sequence_length > config.model.context_length) {
+    throw std::runtime_error(
+        "K1 requires max_batch_size=1, max_live_instances=1, and a positive max_sequence_length "
+        "no greater than model.context_length.");
+  }
+  if (!ModelType::IsLLM(config.model.type) || ModelType::IsLFM2(config.model.type) ||
+      ModelType::IsQwenVLFamily(config.model.type) || config.model.type == "bailing_hybrid" ||
+      config.model.type == "granitemoehybrid" ||
+      config.model.type == "gpt2" || config.model.type == "nemotron_bolt" ||
+      config.model.type == "qwen38_flash_graph" || !decoder.pipeline.empty() ||
+      !decoder.layer_types.empty() || decoder.state_groups || decoder.sliding_window ||
+      decoder.state_update_capacity != 0 || decoder.conv_cache_size != 0 ||
+      decoder.ple_token_pad_id >= 0 || decoder.indexer_compress_ratio != 0 ||
+      config.engine.dynamic_batching || config.engine.static_batching ||
+      config.model.draft || !config.model.mtp.filename.empty() || !config.model.dflash2.filename.empty() ||
+      config.speculative.ngram_size != 0 || !config.model.encoder.filename.empty() ||
+      !config.model.embedding.filename.empty() || !config.model.engram.filename.empty() ||
+      !config.model.vision.filename.empty() || !config.model.vision.pipeline.empty() ||
+      !config.model.speech.filename.empty() ||
+      !decoder.inputs.past_names.empty() || !decoder.outputs.present_names.empty() ||
+      !decoder.inputs.cross_past_key_names.empty() || !decoder.inputs.cross_past_value_names.empty() ||
+      !decoder.inputs.past_key_scale_names.empty() || !decoder.inputs.past_value_scale_names.empty() ||
+      !decoder.outputs.present_key_scale_names.empty() || !decoder.outputs.present_value_scale_names.empty()) {
+    throw std::runtime_error("K1 currently supports only a single unquantized, non-windowed dense GQA decoder.");
+  }
+  if (decoder.num_hidden_layers <= 0 || config.search.batch_size != 1 || config.search.num_beams != 1 ||
+      config.search.num_return_sequences != 1 ||
+      config.search.max_length < 0 || config.search.max_length > limits.max_sequence_length ||
+      (config.search.max_length == 0 && config.model.context_length > limits.max_sequence_length) ||
+      IsGraphCaptureEnabled(decoder.session_options) || IsMultiProfileEnabled(decoder.session_options)) {
+    throw std::runtime_error(
+        "K1 requires positive decoder layers, batch_size=1, num_beams=1, max_length within the envelope, "
+        "and graph capture and multi-profile execution disabled.");
+  }
+  for (const auto* name : {&decoder.inputs.past_key_names, &decoder.inputs.past_value_names,
+                           &decoder.outputs.present_key_names, &decoder.outputs.present_value_names}) {
+    DeclaredStateName(*name);
+  }
+}
+
+std::string BuildDeclaredStateContract(const Config& config) {
+  ValidateDeclaredStateConfig(config);
+  const auto& decoder = config.model.decoder;
+  if (!decoder.declared_state)
+    throw std::runtime_error("K1 requires model.decoder.declared_state before session creation.");
+  const auto& limits = *decoder.declared_state;
+  std::ostringstream json;
+  json.imbue(std::locale::classic());
+  json << R"({"version":1,"max_batch_size":)" << limits.max_batch_size
+       << R"(,"max_sequence_length":)" << limits.max_sequence_length
+       << R"(,"max_live_instances":)" << limits.max_live_instances << R"(,"states":[)";
+  const std::array<const std::string*, 2> inputs{&decoder.inputs.past_key_names, &decoder.inputs.past_value_names};
+  const std::array<const std::string*, 2> outputs{&decoder.outputs.present_key_names, &decoder.outputs.present_value_names};
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    if (i != 0)
+      json << ',';
+    json << R"({"id":")" << (i == 0 ? "key" : "value") << R"(","kind":"kv_cache","input":")"
+         << EscapeJsonString(DeclaredStateName(*inputs[i])) << R"(","output":")"
+         << EscapeJsonString(DeclaredStateName(*outputs[i])) << R"(","layers":[)";
+    for (int layer = 0; layer < decoder.num_hidden_layers; ++layer) {
+      if (layer != 0)
+        json << ',';
+      json << layer;
+    }
+    json << R"(],"capacity":)" << limits.max_sequence_length << R"(,"alias":")"
+         << (config.search.past_present_share_buffer ? "past_present" : "none")
+         << R"(","lifetime":"per_generator","location":"follow_consumer"})";
+  }
+  json << "]}";
+  return json.str();
+}
+
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
   // Normalize the provider name once
   auto normalized_provider = NormalizeProviderName(provider_name);
@@ -4222,6 +4338,7 @@ void OverlayConfig(Config& config, std::string_view json) {
   ValidateRuntimeProfiles(candidate);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
   ValidateTimestampConfiguration(candidate.model);
+  ValidateDeclaredStateConfig(candidate);
   std::swap(config, candidate);
 }
 
@@ -4528,6 +4645,7 @@ Config::Config(const fs::path& path, std::string_view json_overlay,
   ValidateModelPaths(*this);
 
   ValidateTimestampConfiguration(model);
+  ValidateDeclaredStateConfig(*this);
 
   WarnOnClampedDraftWidth(*this);
 }

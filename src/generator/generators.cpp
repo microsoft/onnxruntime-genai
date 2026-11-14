@@ -620,6 +620,7 @@ std::mt19937 CreateRandomGenerator(int random_seed) {
 
 Generator::Generator(const Model& model, const GeneratorParams& params)
     : model_{model.shared_from_this()},
+      declared_state_lease_{model.AcquireDeclaredStateLease(params)},
       generation_telemetry_{model.telemetry_session_id_, ModelType::IsTransducer(model.config_->model.type)},
       rng_{CreateRandomGenerator(params.search.random_seed)} {
   if (params.speculative.ngram_chained_lookup && params.speculative.ngram_size == 0)
@@ -770,6 +771,15 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 }
 
 void Generator::ThrowIfAppendExceedsMaxLength(size_t input_ids_count) {
+  state_->ValidateDeclaredState();
+  if (model_->GetDeclaredState()) {
+    const int64_t current_length = search_->GetSequenceLength();
+    state_->ValidateDeclaredState(current_length);
+    const int64_t remaining = static_cast<int64_t>(state_->params_->search.max_length) - current_length;
+    if (input_ids_count > static_cast<size_t>(remaining)) {
+      throw std::runtime_error("K1 appended tokens exceed the generator's immutable cache envelope.");
+    }
+  }
   if ((input_ids_count / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
     throw std::runtime_error("input_ids size (" + std::to_string(input_ids_count) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
 }
@@ -942,6 +952,7 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
 }
 
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
+  state_->ValidateDeclaredState();
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
@@ -1033,6 +1044,7 @@ size_t Generator::TokenCount() const {
 }
 
 bool Generator::IsDone() {
+  state_->ValidateDeclaredState();
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
   if (transducer_state_) {
@@ -1063,6 +1075,7 @@ bool Generator::IsSessionTerminated() const {
 }
 
 void Generator::SetLogits(DeviceSpan<float> logits) {
+  state_->ValidateDeclaredState();
   if (model_->config_->model.type == "nemotron_bolt")
     throw std::runtime_error("nemotron_bolt: SetLogits is unsupported");
   search_->SetLogits(logits);
@@ -1070,11 +1083,13 @@ void Generator::SetLogits(DeviceSpan<float> logits) {
 }
 
 void Generator::PrepareForSetLogits() {
+  state_->ValidateDeclaredState();
   strategy_->PrepareForSetLogits(*this);
 }
 
 void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
+  state_->ValidateDeclaredState();
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 
   if (!transducer_state_ &&
@@ -1110,6 +1125,7 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 }
 
 void Generator::RewindToLength(size_t new_length) {
+  state_->ValidateDeclaredState();
   const auto& model_type = model_->config_->model.type;
   if (model_type == "nemotron_bolt" && new_length != 0)
     throw std::runtime_error("nemotron_bolt: only reset-to-zero rewind is supported");
@@ -1151,6 +1167,7 @@ void Generator::RewindToLength(size_t new_length) {
 }
 
 DeviceSpan<float> Generator::GetLogits() {
+  state_->ValidateDeclaredState();
   DeviceSpan<float> strategy_logits;
   if (strategy_->TryGetExternalLogits(*this, strategy_logits)) {
     return strategy_logits;
@@ -1203,6 +1220,7 @@ void Generator::SetHiddenStates(std::shared_ptr<Tensor> hidden_states) {
 }
 
 DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
+  state_->ValidateDeclaredState();
   return search_->GetSequence(index);
 }
 

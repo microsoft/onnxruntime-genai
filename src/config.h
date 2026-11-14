@@ -547,6 +547,13 @@ struct Config {
       std::vector<SharedInitializer> shared_initializers;
       GgufInitializers gguf_initializers;
 
+      struct DeclaredState {
+        int max_batch_size{1};
+        int max_sequence_length{};
+        int max_live_instances{1};
+      };
+      std::optional<DeclaredState> declared_state;
+
       int prefill_sequence_length{};
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
@@ -1091,6 +1098,8 @@ void InheritSessionOptionsFromParent(const Config::SessionOptions& parent, Confi
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+void ValidateDeclaredStateConfig(const Config& config);
+std::string BuildDeclaredStateContract(const Config& config);
 struct RuntimeProfileDeviceFacts {
   uint64_t total_device_memory_bytes{};
   std::optional<bool> is_integrated;
