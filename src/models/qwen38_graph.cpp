@@ -787,6 +787,19 @@ bool Qwen38DflashSkipsInputSanitizer() {
   return skip;
 }
 
+void SetQwen38DflashSanitizerPolicy(Config& drafter_config, bool skip_sanitizer) {
+  constexpr std::string_view kPolicy = "session.paged_attention.skip_input_sanitizer";
+  auto& entries = drafter_config.model.decoder.session_options.config_entries;
+  entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const auto& entry) { return entry.first == kPolicy; }),
+                entries.end());
+  entries.emplace_back(std::string{kPolicy}, skip_sanitizer ? "1" : "0");
+}
+
+bool Qwen38DflashPadsDecodeSteps(int max_batch, int sliding_window, bool skip_sanitizer,
+                                 uint32_t runtime_api_version) noexcept {
+  return max_batch == 1 && sliding_window > 0 && skip_sanitizer && runtime_api_version >= 32;
+}
+
 void ValidateQwen38DflashFeatureLayout(size_t aux_width, ONNXTensorElementDataType aux_type) {
   if (aux_width == kQwen38DflashFeatureWidth && aux_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) return;
   throw std::runtime_error("qwen38_graph: the DFlash drafter reads auxiliary hidden states of " + std::to_string(aux_width) +
@@ -930,6 +943,7 @@ void Qwen38GraphEngine::Initialize(bool is_session_recreation) {
   else if (mtp_enabled_ && !fold_)
     BuildHead();
   if (q.prefill.enabled) BuildFastPrefill();
+  bool dflash_pads_decode_steps = false;
   if (!model_.config_->model.dflash2.filename.empty()) {
     if (model_.config_->model.dflash2.is_dspark)
       throw std::runtime_error("qwen38_flash_graph does not support model.dspark");
@@ -939,13 +953,13 @@ void Qwen38GraphEngine::Initialize(bool is_session_recreation) {
       throw std::runtime_error("DFlash experiment requires the target graph to expose aux_hidden_states");
     if (model_.config_->model.dflash2.num_draft_tokens != verify_rows_ - 1)
       throw std::runtime_error("DFlash draft count must match target prefix-state width");
+    const bool skip_sanitizer = Qwen38DflashSkipsInputSanitizer();
     auto draft_config = CreateDflash2Config(*model_.config_);
     draft_config->model.embedding.filename.clear();
+    SetQwen38DflashSanitizerPolicy(*draft_config, skip_sanitizer);
     dflash_model_ = std::make_shared<Dflash2Model>(
         std::move(draft_config), GetOrtEnv(), nullptr,
         [this](OrtSessionOptions& opts) {
-          opts.AddConfigEntry("session.paged_attention.skip_input_sanitizer",
-                              Qwen38DflashSkipsInputSanitizer() ? "1" : "0");
           if (model_.pool_) model_.pool_->AddTo(opts, "dflash2");
           if (!model_.embed_values_.empty()) {
             opts.AddInitializer("model.embed_tokens.weight", *model_.embed_values_.front());
@@ -957,10 +971,12 @@ void Qwen38GraphEngine::Initialize(bool is_session_recreation) {
         is_session_recreation);
     const size_t page_size = Qwen38DflashCachePageSize(dflash_model_->session_info_,
                                                        dflash_model_->config_->model.dflash2.inputs.past_key_names);
+    dflash_pads_decode_steps = Qwen38DflashPadsDecodeSteps(max_batch_, model_.config_->model.dflash2.sliding_window,
+                                                           skip_sanitizer, Ort::runtime_api_version);
     dflash_ = std::make_unique<Dflash2Drafter>(
         dflash_model_, page_size,
         Dflash2Drafter::PoolBlocks(*model_.config_, page_size, static_cast<size_t>(max_batch_)),
-        static_cast<size_t>(max_batch_));
+        static_cast<size_t>(max_batch_), dflash_pads_decode_steps);
     dflash_->SetPinnedBlockTableWidth(true);
     ValidateQwen38DflashFeatureLayout(dflash_->AuxHiddenSize(), dflash_->AuxType());
     // The slots are drafted one after the other without draining the stream in between.
@@ -1031,6 +1047,8 @@ void Qwen38GraphEngine::Initialize(bool is_session_recreation) {
             Draft(d_dflash_prompt_.data(), r, pos, 1000, true);
             pos += r;
           }
+          // A drafter that pads its decode steps replays the one graph the first row width captured for every width.
+          if (dflash_pads_decode_steps) break;
         }
         SyncStream();
         Reset();

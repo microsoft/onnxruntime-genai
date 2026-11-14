@@ -41,6 +41,7 @@ from _qwen38_qmoe_offload_contract import (
 from _qwen38_tools_test_utils import (
     REPO_ROOT,
     prefill_chunk_problem,
+    runtime_profiles_problem,
     unknown_qwen38_graph_keys,
 )
 from onnx import TensorProto, helper, numpy_helper
@@ -483,15 +484,19 @@ def test_config_migration_and_rc5_session_options(builders):
     assert cfg_int3["model"]["context_length"] == 262144
     assert cfg_int3["search"]["max_length"] == 262144
     assert cfg_int3["engine"] == {"dynamic_batching": {"max_batch_size": 1, "max_scheduled_tokens": 8192}}
-    assert len(cfg_int3["runtime_profiles"]) == 7
-    p_128k = cfg_int3["runtime_profiles"][-2]
-    p_256k = cfg_int3["runtime_profiles"][-1]
-    assert p_128k["id"] == "gpu-128k"
+    assert len(cfg_int3["runtime_profiles"]) == 9
+    assert runtime_profiles_problem(cfg_int3["runtime_profiles"]) is None
+    by_id = {p["id"]: p for p in cfg_int3["runtime_profiles"]}
+    p_128k = by_id["gpu-128k"]
+    p_256k = by_id["gpu-256k"]
     assert p_128k["overlay"]["model"]["decoder"]["filename"] == "model.onnx"
     assert p_128k["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 525
-    assert p_256k["id"] == "gpu-256k"
     assert p_256k["overlay"]["model"]["decoder"]["filename"] == "model.onnx"
     assert p_256k["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 1037
+    assert by_id["integrated-gpu-128k"]["eligibility"]["is_integrated"] is True
+    assert by_id["integrated-gpu-128k"]["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 525
+    assert by_id["integrated-gpu-256k"]["eligibility"]["is_integrated"] is True
+    assert by_id["integrated-gpu-256k"]["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 1037
 
     # Per-model VRAM thresholds scale with QMoE size (2b375 < top08 < top16 < all_int4)
     v_2b375 = pkg.estimate_peak_vram_and_thresholds(2, 14, 32)
@@ -520,6 +525,20 @@ def test_config_migration_and_rc5_session_options(builders):
     assert "ep.cuda.qmoe_int_dequant_max_scratch_bytes" not in cfg_int4_only["model"]["decoder"]["session_options"]
     assert cfg_int4_only["model"]["qwen38_graph"]["prefill"]["chunk"] == 4096
     assert cfg_int4_only["model"]["eos_token_id"] == [248319]
+
+
+@pytest.mark.parametrize("x_int4, y_int3, z_int2", [(2, 14, 32), (8, 40, 0), (16, 32, 0), (48, 0, 0)])
+def test_default_runtime_profiles_pass_engine_validation(builders, x_int4, y_int3, z_int2):
+    profiles = builders.pkg.default_runtime_profiles("model.onnx", x_int4=x_int4, y_int3=y_int3, z_int2=z_int2)
+    assert runtime_profiles_problem(profiles) is None
+    by_id = {p["id"]: p for p in profiles}
+    for tier in ("128k", "256k"):
+        discrete, integrated = by_id[f"gpu-{tier}"], by_id[f"integrated-gpu-{tier}"]
+        # A unified-memory tier is the discrete tier gated on free instead of total device memory.
+        assert integrated["overlay"] == discrete["overlay"]
+        minimum = discrete["eligibility"]["minimum_total_device_memory_bytes"]
+        assert integrated["eligibility"]["minimum_free_device_memory_bytes"] == minimum
+        assert integrated["eligibility"]["minimum_total_device_memory_bytes"] == minimum
 
 
 def test_procedural_graph_builders_emit_complete_onnx_models_without_templates(builders):

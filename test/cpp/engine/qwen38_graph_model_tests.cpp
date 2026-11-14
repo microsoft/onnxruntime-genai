@@ -2307,6 +2307,34 @@ TEST(Qwen38DflashSanitizerTest, AValueThatIsNotABooleanIsRefusedNamingTheSwitch)
   }
 }
 
+// Dflash2Drafter decides whether it may pad from the projected config, not from the session options, so the policy the
+// session runs with has to be recorded there, replacing what the package set.
+TEST(Qwen38DflashSanitizerTest, ThePolicyIsRecordedInTheDrafterConfig) {
+  constexpr const char* kPolicy = "session.paged_attention.skip_input_sanitizer";
+  for (const bool skip : {true, false}) {
+    Config config;
+    auto& entries = config.model.decoder.session_options.config_entries;
+    entries.emplace_back(kPolicy, skip ? "0" : "1");
+    entries.emplace_back("session.other", "x");
+    SetQwen38DflashSanitizerPolicy(config, skip);
+    const std::vector<Config::NamedString> expected{{"session.other", "x"}, {kPolicy, skip ? "1" : "0"}};
+    EXPECT_EQ(entries, expected) << skip;
+  }
+  Config config;
+  SetQwen38DflashSanitizerPolicy(config, true);
+  EXPECT_EQ(config.model.decoder.session_options.config_entries, (std::vector<Config::NamedString>{{kPolicy, "1"}}));
+}
+
+TEST(Qwen38DflashSanitizerTest, DecodeStepsArePaddedOnlyWhenTheRuntimeKeepsTheLogicalLengths) {
+  EXPECT_TRUE(Qwen38DflashPadsDecodeSteps(1, 2048, true, 32));
+  EXPECT_TRUE(Qwen38DflashPadsDecodeSteps(1, 2048, true, 33));
+  // Otherwise every step short of a full block would run eagerly: the drafter keeps one graph per row count.
+  EXPECT_FALSE(Qwen38DflashPadsDecodeSteps(1, 2048, true, 31));   // the sanitizer extends the lengths to the padded rows
+  EXPECT_FALSE(Qwen38DflashPadsDecodeSteps(1, 2048, false, 33));  // ORT_PAGED_ATTENTION_SKIP_SANITIZER=0 keeps it
+  EXPECT_FALSE(Qwen38DflashPadsDecodeSteps(2, 2048, true, 33));   // fixed proposals serve a single request
+  EXPECT_FALSE(Qwen38DflashPadsDecodeSteps(1, 0, true, 33));      // fixed proposals need a windowed drafter
+}
+
 TEST(Qwen38PromptTokenTest, AcceptsEveryIdOfTheVocabulary) {
   const std::vector<int32_t> tokens = {0, 1, 1000, 248319};
   EXPECT_NO_THROW(ValidateQwen38PromptTokens(tokens, 248320));

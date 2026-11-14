@@ -286,7 +286,8 @@ inline constexpr int Qwen38WarmupRuns(bool session_captures_graph) noexcept {
 
 // What the DFlash engine runs while its model is created. model.qwen38_graph.warmup=false opts out of all of it, as for the
 // other paths: no forward, hence no CUDA graph captured and no startup cost, for the drafter or for the target. With
-// warmup=true the drafter ingests a warm-up prompt and drafts every row width (`drafter`) and `target_tokens` dummy prompt
+// warmup=true the drafter ingests a warm-up prompt and drafts every row width (`drafter`; a drafter that pads its decode steps,
+// see Qwen38DflashPadsDecodeSteps, replays one graph for all of them and drafts the first only) and `target_tokens` dummy prompt
 // tokens step through the S=verify_rows target graphs, enough runs of every (rows, ring bank) graph to capture it unless
 // the target offloads experts (its warmup stays eager; see CreateQwen38OffloadWarmupRunOptions).
 struct Qwen38DflashWarmupPlan {
@@ -300,6 +301,19 @@ Qwen38DflashWarmupPlan PlanQwen38DflashWarmup(bool warmup, int verify_rows, int 
 // =1 (or true) skips it; any other non-empty value throws std::invalid_argument, as for every boolean switch of
 // models/env_utils.h.
 bool Qwen38DflashSkipsInputSanitizer();
+
+// Records `skip_sanitizer` as session.paged_attention.skip_input_sanitizer in the decoder session options of the DFlash
+// drafter's projected config, replacing any value the package set: the drafter session is created from these entries, and
+// Dflash2Drafter reads the policy back from them to decide whether it may pad a decode step to its fixed shape.
+void SetQwen38DflashSanitizerPolicy(Config& drafter_config, bool skip_sanitizer);
+
+// Whether the DFlash drafter of an engine with `max_batch` slots runs Dflash2Drafter's fixed single-request mode, which pads
+// every decode step of 1..block_size committed rows into one captured graph. Padding needs a single slot, a windowed drafter
+// (`sliding_window` > 0) and an ONNX Runtime that keeps the drafter's logical lengths: API 32 or later with the paged attention
+// input sanitizer skipped. Otherwise a fixed drafter would run every step short of a full block eagerly, so the drafter keeps
+// one captured graph per row count instead.
+bool Qwen38DflashPadsDecodeSteps(int max_batch, int sliding_window, bool skip_sanitizer,
+                                 uint32_t runtime_api_version) noexcept;
 
 // The rows of target features the engine hands the DFlash drafter (the auxiliary hidden states of the target, five layers of
 // 2560 values) are this many bfloat16 values wide.

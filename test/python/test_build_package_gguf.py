@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import errno
 import hashlib
 import importlib.util
@@ -26,7 +27,11 @@ BUILDER_TEST_DIR = Path(__file__).resolve().parent / "builder"
 if str(BUILDER_TEST_DIR) not in sys.path:
     sys.path.insert(0, str(BUILDER_TEST_DIR))
 
-from _qwen38_tools_test_utils import prefill_chunk_problem, unknown_qwen38_graph_keys  # noqa: E402
+from _qwen38_tools_test_utils import (  # noqa: E402
+    prefill_chunk_problem,
+    runtime_profiles_problem,
+    unknown_qwen38_graph_keys,
+)
 
 
 @pytest.fixture
@@ -119,19 +124,46 @@ def test_gguf_runtime_profiles_and_block_counts(package_builder, weight_bytes, e
 
     cfg = package_builder.default_base_genai_config()
     package_builder.configure_gguf_genai_config(cfg, total_weight_bytes=weight_bytes)
+    assert runtime_profiles_problem(cfg["runtime_profiles"]) is None
     profiles = {p["id"]: p for p in cfg["runtime_profiles"]}
-    assert list(profiles) == ["gpu-32k", "gpu-64k", "gpu-128k", "gpu-256k"]
+    assert list(profiles) == [
+        "gpu-32k",
+        "gpu-64k",
+        "gpu-128k",
+        "gpu-256k",
+        "integrated-gpu-32k",
+        "integrated-gpu-64k",
+        "integrated-gpu-128k",
+        "integrated-gpu-256k",
+    ]
     assert profiles["gpu-32k"]["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 142
     assert profiles["gpu-32k"]["overlay"]["search"]["chunk_size"] == 4096
     assert profiles["gpu-64k"]["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 270
     assert profiles["gpu-128k"]["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 525
     assert profiles["gpu-256k"]["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 1037
+    assert profiles["integrated-gpu-32k"]["eligibility"]["is_integrated"] is True
+    assert profiles["integrated-gpu-256k"]["eligibility"]["is_integrated"] is True
+    assert profiles["integrated-gpu-256k"]["overlay"]["engine"]["dynamic_batching"]["num_blocks"] == 1037
+    assert (
+        profiles["integrated-gpu-32k"]["eligibility"]["minimum_free_device_memory_bytes"],
+        profiles["integrated-gpu-64k"]["eligibility"]["minimum_free_device_memory_bytes"],
+        profiles["integrated-gpu-128k"]["eligibility"]["minimum_free_device_memory_bytes"],
+        profiles["integrated-gpu-256k"]["eligibility"]["minimum_free_device_memory_bytes"],
+    ) == expected_mins
     assert (
         profiles["gpu-32k"]["eligibility"]["minimum_total_device_memory_bytes"],
         profiles["gpu-64k"]["eligibility"]["minimum_total_device_memory_bytes"],
         profiles["gpu-128k"]["eligibility"]["minimum_total_device_memory_bytes"],
         profiles["gpu-256k"]["eligibility"]["minimum_total_device_memory_bytes"],
     ) == expected_mins
+    for tier in ("32k", "64k", "128k", "256k"):
+        assert profiles[f"integrated-gpu-{tier}"]["overlay"] == profiles[f"gpu-{tier}"]["overlay"]
+    # The engine refuses the whole config when a profile lacks minimum_total_device_memory_bytes.
+    unbounded = copy.deepcopy(cfg["runtime_profiles"])
+    del unbounded[-1]["eligibility"]["minimum_total_device_memory_bytes"]
+    assert runtime_profiles_problem(unbounded) == (
+        "runtime profile 'integrated-gpu-256k' is missing minimum_total_device_memory_bytes"
+    )
     assert cfg["model"]["qwen38_graph"]["plane_library"] == ""
     assert "ep.cuda.qmoe_int_dequant_max_scratch_bytes" not in cfg["model"]["decoder"]["session_options"]
     assert cfg["model"]["bot_token_id"] == 248058
@@ -1297,13 +1329,25 @@ def _assert_valid_exported_package(out_dir: Path, *, expected_ple_format: str = 
     assert prefill_chunk_problem(qwen_sec) is None
     assert qwen_sec["plane_library"] == ""
     profiles = cfg["runtime_profiles"]
-    assert [p["id"] for p in profiles] == ["gpu-32k", "gpu-64k", "gpu-128k", "gpu-256k"]
+    assert runtime_profiles_problem(profiles) is None
+    assert [p["id"] for p in profiles] == [
+        "gpu-32k",
+        "gpu-64k",
+        "gpu-128k",
+        "gpu-256k",
+        "integrated-gpu-32k",
+        "integrated-gpu-64k",
+        "integrated-gpu-128k",
+        "integrated-gpu-256k",
+    ]
     assert profiles[0]["overlay"]["search"]["chunk_size"] == 4096
-    for prev_p, next_p in pairwise(profiles):
-        assert (
-            prev_p["eligibility"]["maximum_total_device_memory_bytes"] + 1
-            == next_p["eligibility"]["minimum_total_device_memory_bytes"]
-        )
+    for tiers, memory_kind, integrated in ((profiles[:4], "total", False), (profiles[4:], "free", True)):
+        assert all(p["eligibility"]["is_integrated"] is integrated for p in tiers)
+        for prev_p, next_p in pairwise(tiers):
+            assert (
+                prev_p["eligibility"][f"maximum_{memory_kind}_device_memory_bytes"] + 1
+                == next_p["eligibility"][f"minimum_{memory_kind}_device_memory_bytes"]
+            )
     return models
 
 
