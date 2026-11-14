@@ -1410,6 +1410,7 @@ class Model:
                 "do_sample": False,
                 "eos_token_id": None,
                 "pad_token_id": None,
+                "repetition_penalty": 1.0,
                 "temperature": 1.0,
                 "top_k": 50,
                 "top_p": 1.0,
