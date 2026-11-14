@@ -5,6 +5,7 @@
 
 #include <array>
 #include <filesystem>
+#include <ios>
 #include <limits>
 #include <memory>
 #include <string>
@@ -15,6 +16,11 @@
 #include "../models/model.h"
 
 namespace Generators {
+
+// Only disk seek/read failures use this type; device transfers and cache contracts remain fatal.
+struct PrefixSnapshotReadError : std::ios_base::failure {
+  using std::ios_base::failure::failure;
+};
 
 // Storage policy is independent of prefix identity and the contents of the snapshot.
 class PrefixSnapshotCache {
@@ -49,6 +55,12 @@ class PrefixSnapshotCache {
     void Write(size_t layer, Tensor& source, std::span<const Range> ranges);
     void Read(size_t layer, Tensor& destination, std::span<const Range> ranges) const;
     void Flush();
+    void AddPackedBuffer(std::span<const Range> ranges);
+    void PrepareStorage();
+    void AllocateStorage(Tier storage_tier, DeviceInterface* device, const std::filesystem::path& directory,
+                         const std::shared_ptr<Accounting>& owner);
+    void Release() noexcept;
+    void TakeStorage(Entry& source) noexcept;
 
     State state{State::Empty};
     Tier tier{Tier::Ram};
@@ -58,16 +70,13 @@ class PrefixSnapshotCache {
     ONNXTensorElementDataType type{ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED};
     std::vector<std::shared_ptr<void>> host_buffers;
     std::vector<std::unique_ptr<Tensor>> caches;
+    std::string component;
 
    private:
-    friend class PrefixSnapshotCache;
     struct DiskStorage;
     std::shared_ptr<Accounting> accounting;
     std::unique_ptr<DiskStorage> disk;
-    std::string component;
     std::vector<size_t> layer_offsets;
-    void Release() noexcept;
-    void TakeStorage(Entry& source) noexcept;
     void* TransferBuffer(DeviceInterface* device) const;
   };
 
@@ -76,17 +85,20 @@ class PrefixSnapshotCache {
   bool Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device,
                 std::string_view component = {},
                 size_t component_max_entries = std::numeric_limits<size_t>::max());
+  bool Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device,
+                std::string_view component, size_t component_max_entries, bool preserve_existing);
   void Touch(const Entry& entry) noexcept;
   void Discard(const Entry& entry) noexcept;
   const std::array<size_t, 3>& Used() const noexcept { return accounting_->used; }
+  bool SetDeviceMemoryLimit(size_t bytes, DeviceInterface* device);
 
  private:
   void LogEvent(const char* action, const Entry* entry = nullptr,
                 const char* reason = "none", int64_t elapsed_us = 0) const noexcept;
   bool MakeRoom(Tier tier, size_t bytes, DeviceInterface* device);
+  size_t Limit(Tier tier) const;
   void DisableDisk(const std::system_error& error);
   void Move(Entry& entry, Tier tier, DeviceInterface* device);
-  void AllocateStorage(Entry& entry, Tier tier, DeviceInterface* device);
   void Prune();
   size_t Count(std::string_view component) const;
   bool EvictOldest(std::string_view component = {});
@@ -96,11 +108,15 @@ class PrefixSnapshotCache {
   size_t max_entries_;
   std::filesystem::path directory_;
   bool device_resident_;
+  std::optional<size_t> device_memory_limit_;
   bool disk_writes_disabled_{};
   std::shared_ptr<Accounting> accounting_{std::make_shared<Accounting>()};
   // The prefix index is the only non-lease owner. Extra strong references protect adoption.
   std::vector<std::weak_ptr<Entry>> entries_;
   uint64_t clock_{};
 };
+
+bool IsPrefixCachingRequested(const Config& config);
+std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config& config);
 
 }  // namespace Generators

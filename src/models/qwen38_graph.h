@@ -8,6 +8,7 @@
 // captured graphs) and implements Qwen38DecodeDevice, the interface the Engine executor drives
 // (src/engine/qwen38_graph_executor.h). The model is served by the Engine API only; there is no Generator state.
 #pragma once
+#include "engine/native-device-memory-budget.h"
 
 #include <array>
 #include <atomic>
@@ -26,6 +27,7 @@
 
 #include "engine/backend_capabilities.h"
 #include "engine/prefix_snapshot_cache.h"
+#include "state-checkpoint.h"
 #include "model.h"
 #include "../dflash2_drafter.h"
 #include "qwen38_decode_device.h"
@@ -45,16 +47,12 @@ bool Qwen38PrefixCheckpointEligible(bool dflash, const std::optional<Qwen38Dflas
 bool ShouldCaptureQwen38Prefix(size_t remaining, size_t chunk_tokens, bool dflash,
                                const std::optional<Qwen38DflashPromptFeatures::Chunk>& saved, size_t context_window);
 
-// Packed ranges for fixed-capacity KV/index rows, positions, hidden features, or a full recurrent/dense tensor.
-std::vector<PrefixSnapshotCache::Entry::Range> PlanQwen38PrefixRanges(
-    const std::string& name, const std::vector<int64_t>& shape, size_t element_bytes,
-    size_t tensor_bytes, size_t length, bool index = false);
-
 // A fixed-address device tensor plus the OrtValue that names it in IO bindings.
 struct DevTensor {
   uint8_t* ptr{};
   std::vector<int64_t> shape;
   ONNXTensorElementDataType type{ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED};
+  StateCheckpointLayout checkpoint_layout;
   std::unique_ptr<OrtValue> value;
   size_t Bytes() const;
 };
@@ -286,7 +284,8 @@ inline constexpr int Qwen38WarmupRuns(bool session_captures_graph) noexcept {
 
 // What the DFlash engine runs while its model is created. model.qwen38_graph.warmup=false opts out of all of it, as for the
 // other paths: no forward, hence no CUDA graph captured and no startup cost, for the drafter or for the target. With
-// warmup=true the drafter ingests a warm-up prompt and drafts every row width (`drafter`) and `target_tokens` dummy prompt
+// warmup=true the drafter ingests a warm-up prompt and drafts every row width (`drafter`; a drafter that pads its decode steps,
+// see Qwen38DflashPadsDecodeSteps, replays one graph for all of them and drafts the first only) and `target_tokens` dummy prompt
 // tokens step through the S=verify_rows target graphs, enough runs of every (rows, ring bank) graph to capture it unless
 // the target offloads experts (its warmup stays eager; see CreateQwen38OffloadWarmupRunOptions).
 struct Qwen38DflashWarmupPlan {
@@ -300,6 +299,19 @@ Qwen38DflashWarmupPlan PlanQwen38DflashWarmup(bool warmup, int verify_rows, int 
 // =1 (or true) skips it; any other non-empty value throws std::invalid_argument, as for every boolean switch of
 // models/env_utils.h.
 bool Qwen38DflashSkipsInputSanitizer();
+
+// Records `skip_sanitizer` as session.paged_attention.skip_input_sanitizer in the decoder session options of the DFlash
+// drafter's projected config, replacing any value the package set: the drafter session is created from these entries, and
+// Dflash2Drafter reads the policy back from them to decide whether it may pad a decode step to its fixed shape.
+void SetQwen38DflashSanitizerPolicy(Config& drafter_config, bool skip_sanitizer);
+
+// Whether the DFlash drafter of an engine with `max_batch` slots runs Dflash2Drafter's fixed single-request mode, which pads
+// every decode step of 1..block_size committed rows into one captured graph. Padding needs a single slot, a windowed drafter
+// (`sliding_window` > 0) and an ONNX Runtime that keeps the drafter's logical lengths: API 32 or later with the paged attention
+// input sanitizer skipped. Otherwise a fixed drafter would run every step short of a full block eagerly, so the drafter keeps
+// one captured graph per row count instead.
+bool Qwen38DflashPadsDecodeSteps(int max_batch, int sliding_window, bool skip_sanitizer,
+                                 uint32_t runtime_api_version) noexcept;
 
 // The rows of target features the engine hands the DFlash drafter (the auxiliary hidden states of the target, five layers of
 // 2560 values) are this many bfloat16 values wide.
@@ -849,6 +861,8 @@ struct Qwen38GraphEngine final : Qwen38DecodeDevice {
   static constexpr int kRing = 64;
   static constexpr int kArgmaxBlocks = 16;
 
+  std::unique_ptr<StateCheckpointDescription> state_description_;
+  void DescribeState();
   // target state
   std::map<std::string, std::unique_ptr<DevTensor>> store_;                 // in-place KV / positions
   std::map<std::string, std::unique_ptr<DevTensor>> shared_;                // index_key buffers
@@ -991,6 +1005,7 @@ struct Qwen38GraphModel : Model {
 
   // Declaration order = reverse destruction order: the engine and the sessions go first, then the shared weights / constants
   // they were given, then the plane library.
+  NativeDeviceMemoryBudget memory_budget_;
   std::unique_ptr<Qwen38Plane> plane_;
   std::unique_ptr<Qwen38WeightPool> pool_;
   std::unique_ptr<Qwen38FileMapping> embed_mapping_;

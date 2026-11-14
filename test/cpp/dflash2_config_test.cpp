@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <random>
 #include <sstream>
@@ -25,6 +26,7 @@
 #include "dflash2_drafter.h"
 #include "engine/cache_manager.h"
 #include "engine/engine.h"
+#include "engine/native-device-memory-budget.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
 #include "ep/webgpu/session_options.h"
@@ -228,7 +230,7 @@ class CheckpointAllocationDevice final : public DeviceInterface {
   }
   std::shared_ptr<void> AllocatePinnedHost(size_t bytes) override {
     ++host_allocations;
-    if (fail_host_allocation) {
+    if (fail_host_allocation || host_allocations == fail_host_allocation_number) {
       throw std::bad_alloc{};
     }
     void* memory = inner_.GetAllocator().Alloc(bytes);
@@ -237,6 +239,7 @@ class CheckpointAllocationDevice final : public DeviceInterface {
     });
   }
   void CopyDeviceToHost(void* host, const void* device, size_t bytes) override {
+    if (fail_download) throw std::runtime_error("Injected snapshot transfer failure.");
     downloaded_bytes += bytes;
     std::memcpy(host, device, bytes);
   }
@@ -248,6 +251,8 @@ class CheckpointAllocationDevice final : public DeviceInterface {
   size_t uploaded_bytes{};
   size_t host_allocations{};
   bool fail_host_allocation{};
+  size_t fail_host_allocation_number{};
+  bool fail_download{};
   bool opaque_buffer_handles{};
   size_t buffer_downloads{};
   size_t buffer_uploads{};
@@ -2533,6 +2538,34 @@ TEST_P(PrefixSnapshotTransferTest, RemapsSelectedBlocksAndPreservesUntouchedByte
 
 INSTANTIATE_TEST_SUITE_P(CpuAndHostTransfers, PrefixSnapshotTransferTest, ::testing::Bool());
 
+TEST(Dflash2ConfigTest, OptionalSnapshotPublicationUsesSpareCapacityWithoutEviction) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  for (const auto& [bytes, max_entries, component_entries] :
+       {std::tuple<size_t, size_t, size_t>{16, 2, 2}, {32, 1, 2}, {32, 2, 1}, {32, 2, 2}}) {
+    SCOPED_TRACE(bytes);
+    SCOPED_TRACE(max_entries);
+    SCOPED_TRACE(component_entries);
+    PrefixSnapshotCache storage{{0, bytes, 0}, max_entries};
+    const auto make_entry = [] {
+      auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
+      entry->type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+      entry->shapes = {{16}};
+      return entry;
+    };
+    auto earlier = make_entry();
+    ASSERT_TRUE(storage.Allocate(earlier, device, "window", component_entries, true));
+    auto terminal = make_entry();
+    const bool spare = bytes == 32 && max_entries == 2 && component_entries == 2;
+    EXPECT_EQ(storage.Allocate(terminal, device, "window", component_entries, true), spare);
+    EXPECT_EQ(earlier->state, PrefixSnapshotCache::State::Resident);
+    EXPECT_EQ(storage.Used()[1], spare ? 32u : 16u);
+    if (!spare) {
+      ASSERT_TRUE(storage.Allocate(terminal, device, "window", component_entries));
+      EXPECT_EQ(earlier->state, PrefixSnapshotCache::State::Evicted);
+    }
+  }
+}
+
 TEST(Dflash2ConfigTest, HostSnapshotProtectsLeasesAndOutlivesDrafter) {
   auto config = MakeDflash2Config();
   config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
@@ -2646,11 +2679,12 @@ std::shared_ptr<PrefixSnapshotCache::Entry> MakeStorageEntry(PrefixSnapshotCache
                                                              DeviceInterface* device,
                                                              std::string_view component = {},
                                                              size_t component_limit =
-                                                                 std::numeric_limits<size_t>::max()) {
+                                                                 std::numeric_limits<size_t>::max(),
+                                                             bool preserve_existing = false) {
   auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
   entry->shapes = {{16}};
   entry->type = Ort::TypeToTensorType<uint8_t>;
-  if (!cache.Allocate(entry, device, component, component_limit)) return nullptr;
+  if (!cache.Allocate(entry, device, component, component_limit, preserve_existing)) return nullptr;
   Tensor source{GetDeviceInterface(DeviceType::CPU), entry->type};
   source.CreateTensor(std::array<int64_t, 1>{32});
   std::array<uint8_t, 32> values{};
@@ -2888,6 +2922,99 @@ TEST(PrefixSnapshotCacheTest, LegacyDeviceStorageReusesSnapshotsWithoutTierBudge
   }
 }
 
+TEST(PrefixSnapshotCacheTest, DeviceMemoryCapBoundsResidentStorageAndCompatibleReuse) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  PrefixSnapshotCache cache{{0, 0, 0}, 1, {}, true};
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(16, cpu));
+  auto first = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(first, nullptr);
+  auto replacement = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(replacement, nullptr);
+  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(cache.Used()[0], 16u);
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(15, cpu));
+  EXPECT_EQ(replacement->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(MakeStorageEntry(cache, cpu), nullptr);
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(0, cpu));
+  EXPECT_EQ(MakeStorageEntry(cache, cpu), nullptr);
+  EXPECT_EQ(cache.Used()[0], 0u);
+}
+
+TEST(PrefixSnapshotCacheTest, DeviceMemoryCapDemotesToHostTiersWithoutWideningConfiguredVram) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, true};
+  PrefixSnapshotCache cache{{16, 32, 0}, 3};
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(32, &device));
+  auto first = MakeStorageEntry(cache, &device);
+  auto second = MakeStorageEntry(cache, &device);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(first->tier, PrefixSnapshotCache::Tier::Ram);
+  EXPECT_EQ(second->tier, PrefixSnapshotCache::Tier::Vram);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{16, 16, 0}));
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(0, &device));
+  EXPECT_EQ(second->tier, PrefixSnapshotCache::Tier::Ram);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 32, 0}));
+  CheckStorageEntry(*first);
+  CheckStorageEntry(*second);
+}
+
+TEST(PrefixSnapshotCacheTest, ShrinkingDeviceMemoryCapDoesNotEvictLeasedStorageOrUnderflow) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  PrefixSnapshotCache cache{{0, 0, 0}, 1, {}, true};
+  auto first = MakeStorageEntry(cache, cpu);
+  ASSERT_NE(first, nullptr);
+  auto lease = first;
+  EXPECT_FALSE(cache.SetDeviceMemoryLimit(0, cpu));
+  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(MakeStorageEntry(cache, cpu), nullptr);
+  CheckStorageEntry(*first);
+  lease.reset();
+  EXPECT_TRUE(cache.SetDeviceMemoryLimit(0, cpu));
+  EXPECT_EQ(first->state, PrefixSnapshotCache::State::Evicted);
+  EXPECT_EQ(cache.Used()[0], 0u);
+}
+
+TEST(PrefixSnapshotCacheTest, ShrinkingDeviceMemoryCapFallsBackOrEvictsWhenPinnedAllocationFails) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  for (size_t disk_bytes : {size_t{0}, size_t{16}}) {
+    SCOPED_TRACE(disk_bytes);
+    CheckpointAllocationDevice device{*cpu, true};
+    PrefixSnapshotCache cache{{16, 16, disk_bytes}, 1};
+    auto entry = MakeStorageEntry(cache, &device);
+    ASSERT_NE(entry, nullptr);
+    ASSERT_EQ(entry->tier, PrefixSnapshotCache::Tier::Vram);
+    device.fail_host_allocation_number = device.host_allocations + 1;
+    ASSERT_TRUE(cache.SetDeviceMemoryLimit(0, &device));
+    if (disk_bytes) {
+      EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Resident);
+      EXPECT_EQ(entry->tier, PrefixSnapshotCache::Tier::Disk);
+      EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 0, 16}));
+      CheckStorageEntry(*entry);
+    } else {
+      EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Evicted);
+      EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 0, 0}));
+    }
+  }
+}
+
+TEST(PrefixSnapshotCacheTest, ShrinkingDeviceMemoryCapStillPropagatesTransferFailures) {
+  auto* cpu = GetDeviceInterface(DeviceType::CPU);
+  CheckpointAllocationDevice device{*cpu, true};
+  PrefixSnapshotCache cache{{16, 16, 0}, 1};
+  auto entry = MakeStorageEntry(cache, &device);
+  ASSERT_NE(entry, nullptr);
+  device.fail_download = true;
+  EXPECT_THROW(cache.SetDeviceMemoryLimit(0, &device), std::runtime_error);
+  EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Resident);
+  EXPECT_EQ(entry->tier, PrefixSnapshotCache::Tier::Vram);
+  EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{16, 0, 0}));
+  device.fail_download = false;
+  ASSERT_TRUE(cache.SetDeviceMemoryLimit(0, &device));
+  EXPECT_EQ(entry->tier, PrefixSnapshotCache::Tier::Ram);
+  CheckStorageEntry(*entry);
+}
+
 TEST(PrefixSnapshotCacheTest, WebGpuReservationHonorsCountsAndPreservesTargetCapacity) {
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
   auto* cpu = model->p_device_kvcache_;
@@ -2961,6 +3088,8 @@ TEST(PrefixSnapshotCacheTest, OrtAllocationFailurePreservesAccountingAndAllowsRe
   auto allocator = Ort::Allocator::Create(*model->session_decoder_, cpu->GetAllocator().GetInfo());
   static_cast<OrtAllocator&>(*allocator).Alloc =
       [](OrtAllocator*, size_t) -> void* { throw std::bad_alloc{}; };
+  static_cast<OrtAllocator&>(*allocator).Reserve =
+      [](OrtAllocator*, size_t) -> void* { throw std::bad_alloc{}; };
   CheckpointAllocationDevice failing_device{*cpu, true, allocator.get()};
   PrefixSnapshotCache cache{{16, 0, 0}, 1};
   auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
@@ -2975,6 +3104,55 @@ TEST(PrefixSnapshotCacheTest, OrtAllocationFailurePreservesAccountingAndAllowsRe
   EXPECT_EQ(entry->state, PrefixSnapshotCache::State::Resident);
   EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{16, 0, 0}));
 }
+
+#if USE_CUDA
+TEST(PrefixSnapshotCacheTest, CudaSizeChurnReclaimsPhysicalBackingBeforeBudgetRefresh) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto* device = model->p_device_;
+  ASSERT_EQ(device->GetType(), DeviceType::CUDA);
+  size_t initial_free, total;
+  device->Synchronize();
+  device->GetAvailableMemory(initial_free, total);
+  model->device_memory_budget_initial_free_bytes_ = initial_free;
+  constexpr size_t mib = 1024 * 1024;
+  Config::Engine::DynamicBatching settings;
+  settings.device_memory_budget_bytes = 64 * mib;
+  settings.device_memory_headroom_bytes = 4 * mib;
+  auto cache = std::make_shared<PrefixSnapshotCache>(
+      std::array<size_t, 3>{64 * mib, 64 * mib, 0}, 1);
+  NativeDeviceMemoryBudget budget{*model};
+  budget.Configure(settings, cache);
+  for (size_t size : {16 * mib, 32 * mib, 8 * mib, 24 * mib}) {
+    SCOPED_TRACE(size);
+    ASSERT_NO_THROW(budget.Refresh());
+    auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
+    entry->type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+    entry->shapes = {{static_cast<int64_t>(size)}};
+    ASSERT_TRUE(cache->Allocate(entry, device));
+    ASSERT_EQ(entry->tier, PrefixSnapshotCache::Tier::Vram);
+    device->Synchronize();
+    size_t resident_free;
+    device->GetAvailableMemory(resident_free, total);
+    const auto allowance = NativeSnapshotDeviceMemoryLimit(
+        settings, initial_free, resident_free, cache->Used()[0]);
+    std::cout << "snapshot_churn bytes=" << size << " physical_free=" << resident_free
+              << " logical_vram=" << cache->Used()[0] << " limit=" << *allowance << '\n';
+    ASSERT_NO_THROW(budget.Refresh());
+    ASSERT_TRUE(cache->SetDeviceMemoryLimit(0, device));
+    device->Synchronize();
+    size_t reclaimed_free;
+    device->GetAvailableMemory(reclaimed_free, total);
+    std::cout << "snapshot_reclaimed physical_free=" << reclaimed_free
+              << " logical_vram=" << cache->Used()[0] << " limit=0\n";
+    EXPECT_EQ(cache->Used()[0], 0u);
+    EXPECT_GE(reclaimed_free, resident_free + size);
+    EXPECT_NO_THROW(budget.Refresh());
+  }
+}
+#endif
 
 TEST(PrefixSnapshotCacheTest, VramReservationPreservesTargetBlockAndConfiguredLimit) {
   auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
@@ -3244,6 +3422,8 @@ TEST(PrefixSnapshotCacheTest, FailedDemotionDisablesDiskAndReclaimsUnleasedVicti
   EXPECT_EQ(cache.Used(), (std::array<size_t, 3>{0, 16, 0}));
   EXPECT_TRUE(fs_std::is_empty(parent));
   CheckStorageEntry(*third);
+  EXPECT_EQ(MakeStorageEntry(cache, cpu, {}, 8, true), nullptr);
+  EXPECT_TRUE(fs_std::is_empty(parent));
   first.reset();
   second.reset();
   third.reset();
@@ -3252,18 +3432,21 @@ TEST(PrefixSnapshotCacheTest, FailedDemotionDisablesDiskAndReclaimsUnleasedVicti
 
 TEST(PrefixSnapshotCacheTest, DiskAllocationFailureIsNotRetriedUntilRecreation) {
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
-  ScopedSnapshotDirectory test_directory{"oga-snapshot-allocation-failure"};
-  const auto& parent = test_directory.Path();
-  PrefixSnapshotCache cache{{0, 0, 16}, 1, parent};
-  ASSERT_TRUE(fs_std::remove(parent));
-  EXPECT_THROW(MakeStorageEntry(cache, cpu), std::system_error);
-  ASSERT_TRUE(fs_std::create_directory(parent));
-  EXPECT_EQ(MakeStorageEntry(cache, cpu), nullptr);
-  EXPECT_TRUE(fs_std::is_empty(parent));
-  PrefixSnapshotCache recreated{{0, 0, 16}, 1, parent};
-  auto entry = MakeStorageEntry(recreated, cpu);
-  ASSERT_NE(entry, nullptr);
-  CheckStorageEntry(*entry);
+  for (bool preserve_existing : {false, true}) {
+    SCOPED_TRACE(preserve_existing);
+    ScopedSnapshotDirectory test_directory{"oga-snapshot-allocation-failure"};
+    const auto& parent = test_directory.Path();
+    PrefixSnapshotCache cache{{0, 0, 16}, 1, parent};
+    ASSERT_TRUE(fs_std::remove(parent));
+    EXPECT_THROW(MakeStorageEntry(cache, cpu, {}, 1, preserve_existing), std::system_error);
+    ASSERT_TRUE(fs_std::create_directory(parent));
+    EXPECT_EQ(MakeStorageEntry(cache, cpu, {}, 1, preserve_existing), nullptr);
+    EXPECT_TRUE(fs_std::is_empty(parent));
+    PrefixSnapshotCache recreated{{0, 0, 16}, 1, parent};
+    auto entry = MakeStorageEntry(recreated, cpu, {}, 1, preserve_existing);
+    ASSERT_NE(entry, nullptr);
+    CheckStorageEntry(*entry);
+  }
 }
 
 #ifndef _WIN32
@@ -3443,5 +3626,47 @@ TEST(Dflash2ConfigTest, DoesNotWarnAboutDraftWidthWithoutABlockDrafter) {
   config.speculative.max_draft_tokens = 16;
   EXPECT_EQ(CapturedDraftWidthWarnings(config), "");
 }
+
+#if USE_CUDA
+TEST(PrefixSnapshotCacheTest, CudaSizeChurnReclaimsPhysicalBacking) {
+  if (!std::getenv("ORTGENAI_TEST_CUDA_SNAPSHOT_CHURN")) {
+    GTEST_SKIP() << "Set ORTGENAI_TEST_CUDA_SNAPSHOT_CHURN with an admitted CUDA device and registered CUDA EP";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto* device = model->p_device_;
+  ASSERT_EQ(device->GetType(), DeviceType::CUDA);
+  size_t initial_free, total;
+  device->Synchronize();
+  device->GetAvailableMemory(initial_free, total);
+  constexpr size_t mib = 1024 * 1024;
+  auto cache = std::make_shared<PrefixSnapshotCache>(
+      std::array<size_t, 3>{64 * mib, 64 * mib, 0}, 1);
+  for (size_t size : {16 * mib, 32 * mib, 8 * mib, 24 * mib}) {
+    SCOPED_TRACE(size);
+    ASSERT_TRUE(cache->SetDeviceMemoryLimit(64 * mib, device));
+    auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
+    entry->type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+    entry->shapes = {{static_cast<int64_t>(size)}};
+    ASSERT_TRUE(cache->Allocate(entry, device));
+    ASSERT_EQ(entry->tier, PrefixSnapshotCache::Tier::Vram);
+    device->Synchronize();
+    size_t resident_free;
+    device->GetAvailableMemory(resident_free, total);
+    std::cout << "snapshot_churn bytes=" << size << " physical_free=" << resident_free
+              << " logical_vram=" << cache->Used()[0] << '\n';
+    ASSERT_TRUE(cache->SetDeviceMemoryLimit(0, device));
+    device->Synchronize();
+    size_t reclaimed_free;
+    device->GetAvailableMemory(reclaimed_free, total);
+    std::cout << "snapshot_reclaimed physical_free=" << reclaimed_free
+              << " logical_vram=" << cache->Used()[0] << " limit=0\n";
+    EXPECT_EQ(cache->Used()[0], 0u);
+    EXPECT_GE(reclaimed_free, resident_free + size);
+  }
+}
+#endif
 
 }  // namespace Generators::test

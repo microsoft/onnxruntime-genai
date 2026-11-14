@@ -205,6 +205,34 @@ def _link_package_asset(link_path: Path, target: Path) -> None:
             _winapi.CreateJunction(str(target), str(link_path))
         else:
             os.link(target, link_path)
+
+
+def _needs_windows_builtin_plane_overlay(package: Path, package_config: dict, *overlays: dict | None) -> bool:
+    """Return True on Windows when `plane_library` names an existing `.so` with no `.dll` alias and no overlay sets it.
+
+    The engine loads such a `.so` as configured, which fails on Windows (see ResolveWindowsSharedLibraryPath in
+    src/models/qwen38_graph_plane.cpp, whose `.dll` aliases this mirrors); an empty `plane_library` selects the
+    built-in plane instead.
+    """
+    if os.name != "nt":
+        return False
+    for doc in overlays:
+        if isinstance(doc, dict) and "plane_library" in doc.get("model", {}).get("qwen38_graph", {}):
+            return False
+    configured = package_config.get("model", {}).get("qwen38_graph", {}).get("plane_library", "")
+    if not configured or not configured.endswith(".so"):
+        return False
+    so_path = package / configured
+    if not so_path.exists():
+        return False
+    if so_path.with_suffix(".dll").exists():
+        return False
+    stem = so_path.stem
+    if stem.startswith("lib") and len(stem) > 3 and (so_path.parent / f"{stem[3:]}.dll").exists():
+        return False
+    return True
+
+
 def load_model(package, provider=None, overlay=None):
     """Registers the plugin CUDA EP (`provider` path, default $QWEN_PROVIDER or <package>/provider/libonnxruntime_providers_cuda.so) and loads the package."""
     package = Path(package).resolve()
@@ -231,7 +259,16 @@ def load_model(package, provider=None, overlay=None):
             prov_dir = Path(provider).parent
             if prov_dir.is_dir():
                 _WIN_DLL_HANDLES.append(os.add_dll_directory(str(prov_dir)))
-        og.register_execution_provider_library("CUDAExecutionProvider", provider)
+        try:
+            og.register_execution_provider_library("CUDAExecutionProvider", provider)
+        except RuntimeError as exc:
+            if "already registered" not in str(exc):
+                raise
+    win_plane_overlay = (
+        {"model": {"qwen38_graph": {"plane_library": ""}}}
+        if _needs_windows_builtin_plane_overlay(package, package_config, env_overlay, overlay)
+        else None
+    )
     directory = None
     try:
         config_package = package
@@ -246,7 +283,7 @@ def load_model(package, provider=None, overlay=None):
                 json.dumps(with_host_expert_budget(package_config, budget)), encoding="utf-8"
             )
         config = og.Config(str(config_package))
-        for document in (env_overlay, overlay):
+        for document in (win_plane_overlay, env_overlay, overlay):
             if document:
                 effective = with_host_expert_budget(document, budget) if budget is not None else document
                 config.overlay(json.dumps(effective))

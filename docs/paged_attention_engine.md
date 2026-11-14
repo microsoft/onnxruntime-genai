@@ -184,10 +184,14 @@ as an explicit choice, not substituted for missing profiling data.
 Existing configuration overlays, including `OgaConfigOverlay`, can set the
 budget before Model creation; there is no separate budget API.
 
-The supported path is one initial load of a CUDA paged decoder Model/Engine,
+The paged path supports one initial load of a CUDA paged decoder Model/Engine,
 including an enabled windowed DFlash 2 drafter. CPU embedding is supported.
-Other devices/backends and enabled MTP or DSpark auxiliary models are rejected
+Other paged devices/backends and enabled MTP or DSpark auxiliary models are rejected
 during Engine construction when this field is set.
+
+Native Bolt and Qwen also support these controls, but cap snapshot VRAM after fixed-state
+warmup instead of resizing exported graph caches. See [native memory-budget rules](#native-bolt-prefix-caching);
+the remaining sizing rules and table in this section describe paged decoders.
 
 An explicit budget overrides `num_blocks` and `gpu_utilization_factor`, including
 block counts supplied by runtime profiles. Other profile and execution settings
@@ -254,7 +258,9 @@ reclamation are outside this initial scope.
 
 ### Prefix caching
 
-Dynamic batching caches prefixes by default for supported layouts.
+Dynamic batching caches prefixes by default for supported non-sliding target layouts.
+Target sliding-window models require explicit `prefix_caching: true`; a sliding-window
+drafter alone does not change the target's default.
 Set `engine.dynamic_batching.prefix_caching` to `false` to disable it. A lookup
 compares both the token contents and the complete parent-block identity; hash
 equality alone is never accepted as a match. The final prompt token always runs
@@ -337,8 +343,10 @@ restores the request cursor.
 A windowed DFlash2 drafter without a matching optional draft checkpoint can ingest
 the recomputed target suffix into a fresh ring. Drafting and draft-checkpoint
 capture remain disabled until that ring holds a complete attention window.
-Full-attention drafters still require their entire prefix; their admission behavior
-is unchanged.
+Full-attention DFlash drafters can instead reuse their immutable context through
+the target's physical block IDs. A hit requires a compatible paired checkpoint
+whose lease protects the complete target/drafter ancestry. Query spills remain private,
+and non-proposal turns still ingest context so later greedy turns can reuse it.
 
 Admission charges an adopted retained block against reclaimable capacity only when
 that block is actually in the prefix cache's reclaimable set. Fixed-state and draft
@@ -358,7 +366,12 @@ than a ring could retain. Omitting the setting or setting it to `false` preserve
 ring storage with prefix caching disabled. Builders emit an explicit `false`
 opt-out for these models.
 
-Auxiliary caches that mirror every target block are still rejected when caching
+Full-attention DFlash prefix reuse defaults on for non-sliding targets; explicit
+`false` disables it. Sliding-window targets still require explicit opt-in and a
+nonzero `snapshot_cache` byte budget. Their KV rings and quantization scales are
+snapshotted at paired boundaries and restored into private rings on adoption.
+Zero snapshot counts or an explicit all-zero storage policy disable paired reuse.
+DSpark and unsupported target-state combinations remain rejected when caching
 is explicitly enabled, and default to caching disabled when the setting is omitted.
 A fixed-size Engine-hosted auxiliary pool
 can coexist with target prefix caching. For a windowed DFlash 2 drafter, an
@@ -376,13 +389,15 @@ Snapshot storage uses one Engine-owned policy, not separate limits keyed by
 limits default to zero and disable that tier. Omitting the entire object preserves
 legacy device-resident DFlash snapshots, count-limited and reserved from the
 existing cache budget. An explicit empty object or all-zero budgets disable
-snapshot storage on CPU/CUDA without disabling target prefix caching.
+snapshot storage on CPU/CUDA without disabling legacy target-only prefix caching.
+Full-attention paired DFlash reuse requires enabled snapshot storage.
 `max_snapshots`, when present, is the shared count cap, not a per-component
 allowance. It is unbounded when omitted. Separate Engine instances have
 independent policies; these are not process-wide limits.
 
-**Current integration: DFlash snapshots only.** DFlash ring payloads are the
-only component registered with this policy today. These limits do not cover retained
+**Current integration: drafter and target-window snapshots.** DFlash ring payloads
+and paired target sliding-window KV/scale payloads share this policy.
+These limits do not cover retained
 target KV, hybrid fixed-state checkpoints, active drafter rings, or total process
 memory. Target KV and fixed state remain device-resident under their existing
 budgets. CPU execution supports explicit RAM and disk tiers; explicit VRAM
@@ -413,8 +428,9 @@ reclaimed at the count limit. Target KV and fixed-state reclamation are unchange
 ```
 
 `dflash2_max_snapshots` defaults to one and adds a DFlash-only count ceiling
-across all tiers. Zero disables DFlash snapshots without disabling target prefix
-caching. The DFlash count is also capped by the hybrid fixed-state checkpoint
+across all tiers. Zero disables DFlash snapshots and full-attention paired reuse,
+but preserves legacy target-only prefix caching. The DFlash count is also capped by the
+hybrid fixed-state checkpoint
 capacity (`max_batch_size`). `max_snapshots` is an optional additional count cap
 shared by every producer; zero disables all snapshot publication. Neither count
 increases a tier budget or enables storage when an explicit policy sets all byte
@@ -2339,7 +2355,7 @@ It can ingest newly executed target tokens into a fresh windowed ring and resume
 drafting only after those tokens fill the required context window; a short
 request can remain target-only throughout. The skipped prefix is not rebuilt.
 A full-attention block
-drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
+drafter (DFlash 2 or DSpark) instead mirrors the target pool: its bytes per target block and its fixed
 query-spill bytes are charged against the same budget before target capacity is selected, using the
 cache element type reported by the graph. That trade is explicit -- a DSpark drafter with the same
 layer geometry as the target roughly halves the target's paged-cache capacity for the same GPU
@@ -2416,6 +2432,127 @@ releases the retained state on its owner thread and the closed Request becomes a
 tombstone.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
+
+### Enabling prefix caching for another native backend
+
+Native backends share state-description-driven capture/restore, snapshot storage, and
+checkpoint publication, not an execution layout.
+Qwen and Bolt use the following internal integration contract:
+
+1. Configure snapshot storage and memory limits before clearing or normalizing the public
+   `engine.dynamic_batching` section. Keep model-specific capacity and chunk mapping separate.
+   Pass the full model configuration to `CreateNativePrefixSnapshotCache` and the batching settings to
+   `NativeDeviceMemoryBudget::Configure`. Configure the budget before loading weights/sessions;
+   the base Model captures its before-load free-memory baseline. Refresh after native warmup and
+   before checkpoint admission, including when prefix caching is disabled.
+2. Define safe capture boundaries and the complete resumable state. Include token identity,
+   pending predictions, positions, recurrent state, and any speculative-context features, not
+   just KV tensors. Register `StateCheckpointDescription` bindings alongside the existing state
+   allocations: whole buffers, sequence prefixes (including compressed rows), selected committed
+   rows, owned tensor maps, and typed host values. Bind live address/extent getters so restoration
+   does not depend on the source allocation surviving. The shared implementation plans packed
+   ranges, validates destination compatibility before copying, and performs tier-independent transfers.
+3. Use `PrefixCheckpointIndex<Entry>` with entries exposing `Tokens()` and `IsResident()`.
+   `Find` returns a borrowed match without creating a lease or refreshing recency. Acquire a
+   strong checkpoint reference before restoring; touch storage only after successful adoption.
+   Keep identity model-local and preserve the backend's owner scope: Qwen indexes belong to an
+   Engine session, while Bolt uses `StateCheckpointCache` at Model scope, shared with Generators.
+4. Publish through `TryPublish`: prepare token identity before capture, return an optional entry,
+   and use a non-throwing move for final publication. The shared helper reserves index capacity,
+   handles optional allocation/spill failures, and prunes/counts stale entries even after refusal.
+   `StateCheckpointDescription` discards partially written storage before a transfer exception
+   escapes; the caller preserves the backend's synchronization and handoff requirements. Device/restore
+   failures must still fail execution; optional caching must not corrupt live state.
+5. Restore the backend's full state and perform its required handoff. Separate dense prefill
+   restores dynamically sized dense tensors before rebuilding packed decode storage; unified
+   prefill restores its already-active packed buffers. Do not retain idle packed buffers as a
+   substitute for dense state, and do not infer a new model's layout from tensor names alone.
+
+The shared index/policy and `state-checkpoint-tests.cpp` suites cover identity, lease/recency,
+tier/count settings, layouts, typed host state, owned-map recreation, and publication failure cleanup.
+A new backend should add focused tests for its boundary rules,
+state geometry and restore/handoff, plus native inference parity and cached-token accounting.
+The tiny Qwen CUDA fixture exercises real dense ONNX prefill, RAM/disk checkpoint restoration,
+compression-boundary handoff and resumed decode through the public native device interface of a
+folded package. The fixture independently validates packed target/head state during decode.
+Large-model Bolt/Qwen probes remain an additional validation layer.
+
+These are internal helpers, not a new public configuration or automatic support for arbitrary
+models. Paged execution retains its separate block identity and scheduling contracts.
+
+### Native Bolt prefix caching
+
+The `nemotron_bolt` CUDA backend supports the single-slot Engine as well as the classic Generator.
+It selects greedy tokens internally; sampling, penalties, guidance, per-turn seeds, external prefill
+chunking, and multi-slot batching remain unsupported. The Engine applies its normal EOS, stop-string,
+and per-turn token limits. A new turn replays the Request's authoritative history, never buffered
+speculative tokens from the previous turn. As with other fixed-slot backends, displaced Requests
+cannot continue until their history is explicitly replayed in a new Request.
+
+Prefix reuse defaults on when single-slot native memory/snapshot policy is configured, and is
+shared by Generators and Engines using the same Model:
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "max_batch_size": 1,
+      "max_snapshots": 2,
+      "snapshot_cache": {
+        "ram_bytes": 2147483648
+      }
+    }
+  }
+}
+```
+
+For Bolt this configuration selects native memory/snapshot policy, not paged execution. `num_blocks`
+is unsupported because the exported target has fixed cache shapes. Fixed-R8 targets consume
+eight-token blocks. Dynamic-prefill packages use `search.chunk_size` (4,096 by default) for
+large eager target passes and captured R8 for short tails and speculative verification;
+one Engine prefill step still processes the complete prompt synchronously.
+Both native Bolt and Qwen accept `device_memory_budget_bytes`, configured before model loading,
+with an explicit `device_memory_headroom_bytes` allowance (zero is allowed). Fixed model weights,
+native state, and warmed graph allocations are charged first; remaining bytes cap retained VRAM
+snapshots, including the default device-resident policy. A fixed layout that cannot fit fails rather
+than silently shrinking the graph's caches. Checks run after native state warmup and before snapshot
+publication. Fixed-state validation also runs when prefix caching is disabled; Bolt warms that state
+lazily on its first execution.
+
+Without a byte budget, `gpu_utilization_factor` limits snapshot VRAM to that fraction of remaining
+free memory, with the same 0.9 fragmentation allowance as paged caching. A standalone
+`device_memory_headroom_bytes` is reserved before applying that fraction. An explicit byte budget
+takes precedence over the utilization factor. These are sizing/admission controls, not a hard
+allocator quota; profile headroom for lazy execution allocations and avoid concurrent external
+allocations while measuring the budget.
+
+The effective VRAM snapshot limit is the smaller of this allowance and an explicit
+`snapshot_cache.vram_bytes`. RAM/disk limits remain independent. A reduced allowance demotes or
+evicts unleased snapshots; protected checkpoints cannot be invalidated to satisfy a budget.
+For example, add `"device_memory_budget_bytes": 68719476736` and
+`"device_memory_headroom_bytes": 2147483648` inside `dynamic_batching` for a 64-GiB total allowance
+with 2 GiB reserved headroom; choose values that fit the actual model and native state.
+Snapshot storage uses the existing `snapshot_cache` VRAM/RAM/disk byte budgets and count limit.
+Without an explicit storage policy, at most one device-resident checkpoint is retained.
+`prefix_caching: false`, `max_snapshots: 0`, or explicitly zero storage budgets disable reuse.
+A windowed DFlash2 drafter is required.
+
+Only the last complete eight-token prompt boundary is published. A hit restores both dense KV heads,
+the committed recurrent row, the pending target prediction, and the trailing committed auxiliary
+features needed to rebuild the drafter. Prefill passes split at the checkpoint boundary regardless
+of chunk size; dynamic passes select recurrent slot 7 and gather only the needed auxiliary rows.
+An unaligned tail is recomputed through R8. Changing chunk size can change prefill floating-point
+arithmetic; qualify the actual package/runtime rather than assuming bitwise parity with fixed-R8.
+The longest exact token-prefix match is used; divergent suffixes are
+prefilled normally. Snapshots survive Request close and Generator reset/destruction, but not Model
+destruction. Snapshot allocation or spill-publication failures refuse caching without failing
+generation; restoration and device errors still fail the operation.
+The eight-token alignment is an execution boundary, not a capture frequency: at most one checkpoint
+is captured per prefill, and an already-resident exact checkpoint is not republished.
+
+Engine turn usage reports only cached tokens belonging to the current input, not replayed history
+from earlier turns. `prefix_cache_stats` reports successful Engine adoptions. The classic Generator
+benefits from reuse but does not expose Engine turn-usage accounting.
 
 ### Static backends that select their own tokens
 

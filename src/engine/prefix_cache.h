@@ -39,6 +39,7 @@ namespace Generators {
 
 class FixedStatePrefixCheckpoint;
 struct Dflash2PrefixCheckpoint;
+struct PagedWindowPrefixCheckpoint;
 using DraftPrefixBoundary =
     std::pair<std::shared_ptr<const BlockIdentity>, std::shared_ptr<const FixedStatePrefixCheckpoint>>;
 
@@ -55,6 +56,8 @@ struct PrefixCacheOptions {
   // used. Overridable so the collision-verification path -- distinct contents landing on the same
   // identity -- can be exercised deterministically instead of hoping to find a real collision.
   uint64_t (*hash)(uint64_t parent_hash, std::span<const int32_t> tokens){nullptr};
+  bool requires_draft_checkpoint{};
+  bool requires_window_checkpoint{};
 };
 
 // A run of already-resident blocks covering the leading `token_count` tokens of a prompt. The
@@ -65,6 +68,7 @@ struct PrefixCacheMatch {
   std::vector<std::shared_ptr<Block>> blocks;
   std::shared_ptr<const FixedStatePrefixCheckpoint> fixed_state_checkpoint;
   std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint;
+  std::shared_ptr<const PagedWindowPrefixCheckpoint> target_window_checkpoint;
 
   bool Empty() const { return blocks.empty(); }
 };
@@ -99,6 +103,10 @@ struct PrefixCacheMetrics {
   uint64_t evictions{};                // Indexed blocks dropped to make room.
   uint64_t retention_refusals{};       // Registrations skipped because nothing was evictable.
   uint64_t publication_refusals{};     // Boundaries skipped after metadata allocation failures.
+
+  // Operational events may precede adoption; hits are recorded only once adoption commits.
+  void AddEventsSince(const PrefixCacheMetrics& before, const PrefixCacheMetrics& after) noexcept;
+  void RecordAdoption(size_t tokens) noexcept;
 };
 
 /**

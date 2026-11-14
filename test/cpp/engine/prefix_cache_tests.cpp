@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "span.h"
+#include "dflash2_drafter.h"
 #include "engine/block.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/prefix_cache.h"
@@ -125,6 +126,149 @@ TEST(PrefixCacheTest, ExactPrefixMatchAdoptsEveryFullBlock) {
   EXPECT_EQ(cache.Metrics().matches, 1u);
   EXPECT_EQ(cache.Metrics().hits, 1u);
   EXPECT_EQ(cache.Metrics().matched_tokens, 2 * kBlockSize);
+}
+
+TEST(PrefixCacheTest, RequiredDraftMatchFallsBackToAResidentPairedBoundary) {
+  BlockPool pool{kBlockSize, 8};
+  auto options = MakeOptions(8);
+  options.requires_draft_checkpoint = true;
+  options.requires_window_checkpoint = true;
+  PrefixCache cache{pool, options};
+  const std::array<int32_t, 9> prompt{1, 2, 3, 4, 5, 6, 7, 8, 9};
+  auto generation = std::make_shared<int>(0);
+  const auto checkpoint = [&](size_t tokens) {
+    auto result = std::make_shared<Dflash2PrefixCheckpoint>();
+    result->token_count = tokens;
+    result->target_mapped = true;
+    result->target_generation = generation;
+    auto window = std::make_shared<PagedWindowPrefixCheckpoint>();
+    window->token_count = tokens;
+    window->state = PrefixSnapshotCache::State::Resident;
+    result->target_window = std::move(window);
+    return result;
+  };
+  std::shared_ptr<const BlockIdentity> parent;
+  SealBlock(pool, cache, std::span<const int32_t>{prompt}.first(kBlockSize), parent);
+  ASSERT_TRUE(cache.AttachDraftCheckpoint(parent, nullptr, checkpoint(kBlockSize)));
+  SealBlock(pool, cache, std::span<const int32_t>{prompt}.subspan(kBlockSize, kBlockSize), parent);
+  EXPECT_EQ(cache.Match(prompt, 8).token_count, kBlockSize);
+
+  auto longer = checkpoint(8);
+  ASSERT_TRUE(cache.AttachDraftCheckpoint(parent, nullptr, longer));
+  EXPECT_EQ(cache.Match(prompt, 8).token_count, 8u);
+  std::const_pointer_cast<PagedWindowPrefixCheckpoint>(longer->target_window)->state =
+      PrefixSnapshotCache::State::Evicted;
+  EXPECT_EQ(cache.Match(prompt, 8).token_count, kBlockSize);
+  generation.reset();
+  EXPECT_TRUE(cache.Match(prompt, 8).Empty());
+}
+
+TEST(PrefixCacheTest, RequiredDraftMissCanPublishAnIndependentPhysicalHistory) {
+  BlockPool pool{kBlockSize, 8};
+  auto options = MakeOptions(8);
+  options.requires_draft_checkpoint = true;
+  PrefixCache cache{pool, options};
+  const std::array<int32_t, 8> original{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::array<int32_t, 8> changed{1, 2, 3, 4, 9, 10, 11, 12};
+  auto generation = std::make_shared<int>(0);
+  const auto publish = [&](const std::array<int32_t, 8>& tokens) {
+    std::shared_ptr<const BlockIdentity> parent;
+    std::vector<std::shared_ptr<Block>> blocks;
+    for (size_t offset = 0; offset < tokens.size(); offset += kBlockSize) {
+      blocks.push_back(SealBlock(
+          pool, cache, std::span<const int32_t>{tokens}.subspan(offset, kBlockSize), parent));
+      EXPECT_TRUE(blocks.back()->HasIdentity());
+    }
+    auto checkpoint = std::make_shared<Dflash2PrefixCheckpoint>();
+    checkpoint->token_count = tokens.size();
+    checkpoint->target_mapped = true;
+    checkpoint->target_generation = generation;
+    EXPECT_TRUE(cache.AttachDraftCheckpoint(parent, nullptr, std::move(checkpoint)));
+    return blocks;
+  };
+  const auto original_blocks = publish(original);
+  EXPECT_TRUE(cache.Match(changed, changed.size()).Empty());
+  const auto changed_blocks = publish(changed);
+
+  EXPECT_NE(original_blocks.front(), changed_blocks.front());
+  EXPECT_EQ(cache.Match(original, original.size()).blocks, original_blocks);
+  EXPECT_EQ(cache.Match(changed, changed.size()).blocks, changed_blocks);
+  pool.Free(original_blocks);
+  pool.Free(changed_blocks);
+}
+
+TEST(PrefixCacheTest, CheckpointLookupHashesEachQueryBlockOnceAndVerifiesCollisions) {
+  constexpr size_t block_count = 64;
+  for (bool collisions : {false, true}) {
+    SCOPED_TRACE(collisions);
+    BlockPool pool{kBlockSize, block_count};
+    auto options = MakeOptions(block_count);
+    options.requires_draft_checkpoint = true;
+    static thread_local size_t hash_calls = 0;
+    hash_calls = 0;
+    options.hash = [](uint64_t parent, std::span<const int32_t> tokens) {
+      ++hash_calls;
+      return PrefixCache::ChainHash(parent, tokens);
+    };
+    if (collisions)
+      options.hash = [](uint64_t parent, std::span<const int32_t>) {
+        ++hash_calls;
+        return parent == PrefixCache::RootHash() ? uint64_t{1} : parent + 1;
+      };
+    PrefixCache cache{pool, options};
+    std::vector<int32_t> prompt(block_count * kBlockSize, 7);
+    auto generation = std::make_shared<int>(0);
+    std::shared_ptr<const BlockIdentity> parent;
+    for (size_t offset = 0; offset < prompt.size(); offset += kBlockSize) {
+      auto block = SealBlock(pool, cache, std::span<const int32_t>{prompt}.subspan(offset, kBlockSize), parent);
+      auto checkpoint = std::make_shared<Dflash2PrefixCheckpoint>();
+      checkpoint->token_count = offset + kBlockSize;
+      checkpoint->target_mapped = true;
+      checkpoint->target_generation = generation;
+      ASSERT_TRUE(cache.AttachDraftCheckpoint(parent, nullptr, std::move(checkpoint)));
+      pool.Release(block);
+    }
+    ASSERT_EQ(cache.CheckpointCount(), block_count);
+    hash_calls = 0;
+    prompt.front() = 9;
+    EXPECT_TRUE(cache.Match(prompt, prompt.size()).Empty());
+    EXPECT_EQ(hash_calls, block_count);
+    hash_calls = 0;
+    prompt.front() = 7;
+    EXPECT_EQ(cache.Match(prompt, prompt.size()).token_count, prompt.size());
+    EXPECT_EQ(hash_calls, block_count);
+  }
+}
+
+TEST(PrefixCacheTest, DraftOnlyAdoptionLeasesProtectTheCompletePhysicalHistory) {
+  BlockPool pool{kBlockSize, 4};
+  auto options = MakeOptions(4);
+  options.requires_draft_checkpoint = true;
+  PrefixCache cache{pool, options};
+  const std::array<int32_t, 9> prompt{1, 2, 3, 4, 5, 6, 7, 8, 9};
+  std::shared_ptr<const BlockIdentity> parent;
+  auto first = SealBlock(pool, cache, std::span<const int32_t>{prompt}.first(kBlockSize), parent);
+  auto second = SealBlock(pool, cache, std::span<const int32_t>{prompt}.subspan(kBlockSize, kBlockSize), parent);
+  auto generation = std::make_shared<int>(0);
+  auto checkpoint = std::make_shared<Dflash2PrefixCheckpoint>();
+  checkpoint->token_count = 8;
+  checkpoint->target_mapped = true;
+  checkpoint->target_generation = generation;
+  ASSERT_TRUE(cache.AttachDraftCheckpoint(parent, nullptr, checkpoint));
+  checkpoint.reset();
+  pool.Free(std::vector<std::shared_ptr<Block>>{first, second});
+  {
+    const auto match = cache.Match(prompt, 8);
+    ASSERT_EQ(match.token_count, 8u);
+    cache.DropUnleasedDraftCheckpoints();
+    EXPECT_EQ(cache.CheckpointCount(), 1u);
+    EXPECT_EQ(cache.ReclaimableBlocks(), 0u);
+    EXPECT_EQ(cache.Reclaim(4), 0u);
+  }
+  cache.DropUnleasedDraftCheckpoints();
+  EXPECT_EQ(cache.CheckpointCount(), 0u);
+  EXPECT_TRUE(cache.Match(prompt, 8).Empty());
+  EXPECT_EQ(cache.Reclaim(4), 2u);
 }
 
 TEST(PrefixCacheTest, PagedIdentityStoresTokensWithoutLogicalMetadata) {
