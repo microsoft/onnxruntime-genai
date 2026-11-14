@@ -103,7 +103,9 @@ def get_target_pip_package_version(target_pip_package_name_list):
 
 def aggregate_measurements(measurements, aggregation):
     if not measurements:
-        raise ValueError("No measurements to aggregate (empty timing list). Check --repetitions / warmup / generation lengths.")
+        raise ValueError(
+            "No measurements to aggregate (empty timing list). Check --repetitions / warmup / generation lengths."
+        )
     if aggregation == "mean":
         return float(np.mean(measurements))
     if aggregation == "median":
@@ -118,6 +120,7 @@ def save_results(args, results, filename, print_memory_usage=False):
         "Tokens Generated",
         "Max Length",
         "Model Creation Latency (ms)",
+        "Adapter Load Latency (ms)",
         "Tokenizer Creation Latency (ms)",
         "Generator Creation Latency (ms)",
         "First Warmup AppendTokens Latency (ms)",
@@ -166,7 +169,11 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
         record.config.customized["max_length"] = row["Max Length"]
         record.config.customized["aggregation"] = args.aggregation
+        record.config.customized["adapter"] = args.adapter_path or "disabled"
+        if args.adapter_path:
+            record.config.customized["adapter_name"] = args.adapter_name
         record.metrics.customized["model_creation_latency_ms"] = row["Model Creation Latency (ms)"]
+        record.metrics.customized["adapter_load_latency_ms"] = row["Adapter Load Latency (ms)"]
         record.metrics.customized["tokenizer_creation_latency_ms"] = row["Tokenizer Creation Latency (ms)"]
         generator_creation_latency_ms = row["Generator Creation Latency (ms)"]
         if pd.notna(generator_creation_latency_ms):
@@ -246,7 +253,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":
-            provider_to_append = "WebGpuExecutionProvider" if args.execution_provider == "webgpu" else args.execution_provider
+            provider_to_append = (
+                "WebGpuExecutionProvider" if args.execution_provider == "webgpu" else args.execution_provider
+            )
             if args.verbose:
                 print(f"Setting model to {provider_to_append}")
             config.append_provider(provider_to_append)
@@ -257,6 +266,14 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     model_creation_latency_s = time.perf_counter() - model_creation_start_time
     if args.verbose:
         print("Model loaded")
+    # Load once per model and retain the container until all generators are released.
+    adapters = None
+    adapter_load_latency_s = 0.0
+    if args.adapter_path:
+        adapter_load_start_time = time.perf_counter()
+        adapters = og.Adapters(model)
+        adapters.load(args.adapter_path, args.adapter_name)
+        adapter_load_latency_s = time.perf_counter() - adapter_load_start_time
     tokenizer_creation_start_time = time.perf_counter()
     tokenizer = og.Tokenizer(model)
     tokenizer_creation_latency_s = time.perf_counter() - tokenizer_creation_start_time
@@ -338,11 +355,12 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     def create_generator():
         nonlocal generator_creation_latency_s
-        if generator_creation_latency_s is not None:
-            return og.Generator(model, params)
         generator_creation_start_time = time.perf_counter()
         gen = og.Generator(model, params)
-        generator_creation_latency_s = time.perf_counter() - generator_creation_start_time
+        if generator_creation_latency_s is None:
+            generator_creation_latency_s = time.perf_counter() - generator_creation_start_time
+        if adapters is not None:
+            gen.set_active_adapter(adapters, args.adapter_name)
         return gen
 
     # When reuse_generator is enabled, create a single generator and reuse it via
@@ -365,8 +383,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         while not gen.is_done() and gen.token_count() < prompt_length:
             gen.generate_next_token()
         generated_text = tokenizer.decode(gen.get_sequence(0))
-        if not args.reuse_generator:
-            del gen
+        del gen
         text = [generated_text] * batch_size
         prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
@@ -400,8 +417,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             gen.generate_next_token()
         if args.print_model_output:
             print(tokenizer.decode(gen.get_sequence(0)))
-        if not args.reuse_generator:
-            del gen
+        del gen
 
     tokenize_times = []
     prompt_times = []
@@ -455,26 +471,25 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output:
             print(tokenizer.decode(gen.get_sequence(0)))
-        if not args.reuse_generator:
-            del gen
+        del gen
 
-    # Release the generator before computing results
-    if generator:
-        del generator
+    # Release the retained generator before the adapter container leaves scope.
+    del generator
 
     aggregation_label = "Average" if args.aggregation == "mean" else "Median"
 
     model_creation_latency_ms = model_creation_latency_s * 1000
+    adapter_load_latency_ms = adapter_load_latency_s * 1000
     tokenizer_creation_latency_ms = tokenizer_creation_latency_s * 1000
     generator_creation_latency_ms = (
         generator_creation_latency_s * 1000 if generator_creation_latency_s is not None else None
     )
     first_warmup_append_tokens_latency_ms = (
-        first_warmup_append_tokens_latency_s * 1000
-        if first_warmup_append_tokens_latency_s is not None
-        else None
+        first_warmup_append_tokens_latency_s * 1000 if first_warmup_append_tokens_latency_s is not None else None
     )
     print(f"Model Creation Latency: {model_creation_latency_ms} ms")
+    print(f"LoRA adapter: {args.adapter_path or 'disabled'}")
+    print(f"Adapter Load Latency: {adapter_load_latency_ms} ms")
     print(f"Tokenizer Creation Latency: {tokenizer_creation_latency_ms} ms")
     if generator_creation_latency_ms is None:
         print("Generator Creation Latency: N/A (no generator was created)")
@@ -500,7 +515,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     per_token_prompt_thrpt = batch_size * (1000 / per_token_prompt_latency_ms)
 
     # Time to first token = prompt prefill + first-token sampling
-    ttft_times = [p + s for p, s in zip(prompt_times, sampling_times)]
+    ttft_times = [p + s for p, s in zip(prompt_times, sampling_times, strict=True)]
     ttft_ms = aggregate_measurements(ttft_times, args.aggregation) * 1000
     std_ttft_ms = float(np.std(ttft_times)) * 1000
     print(f"{aggregation_label} Time to First Token: {ttft_ms} ms")
@@ -540,6 +555,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         generation_length,
         max_length,
         model_creation_latency_ms,
+        adapter_load_latency_ms,
         tokenizer_creation_latency_ms,
         generator_creation_latency_ms,
         first_warmup_append_tokens_latency_ms,
@@ -598,7 +614,7 @@ def main(args):
     elif args.execution_provider == "webgpu":
         print("WebGPU EP selected. Attempting to import 'onnxruntime-ep-webgpu' for registration...")
         try:
-            import onnxruntime_ep_webgpu as webgpu_ep
+            import onnxruntime_ep_webgpu as webgpu_ep  # noqa: PLC0415 - optional plugin, imported only when selected
         except ImportError as exc:
             raise ValueError(
                 "WebGPU EP selected but 'onnxruntime-ep-webgpu' is not installed. "
@@ -657,6 +673,18 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-b", "--batch_sizes", type=str2intlist, default=[1], help="Number of sequences to generate in parallel"
+    )
+    parser.add_argument(
+        "--adapter_path",
+        type=str,
+        default=None,
+        help="Load a compatible .onnx_adapter and activate it on every generator. Omit for no adapter.",
+    )
+    parser.add_argument(
+        "--adapter_name",
+        type=str,
+        default="benchmark",
+        help="Name used to load and activate the adapter (default: benchmark)",
     )
     parser.add_argument("-l", "--prompt_lengths", type=str2intlist, default=[16], help="Number of tokens for prompt")
     parser.add_argument(
@@ -725,6 +753,10 @@ if __name__ == "__main__":
         "Example: -epl 'C:\\path\\to\\onnxruntime_providers_cuda.dll' or -epl '/usr/lib/libonnxruntime_providers_cuda.so'",
     )
     args = parser.parse_args()
+    if args.adapter_path == "":
+        parser.error("Adapter path must not be empty.")
+    if not args.adapter_name:
+        parser.error("Adapter name must not be empty.")
 
     # check max_lengths
     is_max_lengths_valid = (
