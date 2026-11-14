@@ -883,9 +883,9 @@ void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int3
 void NemotronBoltState::RestorePrefix(std::span<const int32_t> tokens) {
   if (!drafter_ || !bolt_.prefix_cache_) return;
   if (auto saved = bolt_.prefix_cache_->Find(tokens)) {
+    touched_kv_rows_ = std::max(touched_kv_rows_, saved->tokens.size());
     bolt_.prefix_cache_->Restore(*saved, state_description_, model_.p_device_);
     length_ = cached_prompt_tokens_ = saved->tokens.size();
-    touched_kv_rows_ = std::max(touched_kv_rows_, length_);
   }
 }
 
