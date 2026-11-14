@@ -30,6 +30,7 @@ import types
 from collections.abc import Mapping
 
 import numpy as np
+import pytest
 import torch
 
 # Import Model from the source tree so tests always run against the working copy.
@@ -81,6 +82,7 @@ GPTOSS_20B_CONFIG = {
         "factor": 32.0,
         "original_max_position_embeddings": 4096,
         "rope_type": "yarn",
+        "truncate": False,
     },
 }
 
@@ -112,11 +114,12 @@ def _make_hf_reference_cos_sin(config_dict: dict, cache_length: int) -> tuple[np
     """Compute YaRN cos/sin caches using HuggingFace transformers reference."""
     rs = config_dict["rope_scaling"]
     base = rs.get("rope_theta", config_dict.get("rope_theta", 10000.0))
-    dim = config_dict["head_dim"]
+    dim = int(config_dict["head_dim"] * config_dict.get("partial_rotary_factor", 1.0))
     factor = rs["factor"]
     original_max_position_embeddings = rs["original_max_position_embeddings"]
-    beta_fast = rs["beta_fast"]
-    beta_slow = rs["beta_slow"]
+    beta_fast = rs.get("beta_fast") or 32
+    beta_slow = rs.get("beta_slow") or 1
+    truncate = rs.get("truncate", True)
 
     # Compute attention_factor per HF convention
     config_mscale = rs.get("mscale", None)
@@ -127,7 +130,9 @@ def _make_hf_reference_cos_sin(config_dict: dict, cache_length: int) -> tuple[np
             return 1.0
         return 0.1 * mscale * math.log(scale) + 1.0
 
-    if config_mscale and config_mscale_all_dim:
+    if rs.get("attention_factor") is not None:
+        attention_factor = rs["attention_factor"]
+    elif config_mscale and config_mscale_all_dim:
         attention_factor = float(get_mscale(factor, config_mscale) / get_mscale(factor, config_mscale_all_dim))
     else:
         attention_factor = get_mscale(factor)
@@ -138,6 +143,9 @@ def _make_hf_reference_cos_sin(config_dict: dict, cache_length: int) -> tuple[np
     def find_correction_range(low_rot: float, high_rot: float) -> tuple[float, float]:
         low = find_correction_dim(low_rot)
         high = find_correction_dim(high_rot)
+        if truncate:
+            low = math.floor(low)
+            high = math.ceil(high)
         return max(low, 0), min(high, dim - 1)
 
     # Compute inv_freq with YaRN NTK scaling
@@ -202,7 +210,7 @@ def _make_builder_cos_sin(config_dict: dict, cache_length: int) -> tuple[np.ndar
         "save_caches": False,
         "cache_length": cache_length,
         "theta": rope_theta,
-        "partial_rotary_factor": 1.0,
+        "partial_rotary_factor": config_dict.get("partial_rotary_factor", 1.0),
         "interleaved": 0,
         "rotary_embedding_dim": 0,
         "rescale_factors": 1,
@@ -227,6 +235,7 @@ def _make_builder_cos_sin(config_dict: dict, cache_length: int) -> tuple[np.ndar
         "factor": rs["factor"],
         "ntk_alpha": rs["beta_slow"],
         "ntk_beta": rs["beta_fast"],
+        "truncate": rs.get("truncate", True),
     }
 
     cos_cache, sin_cache = model.make_rotary_embedding_caches_from_scratch()
@@ -270,7 +279,7 @@ def _make_builder_cos_sin_rope_field(
         "save_caches": False,
         "cache_length": cache_length,
         "theta": rope_theta,
-        "partial_rotary_factor": 1.0,
+        "partial_rotary_factor": config_dict.get("partial_rotary_factor", 1.0),
         "interleaved": 0,
         "rotary_embedding_dim": 0,
         "rescale_factors": 1,
@@ -294,6 +303,39 @@ CACHE_LENGTH = 128  # Small cache for fast testing
 
 class TestYarnRopeCacheParity:
     """Verify model builder produces identical cos/sin caches to HuggingFace."""
+
+    @pytest.mark.parametrize(
+        "rope_overrides",
+        [
+            {"beta_fast": None, "beta_slow": None},  # Qwen2.5-style: betas omitted, HF defaults 32 and 1
+            {"truncate": False},  # GPT-OSS-style
+            {"attention_factor": 1.25},
+            {"beta_fast": 16.0, "beta_slow": 2.0},
+        ],
+        ids=["default_betas", "no_truncate", "attention_factor", "custom_betas"],
+    )
+    def test_hf_yarn_options_match(self, rope_overrides):
+        rope = {**YARN_NO_MSCALE_CONFIG["rope_scaling"], **rope_overrides}
+        for key in [k for k, v in rope.items() if v is None]:
+            del rope[key]
+        config = {**YARN_NO_MSCALE_CONFIG, "rope_scaling": rope}
+        hf_cos, hf_sin = _make_hf_reference_cos_sin(config, CACHE_LENGTH)
+        builder_cos, builder_sin = _make_builder_cos_sin_rope_field(config, CACHE_LENGTH, "rope_parameters")
+
+        np.testing.assert_allclose(builder_cos, hf_cos, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(builder_sin, hf_sin, rtol=1e-5, atol=1e-5)
+
+    def test_partial_rotary_factor_matches_hf(self):
+        """Only head_dim * partial_rotary_factor dimensions are rotated, and the YaRN ramp uses that dimension."""
+        config = {**YARN_NO_MSCALE_CONFIG, "partial_rotary_factor": 0.5}
+        hf_cos, hf_sin = _make_hf_reference_cos_sin(config, CACHE_LENGTH)
+        builder_cos, builder_sin = _make_builder_cos_sin_rope_field(config, CACHE_LENGTH, "rope_parameters")
+
+        rotary_dim = int(config["head_dim"] * config["partial_rotary_factor"])
+        assert hf_cos.shape == (CACHE_LENGTH, rotary_dim)
+        assert builder_cos.shape == hf_cos.shape
+        np.testing.assert_allclose(builder_cos, hf_cos, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(builder_sin, hf_sin, rtol=1e-5, atol=1e-5)
 
     def test_ministral_3b_cos_sin_match(self):
         """End-to-end parity: builder cos/sin caches match HF reference for Ministral-3-3B."""
@@ -466,6 +508,7 @@ class TestYarnRopeCacheParity:
                 "factor": 16.0,
                 "ntk_alpha": 1.0,  # beta_slow
                 "ntk_beta": 32.0,  # beta_fast
+                "truncate": False,  # the reference below does not round the correction range
             },
         }
 

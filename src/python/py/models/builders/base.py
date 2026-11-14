@@ -721,19 +721,25 @@ class Model:
         if config.rope_parameters["rope_type"] == "yarn":
             # For models that use YARN (e.g. GPT-OSS, Ministral-3)
             factor = config.rope_parameters["factor"] if "factor" in config.rope_parameters else 0
-            beta_slow = config.rope_parameters["beta_slow"] if "beta_slow" in config.rope_parameters else 0
-            beta_fast = config.rope_parameters["beta_fast"] if "beta_fast" in config.rope_parameters else 0
+            # Same defaults as Hugging Face (beta_fast=32, beta_slow=1) when the config omits them or sets 0
+            beta_slow = config.rope_parameters.get("beta_slow") or 1
+            beta_fast = config.rope_parameters.get("beta_fast") or 32
 
             self.rope_attrs["mscale_policy"] = config.rope_parameters["rope_type"]
-            self.rope_attrs["mscale"] = self.make_mscale(
-                factor,
-                config_mscale=config.rope_parameters.get("mscale", 0),
-                config_mscale_all_dim=config.rope_parameters.get("mscale_all_dim", 0),
-            )
+            if config.rope_parameters.get("attention_factor") is not None:
+                # An explicit attention_factor overrides the one derived from factor/mscale
+                self.rope_attrs["mscale"] = float(config.rope_parameters["attention_factor"])
+            else:
+                self.rope_attrs["mscale"] = self.make_mscale(
+                    factor,
+                    config_mscale=config.rope_parameters.get("mscale", 0),
+                    config_mscale_all_dim=config.rope_parameters.get("mscale_all_dim", 0),
+                )
             self.rope_attrs["rescale_inv_freq"] = {
                 "factor": factor,
                 "ntk_alpha": beta_slow,
                 "ntk_beta": beta_fast,
+                "truncate": config.rope_parameters.get("truncate", True),
             }
 
         elif config.rope_parameters["rope_type"] == "default":
@@ -3935,19 +3941,22 @@ class Model:
         return torch.tensor(new_freqs, dtype=inv_freq.dtype)
 
     def make_inv_freq_rescaled_with_ntk(self, inv_freq):
-        d_half = self.head_size / 2
-        # NTK by parts
-        low = (
-            d_half
-            * np.log(self.original_context_length / (self.rope_attrs["rescale_inv_freq"]["ntk_beta"] * 2 * np.pi))
-            / np.log(self.rope_attrs["theta"])
-        )
-        high = (
-            d_half
-            * np.log(self.original_context_length / (self.rope_attrs["rescale_inv_freq"]["ntk_alpha"] * 2 * np.pi))
-            / np.log(self.rope_attrs["theta"])
-        )
-        assert 0 < low < high < d_half - 1
+        # NTK by parts, following Hugging Face's _compute_yarn_parameters
+        dim = int(self.rope_attrs.get("partial_rotary_factor", 1.0) * self.head_size)
+        d_half = dim // 2
+        theta = self.rope_attrs["theta"]
+        rescale = self.rope_attrs["rescale_inv_freq"]
+
+        def find_correction_dim(num_rotations):
+            return dim * np.log(self.original_context_length / (num_rotations * 2 * np.pi)) / (2 * np.log(theta))
+
+        low = find_correction_dim(rescale["ntk_beta"])
+        high = find_correction_dim(rescale["ntk_alpha"])
+        if rescale.get("truncate", True):
+            low, high = np.floor(low), np.ceil(high)
+        low, high = max(low, 0), min(high, dim - 1)
+        if low == high:
+            high += 0.001  # Prevent a singularity in the ramp
 
         interpolation = inv_freq / self.rope_attrs["rescale_inv_freq"]["factor"]
         extrapolation = inv_freq
