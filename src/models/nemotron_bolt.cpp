@@ -240,19 +240,16 @@ NemotronBoltModel::NemotronBoltModel(std::unique_ptr<Config> config, OrtEnv& env
   Require(p_device_->GetType() == DeviceType::CUDA, "a CUDA execution provider is required");
   p_device_scoring_ = GetDeviceInterface(DeviceType::CPU);
   const auto batching = config_->engine.dynamic_batching;
-  std::shared_ptr<PrefixSnapshotCache> storage;
   if (batching) {
     Require(batching->max_batch_size == 1 && !batching->num_blocks,
             "native Bolt requires max_batch_size=1 and does not support num_blocks for its fixed target caches");
-    if (IsPrefixCachingRequested(*config_) && batching->max_snapshots.value_or(1) != 0) {
-      if (config_->model.dflash2.sliding_window > 0) {
-        storage = CreateNativePrefixSnapshotCache(*config_);
-        if (storage) prefix_cache_ = std::make_unique<StateCheckpointCache>(storage, kBoltVerifyRows, "nemotron_bolt");
-      } else {
-        Require(!batching->prefix_caching.value_or(false), "prefix caching requires a windowed drafter");
-      }
-    }
-    memory_budget_.Configure(batching, storage);
+    if (IsPrefixCachingRequested(*config_) && batching->max_snapshots.value_or(1) != 0 &&
+        config_->model.dflash2.sliding_window <= 0)
+      Require(!batching->prefix_caching.value_or(false), "prefix caching requires a windowed drafter");
+    auto storage = memory_budget_.ConfigurePrefixCache(
+        *config_, config_->model.dflash2.sliding_window > 0 ? nullptr : "prefix caching requires a windowed drafter");
+    if (storage)
+      prefix_cache_ = std::make_unique<StateCheckpointCache>(std::move(storage), kBoltVerifyRows, "nemotron_bolt");
     config_->engine.dynamic_batching.reset();
   }
   Require((!config_->engine.static_batching || config_->engine.static_batching->max_batch_size == 1) &&
@@ -919,14 +916,7 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens, PrefixCacheMetr
   const auto before = bolt_.prefix_cache_ ? bolt_.prefix_cache_->Metrics() : PrefixCacheMetrics{};
   const auto record_events = [&] {
     if (!cache_events || !bolt_.prefix_cache_) return;
-    const auto& after = bolt_.prefix_cache_->Metrics();
-    cache_events->lookups += after.lookups - before.lookups;
-    cache_events->queried_tokens += after.queried_tokens - before.queried_tokens;
-    cache_events->matches += after.matches - before.matches;
-    cache_events->registered_blocks += after.registered_blocks - before.registered_blocks;
-    cache_events->evictions += after.evictions - before.evictions;
-    cache_events->retention_refusals += after.retention_refusals - before.retention_refusals;
-    cache_events->publication_refusals += after.publication_refusals - before.publication_refusals;
+    cache_events->AddEventsSince(before, bolt_.prefix_cache_->Metrics());
   };
   // A failure after the first chunk leaves advanced caches and a native cursor that the public
   // sequence (still empty) cannot rewind, so discard all partial state before propagating.

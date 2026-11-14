@@ -248,8 +248,7 @@ void StateCheckpointCache::Restore(const Entry& entry, const StateCheckpointDesc
   description.Restore(entry, device);
   device->Synchronize();
   storage_->Touch(entry);
-  ++metrics_.hits;
-  metrics_.matched_tokens += entry.tokens.size();
+  metrics_.RecordAdoption(entry.tokens.size());
 }
 
 }  // namespace Generators

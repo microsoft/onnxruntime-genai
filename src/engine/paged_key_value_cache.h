@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+#include "paged-prefix-checkpoint.h"
 
 #include <algorithm>
 #include <stdint.h>
@@ -79,6 +80,8 @@ size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
 // prefix caching retains windowed layers in full paged storage and includes them in this cost.
 size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
 
+size_t PagedWindowPrefixCheckpointBytes(const std::shared_ptr<Model>& model);
+
 size_t PagedCacheCaptureBlockTableBytes(const std::shared_ptr<Model>& model);
 
 // Resolves the configured prefix-cache flag, retention capacity, and target/auxiliary layout into
@@ -152,6 +155,15 @@ struct PagedKeyValueCache {
   const FixedStatePrefixCheckpoint* ReclaimablePrefixCheckpoint(
       const void* request_id = nullptr) const;
   bool PrefixCachingEnabled() const;
+  bool WindowPrefixSnapshotEnabled() const { return PrefixCachingEnabled() && Windowed(); }
+  void InitializeSnapshotCache(std::shared_ptr<PrefixSnapshotCache> cache) {
+    prefix_snapshot_cache_ = std::move(cache);
+  }
+  std::span<const std::shared_ptr<Block>> RequestBlocks(const void* request_id) const;
+  std::shared_ptr<const PagedWindowPrefixCheckpoint> CaptureWindowPrefix(
+      const void* request_id, size_t token_count, bool preserve_existing = false);
+  void RestoreWindowPrefix(const void* request_id, const PrefixCacheMatch& match,
+                           const PagedCacheReservation& reservation);
   bool RequiresPrefixCheckpoint() const;
   size_t BlockSize() const { return block_pool_->BlockSize(); }
   size_t MaxRequestBlockCount() const {
@@ -297,12 +309,16 @@ struct PagedKeyValueCache {
   void FillBlockTables(const std::vector<std::shared_ptr<Request>>& requests, bool windowed,
                        int32_t* data, size_t columns);
   void RebuildBlockTableIndex() noexcept;
+  std::vector<std::unique_ptr<Tensor>> WindowCacheViews() const;
   std::shared_ptr<Model> model_;
   std::vector<LayerCache> cache_;  // Pair of key and value caches for all layers
   // Scale caches in binding order: for each layer of cache_, the key scale then the value scale,
   // skipping a side whose input template is empty. BindCache() lays them out immediately after the
   // key/value inputs, so the block table inputs start at cache_.size() * 2 + scale_cache_.size().
   std::vector<ScaleCache> scale_cache_;
+  std::vector<size_t> window_cache_indices_;
+  std::vector<size_t> window_scale_indices_;
+  std::shared_ptr<PrefixSnapshotCache> prefix_snapshot_cache_;
   std::unique_ptr<BlockPool> block_pool_;           // Allocator for blocks
   std::vector<PagedCacheBlockTable> block_tables_;  // Block table for all requests in the cache
   std::unique_ptr<RequestIndex> block_table_index_;

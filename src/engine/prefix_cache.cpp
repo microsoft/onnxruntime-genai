@@ -52,6 +52,22 @@ bool LogicalIdentityEquals(
 
 }  // namespace
 
+void PrefixCacheMetrics::AddEventsSince(const PrefixCacheMetrics& before, const PrefixCacheMetrics& after) noexcept {
+  constexpr uint64_t PrefixCacheMetrics::* fields[]{
+      &PrefixCacheMetrics::lookups, &PrefixCacheMetrics::matches,
+      &PrefixCacheMetrics::deferred_matches, &PrefixCacheMetrics::queried_tokens,
+      &PrefixCacheMetrics::registered_blocks, &PrefixCacheMetrics::duplicate_registrations,
+      &PrefixCacheMetrics::hash_collisions, &PrefixCacheMetrics::evictions,
+      &PrefixCacheMetrics::retention_refusals, &PrefixCacheMetrics::publication_refusals};
+  for (auto field : fields) this->*field += after.*field - before.*field;
+}
+
+void PrefixCacheMetrics::RecordAdoption(size_t tokens) noexcept {
+  if (tokens == 0) return;
+  ++hits;
+  matched_tokens += tokens;
+}
+
 uint64_t PrefixCache::RootHash() {
   return kFnvOffsetBasis;
 }
@@ -113,17 +129,35 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   ++metrics_.lookups;
   metrics_.queried_tokens += adoptable;
 
-  if (options_.requires_checkpoint) {
-    // A hybrid hit is an indivisible physical history plus its fixed-state snapshot. Scan only
-    // bounded checkpoint endpoints, longest first and then most-recently-used for deterministic
-    // ties. Rebuilding the exact parent path prevents logical variants from ever being spliced.
+  if (options_.requires_checkpoint || options_.requires_draft_checkpoint) {
+    if (checkpoint_entries_.empty()) return match;
+    std::vector<uint64_t> prefix_hashes;
+    prefix_hashes.reserve(adoptable / block_size);
+    uint64_t parent_hash = RootHash();
+    for (size_t offset = 0; offset < adoptable; offset += block_size) {
+      parent_hash = Hash(parent_hash, tokens.subspan(offset, block_size));
+      prefix_hashes.push_back(parent_hash);
+    }
+    // Hashes filter endpoints before verifying tokens and physical ancestry. Keep the longest
+    // matching checkpoint, choosing the most recently used among equal-length histories.
     for (auto it = checkpoint_entries_.rbegin(); it != checkpoint_entries_.rend(); ++it) {
       Entry* endpoint = *it;
-      if (!endpoint || !endpoint->checkpoint) {
+      if (!endpoint || (options_.requires_checkpoint && !endpoint->checkpoint)) {
         std::terminate();
       }
-      const size_t token_count = endpoint->checkpoint->TokenCount();
+      const auto& draft = endpoint->draft_checkpoint;
+      if (options_.requires_draft_checkpoint &&
+          (!draft || !draft->IsResident() ||
+           (options_.requires_window_checkpoint && !draft->target_window))) {
+        continue;
+      }
+      const size_t token_count = options_.requires_checkpoint
+                                     ? endpoint->checkpoint->TokenCount()
+                                     : draft->token_count;
       if (token_count > adoptable || token_count <= match.token_count) {
+        continue;
+      }
+      if (endpoint->identity->hash != prefix_hashes[token_count / block_size - 1]) {
         continue;
       }
       std::vector<std::shared_ptr<Block>> blocks;
@@ -136,11 +170,13 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
       match.fixed_state_checkpoint = endpoint->checkpoint;
       match.draft_checkpoint.reset();
       if (endpoint->draft_checkpoint &&
-          endpoint->draft_checkpoint->state != PrefixSnapshotCache::State::Evicted) {
+          endpoint->draft_checkpoint->IsResident()) {
         match.draft_checkpoint = endpoint->draft_checkpoint;
       }
+      match.target_window_checkpoint =
+          match.draft_checkpoint ? match.draft_checkpoint->target_window : nullptr;
     }
-    if (!match.fixed_state_checkpoint) {
+    if (match.blocks.empty()) {
       return {};
     }
     ++metrics_.matches;
@@ -198,14 +234,19 @@ PrefixCacheRegistration PrefixCache::Register(
   }
 
   const uint64_t hash = Hash(parent ? parent->hash : RootHash(), tokens);
-  if (auto* existing = FindPhysical(hash, parent, tokens)) {
+  const auto logical_parent = parent ? parent->logical : nullptr;
+  const auto* logical_existing =
+      options_.requires_draft_checkpoint ? FindLogical(hash, logical_parent, tokens) : nullptr;
+  const auto logical_identity = logical_existing ? logical_existing->identity->logical : nullptr;
+  if (auto* existing = FindPhysical(hash, parent, tokens);
+      existing && !options_.requires_draft_checkpoint) {
     // Two sequences computed the same prefix before either was indexed. The first physical copy
     // serves every paged-only lookup.
     ++metrics_.duplicate_registrations;
     Reorder(*existing, parent);
     return {PrefixCacheRegistrationStatus::Duplicate, nullptr};
   }
-  if (entries_by_hash_.find(hash) != entries_by_hash_.end()) {
+  if (!logical_existing && entries_by_hash_.find(hash) != entries_by_hash_.end()) {
     // A different block already holds this identity. Nothing after it can be reached either, so
     // the caller stops here rather than indexing entries no lookup can ever verify.
     ++metrics_.hash_collisions;
@@ -223,7 +264,10 @@ PrefixCacheRegistration PrefixCache::Register(
   identity->hash = hash;
   identity->block_id = block->Id();
   identity->parent = parent;
-  if (options_.requires_checkpoint || options_.max_checkpoints != 0) {
+  if (logical_identity) {
+    identity->logical = logical_identity;
+  } else if (options_.requires_checkpoint || options_.requires_draft_checkpoint ||
+             options_.max_checkpoints != 0) {
     auto logical = std::make_shared<LogicalPrefixIdentity>();
     logical->hash = hash;
     logical->parent = parent ? parent->logical : nullptr;
@@ -648,9 +692,16 @@ bool PrefixCache::CanAttachDraftCheckpoint(
     return false;
   }
   const auto* entry = FindEntry(identity);
-  return entry && entry->checkpoint && entry->checkpoint->TokenCount() == token_count &&
+  size_t blocks = 0;
+  for (auto current = identity; current; current = current->parent) ++blocks;
+  const bool target_ready = options_.requires_checkpoint
+                                ? entry && entry->checkpoint &&
+                                      entry->checkpoint->TokenCount() == token_count
+                                : options_.requires_draft_checkpoint &&
+                                      token_count == blocks * block_pool_.BlockSize();
+  return entry && target_ready &&
          (!entry->draft_checkpoint ||
-          entry->draft_checkpoint->state == PrefixSnapshotCache::State::Evicted);
+          !entry->draft_checkpoint->IsResident());
 }
 
 std::shared_ptr<const FixedStatePrefixCheckpoint> PrefixCache::DraftBoundary(
@@ -663,13 +714,16 @@ bool PrefixCache::AttachDraftCheckpoint(
     const std::shared_ptr<const BlockIdentity>& identity,
     const std::shared_ptr<const FixedStatePrefixCheckpoint>& fixed_checkpoint,
     std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint) {
-  if (!draft_checkpoint || !fixed_checkpoint ||
+  if (!draft_checkpoint || (options_.requires_checkpoint && !fixed_checkpoint) ||
       !CanAttachDraftCheckpoint(identity, draft_checkpoint->token_count)) {
     return false;
   }
   auto* entry = FindEntry(identity);
   if (!entry || entry->checkpoint != fixed_checkpoint) {
     return false;
+  }
+  if (!entry->checkpoint && !entry->draft_checkpoint) {
+    checkpoint_entries_.push_back(entry);
   }
   entry->draft_checkpoint = std::move(draft_checkpoint);
   return true;
@@ -681,6 +735,10 @@ void PrefixCache::DropUnleasedDraftCheckpoints() {
       entry.draft_checkpoint.reset();
     }
   }
+  checkpoint_entries_.erase(
+      std::remove_if(checkpoint_entries_.begin(), checkpoint_entries_.end(),
+                     [](const Entry* entry) { return !entry->checkpoint && !entry->draft_checkpoint; }),
+      checkpoint_entries_.end());
 }
 
 size_t PrefixCache::ReclaimCheckpoints(size_t checkpoints_needed) {
@@ -870,7 +928,7 @@ void PrefixCache::OnBlockBecameReclaimable(Block& block, void* cookie) noexcept 
 
 void PrefixCache::Evict(std::unordered_map<size_t, Entry>::iterator it) {
   auto block = it->second.block;
-  if (it->second.checkpoint) {
+  if (it->second.checkpoint || it->second.draft_checkpoint) {
     const auto checkpoint_entry =
         std::find(checkpoint_entries_.begin(), checkpoint_entries_.end(), &it->second);
     if (checkpoint_entry == checkpoint_entries_.end()) {

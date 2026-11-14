@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <limits>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -130,6 +131,37 @@ TEST(NativeDeviceMemoryBudgetTest, RejectsMissingBaselineHeadroomInvalidFactorsA
   settings.gpu_utilization_factor = 1.0f;
   EXPECT_THROW(NativeSnapshotDeviceMemoryLimit(settings, std::nullopt, std::numeric_limits<size_t>::max(), 1),
                std::overflow_error);
+}
+
+TEST(NativeDeviceMemoryBudgetTest,
+     SharedInitializationPreservesMemoryControlsWhenPolicyIsNormalizedOrCachingIsInactive) {
+  for (int inactive = 0; inactive < 3; ++inactive) {
+    SCOPED_TRACE(inactive);
+    CountingCudaDevice device;
+    device.state->total_memory_bytes = 1024;
+    auto model = LoadStaticDecoderOnlyModel();
+    struct RestoreDevice {
+      ~RestoreDevice() { model.p_device_ = original; }
+      Model& model;
+      DeviceInterface* original;
+    } restore{*model, std::exchange(model->p_device_, &device)};
+    model->device_memory_budget_initial_free_bytes_ = 1024;
+    auto& config = *model->config_;
+    config.engine.dynamic_batching.emplace();
+    auto& settings = *config.engine.dynamic_batching;
+    settings.prefix_caching = inactive != 1;
+    settings.snapshot_cache.ram_bytes = 64;
+    settings.device_memory_budget_bytes = 512;
+    settings.device_memory_headroom_bytes = 0;
+    NativeDeviceMemoryBudget budget{*model};
+    auto cache = budget.ConfigurePrefixCache(config, inactive == 2 ? "backend is ineligible" : nullptr);
+    EXPECT_EQ(cache != nullptr, inactive == 0);
+    config.engine.dynamic_batching.reset();
+    EXPECT_NO_THROW(budget.Refresh());
+    device.state->free_memory_bytes = 256;
+    EXPECT_THROW(budget.Refresh(), std::runtime_error);
+    EXPECT_EQ(device.state->memory_queries, 2u);
+  }
 }
 
 #if USE_CUDA

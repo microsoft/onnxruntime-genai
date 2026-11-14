@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <utility>
+
 #include <gtest/gtest.h>
 
 #include "engine/prefix-checkpoint-index.h"
@@ -134,6 +136,47 @@ TEST(PrefixCheckpointIndexTest, PublicationGrowsGeometricallyBeforeCapture) {
   }
   EXPECT_LT(moves, 128u * 8);
   EXPECT_EQ(metrics.publication_refusals, 0u);
+}
+
+TEST(PrefixCheckpointIndexTest, OperationalEventDeltasDoNotPublishUnacknowledgedAdoption) {
+  PrefixCacheMetrics before;
+  before.lookups = 8;
+  before.matches = 4;
+  before.hits = 3;
+  before.queried_tokens = 64;
+  before.matched_tokens = 24;
+  auto after = before;
+  ++after.lookups;
+  ++after.matches;
+  ++after.deferred_matches;
+  after.queried_tokens += 16;
+  after.registered_blocks += 2;
+  ++after.duplicate_registrations;
+  ++after.hash_collisions;
+  ++after.evictions;
+  ++after.retention_refusals;
+  ++after.publication_refusals;
+  after.RecordAdoption(8);
+  PrefixCacheMetrics events;
+  events.RecordAdoption(4);
+  events.AddEventsSince(before, after);
+  EXPECT_EQ(events.lookups, 1u);
+  EXPECT_EQ(events.matches, 1u);
+  EXPECT_EQ(events.deferred_matches, 1u);
+  EXPECT_EQ(events.queried_tokens, 16u);
+  EXPECT_EQ(events.registered_blocks, 2u);
+  EXPECT_EQ(events.duplicate_registrations, 1u);
+  EXPECT_EQ(events.hash_collisions, 1u);
+  EXPECT_EQ(events.evictions, 1u);
+  EXPECT_EQ(events.retention_refusals, 1u);
+  EXPECT_EQ(events.publication_refusals, 1u);
+  EXPECT_EQ(events.hits, 1u);
+  EXPECT_EQ(events.matched_tokens, 4u);
+  size_t pending = 8;
+  for (int ack = 0; ack < 2; ++ack)
+    events.RecordAdoption(std::exchange(pending, 0));
+  EXPECT_EQ(events.hits, 2u);
+  EXPECT_EQ(events.matched_tokens, 12u);
 }
 
 TEST(NativePrefixSnapshotPolicyTest, DefaultsDependOnTheTargetNotTheDrafterAndRespectExplicitPolicy) {

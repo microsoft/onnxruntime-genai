@@ -160,10 +160,7 @@ struct BoltExecutor final : ModelExecutor {
   void OnStepCommitted(const ScheduledRequests& requests, std::span<const RequestStepResult>) override {
     for (const auto& ack : requests.CommitAcks()) {
       session->completions.Acknowledge(ack);
-      if (session->pending_cached_prefix != 0) {
-        ++session->prefix_metrics.hits;
-        session->prefix_metrics.matched_tokens += std::exchange(session->pending_cached_prefix, 0);
-      }
+      session->prefix_metrics.RecordAdoption(std::exchange(session->pending_cached_prefix, 0));
       session->delivered += ack.tokens_appended;
       session->discarded += ack.candidates_consumed - ack.tokens_appended;
     }

@@ -273,13 +273,21 @@ bool IsPrefixCachingRequested(const Config& config) {
          config.engine.dynamic_batching->prefix_caching.value_or(!config.model.decoder.sliding_window.has_value());
 }
 
-std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(const Config& config) {
+std::shared_ptr<PrefixSnapshotCache> CreateNativePrefixSnapshotCache(
+    const Config& config, const char* disabled_reason, std::string_view warning_component) {
   if (!IsPrefixCachingRequested(config)) return nullptr;
   const auto& batching = *config.engine.dynamic_batching;
   const auto& limits = batching.snapshot_cache;
-  if (batching.max_snapshots.value_or(1) == 0 ||
-      (limits.Configured() && !limits.Enabled()))
+  if (batching.max_snapshots.value_or(1) == 0)
+    disabled_reason = "max_snapshots is zero";
+  else if (!disabled_reason && limits.Configured() && !limits.Enabled())
+    disabled_reason = "snapshot_cache tier budgets are all zero";
+  if (disabled_reason) {
+    if (!warning_component.empty() && batching.prefix_caching.value_or(false) && g_log.enabled && g_log.warning)
+      Log("warning", "%.*s prefix caching is inactive: %s.",
+          static_cast<int>(warning_component.size()), warning_component.data(), disabled_reason);
     return nullptr;
+  }
   const bool resident = !limits.Configured();
   return std::make_shared<PrefixSnapshotCache>(
       std::array<size_t, 3>{limits.vram_bytes, limits.ram_bytes, limits.disk_bytes},
@@ -600,7 +608,8 @@ void PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device)
 
 bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device,
                                    std::string_view component,
-                                   size_t component_max_entries) {
+                                   size_t component_max_entries,
+                                   bool preserve_existing) {
   entry->PrepareStorage();
   const bool webgpu = device->GetType() == DeviceType::WEBGPU;
   const bool device_resident = device_resident_ || webgpu;
@@ -614,7 +623,9 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     LogEvent("refused", entry.get(), reason);
     return false;
   };
-  if (device_memory_limit_ && !MakeRoom(Tier::Vram, 0, device))
+  if (device_memory_limit_ &&
+      (preserve_existing ? accounting_->used[0] > Limit(Tier::Vram)
+                         : !MakeRoom(Tier::Vram, 0, device)))
     return refuse("device_memory_leased");
   if (entry->bytes == 0) return refuse("empty_payload");
   if (max_entries_ == 0 || component_max_entries == 0) return refuse("count_disabled");
@@ -623,6 +634,11 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     return refuse("payload_exceeds_tiers");
   }
   Prune();
+  if (preserve_existing &&
+      (entries_.size() >= max_entries_ ||
+       (!component.empty() && Count(component) >= component_max_entries))) {
+    return refuse("preserving_existing_count");
+  }
   entries_.reserve(entries_.size() + 1);
   const auto publish = [&] {
     entry->component = component;
@@ -645,8 +661,16 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     if (!EvictOldest()) return refuse("shared_count_leased");
   }
   for (size_t index = 0; index < limits_.size(); ++index) {
-    if ((!device_resident || device_memory_limit_) &&
-        !MakeRoom(static_cast<Tier>(index), entry->bytes, device)) continue;
+    if (static_cast<Tier>(index) == Tier::Disk && disk_writes_disabled_) continue;
+    if (!device_resident || device_memory_limit_) {
+      const auto tier = static_cast<Tier>(index);
+      if (preserve_existing) {
+        if (accounting_->used[index] > Limit(tier) ||
+            entry->bytes > Limit(tier) - accounting_->used[index]) continue;
+      } else if (!MakeRoom(tier, entry->bytes, device)) {
+        continue;
+      }
+    }
     Entry staged;
     staged.shapes = entry->shapes;
     staged.type = entry->type;

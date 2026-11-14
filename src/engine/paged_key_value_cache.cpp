@@ -10,6 +10,7 @@
 #include <string_view>
 #include <unordered_set>
 
+#include "../dflash2_drafter.h"
 #include "../models/model_state_manifest.h"
 #include "prefix_snapshot_cache.h"
 #include "sequence_positions.h"
@@ -116,6 +117,12 @@ ONNXTensorElementDataType KeyValueCacheType(const std::shared_ptr<Model>& model,
   return *common;
 }
 
+bool SupportsTargetMappedPrefix(const Config& config, const Dflash2Drafter::CacheDescription& drafter) {
+  return drafter.prefix_reuse == Dflash2Drafter::CacheDescription::PrefixReuse::TargetBlocks &&
+         !config.model.mtp.IsEnabled() &&
+         !ModelStateManifest{config.model.decoder}.HasFixedStateGroups();
+}
+
 // Layers whose KV cache is a ring sized to the sliding window instead of to the context length.
 // A model qualifies only if it was built with a second block table for them; without it every
 // layer reads the same table and the ring would be indexed as if it were a linear cache.
@@ -144,9 +151,10 @@ std::set<int> WindowedLayers(const std::shared_ptr<Model>& model,
   if (!layers.empty() && decoder.sliding_window->window_size <= 0) {
     throw std::runtime_error("Sliding-window size must be greater than zero.");
   }
-  // Prefix retention needs immutable KV for every indexed block, including windowed layers.
-  // Keep the smaller rings by default; full paged storage requires an explicit opt-in.
-  if (model->config_->engine.dynamic_batching->prefix_caching.value_or(false)) {
+  const auto drafter = Dflash2Drafter::DescribeCache(*model->config_);
+  // A mapped drafter checkpoint restores the rings; legacy prefix retention keeps every layer.
+  if (model->config_->engine.dynamic_batching->prefix_caching.value_or(false) &&
+      !SupportsTargetMappedPrefix(*model->config_, drafter)) {
     return {};
   }
   return layers;
@@ -474,6 +482,29 @@ size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
   return bytes;
 }
 
+size_t PagedWindowPrefixCheckpointBytes(const std::shared_ptr<Model>& model) {
+  const auto& decoder = model->config_->model.decoder;
+  const auto windowed = WindowedLayers(model, ResolvePagedKeyValueGroup(decoder));
+  if (windowed.empty()) return 0;
+  const auto chunk_size = model->config_->search.chunk_size.value_or(0);
+  if (chunk_size == 0) {
+    throw std::runtime_error("Window prefix snapshots require chunked prefill.");
+  }
+  const size_t ring_blocks = WindowRingBlocks(
+      chunk_size, static_cast<size_t>(decoder.sliding_window->window_size),
+      model->config_->engine.dynamic_batching->block_size);
+  size_t bytes = 0;
+  for (const int layer : windowed) {
+    const size_t layer_bytes = CheckedMultiply(
+        ring_blocks, BytesPerBlock(model, layer), "Window prefix snapshot");
+    if (layer_bytes > std::numeric_limits<size_t>::max() - bytes) {
+      throw std::overflow_error("Window prefix snapshot overflows size_t");
+    }
+    bytes += layer_bytes;
+  }
+  return bytes;
+}
+
 size_t PagedCacheCaptureBlockTableBytes(const std::shared_ptr<Model>& model) {
   const auto& batching = *model->config_->engine.dynamic_batching;
   const auto& decoder = model->config_->model.decoder;
@@ -497,20 +528,27 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
   if (!IsPrefixCachingRequested(*model->config_)) {
     return false;
   }
+  if (auxiliary_bytes_per_block != 0 &&
+      (batching.dflash2_max_snapshots == 0 ||
+       (batching.max_snapshots && *batching.max_snapshots == 0) ||
+       (batching.snapshot_cache.Configured() && !batching.snapshot_cache.Enabled()))) return false;
 
   const auto paged_group =
       ResolvePagedKeyValueGroup(model->config_->model.decoder);
   const auto windowed = WindowedLayers(model, paged_group);
-  const char* unsupported_layout = nullptr;
-  if (!model->config_->model.dflash2.filename.empty() &&
-      model->config_->model.dflash2.is_dspark) {
-    unsupported_layout =
-        "Prefix caching does not yet support an Engine-hosted DSpark drafter.";
-  } else if (auxiliary_bytes_per_block != 0) {
+  const auto drafter = Dflash2Drafter::DescribeCache(*model->config_);
+  const char* unsupported_layout = drafter.unsupported_prefix_reason;
+  if (!unsupported_layout && auxiliary_bytes_per_block != 0 &&
+      !SupportsTargetMappedPrefix(*model->config_, drafter)) {
     unsupported_layout =
         "Prefix caching does not yet support an auxiliary cache that mirrors target blocks.";
-  } else if (!windowed.empty()) {
-    return false;
+  }
+  if (!unsupported_layout && !windowed.empty()) {
+    if (auxiliary_bytes_per_block == 0) return false;
+    if (!batching.snapshot_cache.Configured() || !batching.snapshot_cache.Enabled()) {
+      throw std::runtime_error(
+          "Sliding-window DFlash prefix caching requires an explicit snapshot_cache byte budget.");
+    }
   }
   if (!unsupported_layout) {
     return true;
@@ -620,6 +658,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
     std::unique_ptr<void, Ort::AllocatorDeleter> value_storage(nullptr, Ort::AllocatorDeleter(&allocator));
     auto key_cache = create_payload(key_shape_per_layer, key_storage);
     auto value_cache = create_payload(value_shape_per_layer, value_storage);
+    if (windowed.count(layer_id) != 0) window_cache_indices_.push_back(cache_.size());
     cache_.push_back(LayerCache{
         std::move(key_storage),
         std::move(value_storage),
@@ -657,6 +696,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
       }
       auto scale_value = OrtValue::CreateTensor(allocator.GetInfo(), storage.get(), scale_bytes, scale_shape, scale_type);
       ByteWrapTensor(*model->p_device_kvcache_, *scale_value).Zero();
+      if (windowed.count(layer_id) != 0) window_scale_indices_.push_back(scale_cache_.size());
       scale_cache_.push_back({std::move(storage), std::move(scale_value), input_name, output_name});
     }
   }
@@ -666,6 +706,8 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   prefix_options.max_blocks = num_blocks;
   prefix_options.requires_checkpoint = requires_prefix_checkpoint;
   prefix_options.max_checkpoints = max_prefix_checkpoints;
+  prefix_options.requires_draft_checkpoint = prefix_caching_enabled && auxiliary_bytes_per_block != 0;
+  prefix_options.requires_window_checkpoint = prefix_options.requires_draft_checkpoint && Windowed();
   prefix_cache_ =
       std::make_unique<PrefixCache>(*block_pool_, prefix_options);
   if (Windowed()) {
@@ -1076,7 +1118,9 @@ bool PagedKeyValueCache::AttachPrefixCheckpoint(
 
 std::optional<DraftPrefixBoundary> PagedKeyValueCache::DraftBoundary(
     const void* request_id, size_t token_count) const {
-  if (!prefix_cache_->Enabled() || !prefix_cache_->Options().requires_checkpoint) {
+  if (!prefix_cache_->Enabled() ||
+      (!prefix_cache_->Options().requires_checkpoint &&
+       !prefix_cache_->Options().requires_draft_checkpoint)) {
     return std::nullopt;
   }
   const auto table_index = block_table_index_->Find(request_id);
@@ -1090,7 +1134,8 @@ std::optional<DraftPrefixBoundary> PagedKeyValueCache::DraftBoundary(
     return std::nullopt;
   }
   auto checkpoint = prefix_cache_->DraftBoundary(table.sealed_identity_, token_count);
-  if (!checkpoint) {
+  if (!checkpoint &&
+      !prefix_cache_->CanAttachDraftCheckpoint(table.sealed_identity_, token_count)) {
     return std::nullopt;
   }
   return DraftPrefixBoundary{table.sealed_identity_, std::move(checkpoint)};
@@ -1104,6 +1149,133 @@ bool PagedKeyValueCache::AttachDraftCheckpoint(
 
 void PagedKeyValueCache::DropUnleasedDraftCheckpoints() {
   prefix_cache_->DropUnleasedDraftCheckpoints();
+}
+
+std::span<const std::shared_ptr<Block>> PagedKeyValueCache::RequestBlocks(
+    const void* request_id) const {
+  const auto index = block_table_index_->Find(request_id);
+  if (!index || *index >= block_tables_.size()) {
+    throw std::logic_error("DFlash 2 target request has no committed block table.");
+  }
+  return block_tables_[*index].Blocks();
+}
+
+std::vector<std::unique_ptr<Tensor>> PagedKeyValueCache::WindowCacheViews() const {
+  std::vector<std::unique_ptr<Tensor>> views;
+  views.reserve(window_cache_indices_.size() * 2 + window_scale_indices_.size());
+  const auto add = [&](OrtValue& value) {
+    const size_t bytes = ByteWrapTensor(*model_->p_device_kvcache_, value).size();
+    if (bytes > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+      throw std::overflow_error("Window prefix tensor exceeds the snapshot shape range.");
+    }
+    auto view = std::make_unique<Tensor>(
+        model_->p_device_kvcache_, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    view->ort_tensor_ = OrtValue::CreateTensor(
+        model_->p_device_kvcache_->GetAllocator().GetInfo(),
+        value.GetTensorMutableData<uint8_t>(), bytes,
+        std::vector<int64_t>{static_cast<int64_t>(bytes)},
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    views.push_back(std::move(view));
+  };
+  for (const size_t index : window_cache_indices_) {
+    add(*cache_[index].key_cache);
+    add(*cache_[index].value_cache);
+  }
+  for (const size_t index : window_scale_indices_) add(*scale_cache_[index].value);
+  return views;
+}
+
+std::shared_ptr<const PagedWindowPrefixCheckpoint> PagedKeyValueCache::CaptureWindowPrefix(
+    const void* request_id, size_t token_count, bool preserve_existing) {
+  if (!WindowPrefixSnapshotEnabled() || !prefix_snapshot_cache_) return nullptr;
+  const auto index = block_table_index_->Find(request_id);
+  if (!index || token_count == 0 || token_count % BlockSize() != 0 ||
+      block_tables_[*index].CommittedSlots() != token_count) return nullptr;
+  const auto& blocks = block_tables_[*index].WindowBlocks();
+  if (blocks.size() != window_ring_blocks_) {
+    throw std::logic_error("Window prefix capture has an invalid ring.");
+  }
+  auto views = WindowCacheViews();
+  auto checkpoint = std::make_shared<PagedWindowPrefixCheckpoint>();
+  checkpoint->token_count = token_count;
+  checkpoint->ring_blocks = window_ring_blocks_;
+  checkpoint->type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+  for (const auto& view : views) {
+    const size_t block_bytes = view->GetByteSpan().size() / window_block_pool_->Capacity();
+    checkpoint->shapes.push_back(
+        {static_cast<int64_t>(window_ring_blocks_ * block_bytes)});
+  }
+  const auto& batching = *model_->config_->engine.dynamic_batching;
+  try {
+    if (!prefix_snapshot_cache_->Allocate(
+            checkpoint, model_->p_device_kvcache_, "paged-window",
+            std::min(batching.dflash2_max_snapshots, batching.max_batch_size),
+            preserve_existing)) return nullptr;
+    std::vector<PrefixSnapshotCache::Entry::Range> ranges(window_ring_blocks_);
+    for (size_t layer = 0; layer < views.size(); ++layer) {
+      const size_t block_bytes = views[layer]->GetByteSpan().size() / window_block_pool_->Capacity();
+      for (size_t block = 0; block < blocks.size(); ++block) {
+        ranges[block] = {block * block_bytes, blocks[block]->Id() * block_bytes, block_bytes};
+      }
+      checkpoint->Write(layer, *views[layer], ranges);
+    }
+    checkpoint->Flush();
+    model_->p_device_kvcache_->Synchronize();
+    return checkpoint;
+  } catch (const std::system_error&) {
+    model_->p_device_kvcache_->Synchronize();
+    prefix_snapshot_cache_->Discard(*checkpoint);
+    return nullptr;
+  } catch (...) {
+    model_->p_device_kvcache_->Synchronize();
+    throw;
+  }
+}
+
+void PagedKeyValueCache::RestoreWindowPrefix(
+    const void* request_id, const PrefixCacheMatch& match,
+    const PagedCacheReservation& reservation) {
+  if (!WindowPrefixSnapshotEnabled()) return;
+  const auto& checkpoint = match.target_window_checkpoint;
+  const auto& deltas = reservation.Deltas();
+  const auto delta = std::find_if(deltas.begin(), deltas.end(),
+                                  [request_id](const auto& item) { return item.request_id == request_id; });
+  if (!checkpoint || checkpoint->state != PrefixSnapshotCache::State::Resident ||
+      checkpoint->token_count != match.token_count ||
+      checkpoint->ring_blocks != window_ring_blocks_ ||
+      delta == deltas.end() || !delta->newly_admitted ||
+      delta->reserved_window_block_count != window_ring_blocks_ ||
+      checkpoint->type != ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) {
+    throw std::logic_error("Window prefix adoption has an incompatible checkpoint or reservation.");
+  }
+  auto views = WindowCacheViews();
+  if (checkpoint->shapes.size() != views.size()) {
+    throw std::logic_error("Window prefix checkpoint has incompatible cache tensors.");
+  }
+  for (size_t layer = 0; layer < views.size(); ++layer) {
+    const size_t block_bytes = views[layer]->GetByteSpan().size() / window_block_pool_->Capacity();
+    if (checkpoint->shapes[layer] !=
+        std::vector<int64_t>{static_cast<int64_t>(window_ring_blocks_ * block_bytes)}) {
+      throw std::logic_error("Window prefix checkpoint has incompatible cache geometry.");
+    }
+  }
+  try {
+    std::vector<PrefixSnapshotCache::Entry::Range> ranges(window_ring_blocks_);
+    for (size_t layer = 0; layer < views.size(); ++layer) {
+      const size_t block_bytes = views[layer]->GetByteSpan().size() / window_block_pool_->Capacity();
+      for (size_t block = 0; block < window_ring_blocks_; ++block) {
+        const auto& destination =
+            reservation.ReservedWindowBlocks()[delta->reserved_window_block_offset + block];
+        ranges[block] = {block * block_bytes, destination->Id() * block_bytes, block_bytes};
+      }
+      checkpoint->Read(layer, *views[layer], ranges);
+    }
+    model_->p_device_kvcache_->Synchronize();
+    prefix_snapshot_cache_->Touch(*checkpoint);
+  } catch (...) {
+    model_->p_device_kvcache_->Synchronize();
+    throw;
+  }
 }
 
 size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
