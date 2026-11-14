@@ -1,16 +1,32 @@
 # Native Nemotron-3.5 Bolt / LiLiCorr
 
-`nemotron_bolt` implements batch-one, single-CUDA-device greedy generation through
-the ordinary Model / Generator API. It does **not** use the paged target Engine or
-support dynamic batching. The implementation runs the fixed-R8 target and the
+`nemotron_bolt` implements single-CUDA-device greedy generation through
+both the batch-one Model / Generator API and the multi-request `Engine` API (`og.Engine`).
+`Generator` accepts dense `GroupQueryAttention` caches (`[1, 2, capacity, 128]`) as well as
+`com.microsoft:PagedAttention` block pools (`[num_blocks, 256, 2, 128]`).
+`og.Engine` requires a dynamic-prefill `com.microsoft:PagedAttention` target graph with
+banked `Mamba2Verify` recurrent state (`past_conv.%d` `[num_state_banks, 8, 10240, 3]`,
+`past_ssm.%d` `[num_state_banks, 8, 128, 128, 64]`, `state_row` `[batch_size]`,
+`state_slots` `[batch_size]`, `logit_rows`, and `aux_rows`), supporting `max_batch_size`
+in `1..64` with continuous batching over the shared `PagedAttention` block pool and
+batched DFlash2 drafter (mixed chunked prefill + speculative decode and CUDA-graph
+batched decode) plus `runtime_profiles`.
+The implementation runs the R8 verification / dynamic-R prefill target and the
 LiLiCorr DFlash2 drafter directly in C++ with ORT. No Python inference bridge or
 synthetic logits are involved.
 
 ## Package configuration
 
 Use `model.type: "nemotron_bolt"`, `model.vocab_size: 131072`,
-`model.context_length: 135160`, and `model.decoder.filename: "model.onnx"` for a
-fixed-R8 graph with KV capacity 135168. `context_length`
+and `model.decoder.filename: "model.onnx"`.
+For converted `com.microsoft:PagedAttention` packages (`examples/python/nemotron-bolt-prefill.py`),
+`model.context_length` and `search.max_length` are promoted to `max_position_embeddings`
+(`262144` / `256K`), `block_table` columns are bounded per sequence to
+`ceil((context_length + 8) / 256)` (`1025` blocks = `262,400` KV slots), and disjoint
+`runtime_profiles` automatically size `max_batch_size` (`1, 2, 4, 8`) and `num_blocks`
+(`133, 261, 1029, 2058, 4116, 8231`) by GPU VRAM (`24 GiB` through `> 84 GiB` RTX PRO 6000 / H200 / B200).
+For legacy fixed-R8 dense-KV graphs with KV capacity 135168, use
+`model.context_length: 135160`; dense-KV `context_length`
 must reserve at least eight scratch positions below the graph's KV capacity.
 `search.max_length` includes the prompt and must not exceed `context_length`.
 Usual BOS/PAD/EOS fields apply, including an EOS list such as `[2, 11]`.
@@ -177,6 +193,25 @@ rows per chunk with the standard `search.chunk_size` option, either in `genai_co
 | > 8 | that many rows per chunk, capped at the KV capacity minus 8 |
 
 Fixed `[1, 8]` targets accept only `search.chunk_size <= 8` and reject larger values.
+
+### Engine and PagedAttention
+
+`nemotron_bolt` also runs on `og.Engine(model)` via a single-slot fixed-slot
+executor (`max_batch_size: 1`) that ingests prompts one chunk per `Engine::Run()`
+step (`search.chunk_size`, or `engine.dynamic_batching.max_scheduled_tokens` when
+`search.chunk_size` is unset) and delivers one speculative round (`1..8` greedy
+tokens) per decode step, honoring stop strings, EOS, turn token budgets, and
+`engine.get_speculative_stats()`.
+
+Target graphs converted to `com.microsoft:PagedAttention` expose
+`past_key_values.%d.{key,value}` / `present.%d.{key,value}` with shape
+`[num_blocks, 256, 2, 128]` plus `cumulative_sequence_lengths`,
+`past_sequence_lengths`, `block_table`, and `attention_metadata`. When
+`engine.dynamic_batching` configures `num_blocks` (directly or through
+`runtime_profiles`), `NemotronBoltModel` deducts the reserved DFlash2 pool bytes,
+sizes the target `256`-token block pool accordingly, and skips KV zeroing on
+reset and 128-key split-K boundary double-verification. Multi-slot batching
+(`max_batch_size > 1`) and `prefix_caching: true` remain unsupported.
 
 The pinned native H128 Flash attention route partitions split-K work in 128-key tiles using the
 padded endpoint of each R8 call. Crossing a tile boundary inside a speculative
