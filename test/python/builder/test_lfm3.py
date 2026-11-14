@@ -8,7 +8,7 @@ on the full-attention layers), a sigmoid output gate per head and sandwich norms
 match the PyTorch model through a prefill longer than the window and the decode steps after it; that
 test needs transformers' LFM3 classes and an onnxruntime that runs CausalConvWithState. The other tests
 need no LFM3 classes: they build from a stand-in config, and the graph tests from a stand-in module tree
-with the module names of the checkpoints' remote code. Of those, only the KV cache tests, in onnxruntime_genai,
+with the module names of the checkpoints' remote code or of transformers' LFM3. Of those, only the KV cache tests, in onnxruntime_genai,
 and the d1-2B causal test run their graphs, so they need that onnxruntime too.
 """
 
@@ -52,7 +52,7 @@ ROPE_PARAMETERS = {
 }
 
 
-def _build_tiny_lfm3(tmp_path, full_attention_rope_type):
+def _build_tiny_lfm3(tmp_path, full_attention_rope_type, **config_overrides):
     config = transformers.Lfm3Config(
         architectures=["Lfm3ForCausalLM"],
         vocab_size=VOCAB_SIZE,
@@ -77,6 +77,7 @@ def _build_tiny_lfm3(tmp_path, full_attention_rope_type):
         norm_eps=1e-3,
         # Larger weights than the default 0.02, so a missing gate or norm moves the logits visibly.
         initializer_range=0.2,
+        **config_overrides,
     )
     config._attn_implementation = "eager"
     with torch.random.fork_rng(devices=[]):
@@ -120,8 +121,14 @@ def _empty_past(session, model):
 # The Hub checkpoints spell the zero-tail RoPE of the full-attention layers "default" with a
 # partial_rotary_factor, transformers spells it "proportional"; the export must read both the same way.
 @pytest.mark.parametrize("full_attention_rope_type", ["default", "proportional"])
-def test_lfm3_matches_pytorch_past_the_sliding_window(tmp_path, full_attention_rope_type):
-    session, model, hf_model = _build_tiny_lfm3(tmp_path, full_attention_rope_type)
+# With these off, transformers sets the gate to None and the sandwich norms to Identity.
+@pytest.mark.parametrize(
+    "config_overrides",
+    [{}, {"use_attention_gate": False}, {"use_sandwich_norm": False}],
+    ids=["gate-sandwich", "no-gate", "no-sandwich"],
+)
+def test_lfm3_matches_pytorch_past_the_sliding_window(tmp_path, full_attention_rope_type, config_overrides):
+    session, model, hf_model = _build_tiny_lfm3(tmp_path, full_attention_rope_type, **config_overrides)
     past = _empty_past(session, model)
     output_names = [output.name for output in session.get_outputs()]
 
@@ -177,10 +184,12 @@ def _stand_in_config(
 
 
 class Lfm3DecoderLayer(torch.nn.Module):
-    """A layer with the module names of the checkpoints' remote code. The builder finds layers by this
-    class name's suffix and reads their weights by attribute name, without running them."""
+    """A layer with the module names of the checkpoints' remote code, or of transformers' LFM3, which names the
+    gate g_proj, sets it to None without use_attention_gate and the sandwich norms to Identity without
+    use_sandwich_norm. The builder finds layers by this class name's suffix and reads their weights by attribute
+    name, without running them."""
 
-    def __init__(self, config, layer_type, use_sandwich_norm):
+    def __init__(self, config, layer_type, use_sandwich_norm, transformers_layout=False, use_attention_gate=True):
         super().__init__()
         hidden, intermediate = config.hidden_size, config.intermediate_size
         heads, kv_heads, head_dim = config.num_attention_heads, config.num_key_value_heads, config.head_dim
@@ -195,7 +204,8 @@ class Lfm3DecoderLayer(torch.nn.Module):
             self.self_attn.k_proj = torch.nn.Linear(hidden, kv_heads * head_dim, bias=False)
             self.self_attn.v_proj = torch.nn.Linear(hidden, kv_heads * head_dim, bias=False)
             self.self_attn.o_proj = torch.nn.Linear(heads * head_dim, hidden, bias=False)
-            self.self_attn.gate_proj = torch.nn.Linear(hidden, heads, bias=False)
+            gate = torch.nn.Linear(hidden, heads, bias=False) if use_attention_gate else None
+            setattr(self.self_attn, "g_proj" if transformers_layout else "gate_proj", gate)
             self.self_attn.q_norm = torch.nn.RMSNorm(head_dim)
             self.self_attn.k_norm = torch.nn.RMSNorm(head_dim)
         self.feed_forward = torch.nn.Module()
@@ -207,24 +217,27 @@ class Lfm3DecoderLayer(torch.nn.Module):
         if use_sandwich_norm:
             self.post_operator_norm = torch.nn.RMSNorm(hidden)
             self.post_ffn_norm = torch.nn.RMSNorm(hidden)
+        elif transformers_layout:
+            self.post_operator_norm = torch.nn.Identity()
+            self.post_ffn_norm = torch.nn.Identity()
 
 
-def _stand_in_lfm3(config, use_sandwich_norm):
+def _stand_in_lfm3(config, use_sandwich_norm, **layer_kwargs):
     hf_model = torch.nn.Module()
     hf_model.model = torch.nn.Module()
     hf_model.model.embed_tokens = torch.nn.Embedding(config.vocab_size, config.hidden_size)
     hf_model.model.layers = torch.nn.ModuleList(
-        Lfm3DecoderLayer(config, layer_type, use_sandwich_norm) for layer_type in config.layer_types
+        Lfm3DecoderLayer(config, layer_type, use_sandwich_norm, **layer_kwargs) for layer_type in config.layer_types
     )
     hf_model.model.embedding_norm = torch.nn.RMSNorm(config.hidden_size)
     hf_model.lm_head = torch.nn.Linear(config.hidden_size, config.vocab_size, bias=False)
     return hf_model
 
 
-def _build_stand_in_lfm3(ep, io_dtype, extra_options, use_sandwich_norm=True):
+def _build_stand_in_lfm3(ep, io_dtype, extra_options, use_sandwich_norm=True, **layer_kwargs):
     config = _stand_in_config()
     model = LFM3Model(config, io_dtype, io_dtype, ep, None, extra_options)
-    model.load_weights = lambda input_path: _stand_in_lfm3(config, use_sandwich_norm)
+    model.load_weights = lambda input_path: _stand_in_lfm3(config, use_sandwich_norm, **layer_kwargs)
     model.make_model("")
     return model
 
@@ -257,6 +270,11 @@ def build_stand_in_d1(config, ep="cpu", io_dtype=ir.DataType.FLOAT, cache_dir=No
 
 @pytest.mark.parametrize("use_sandwich_norm", [True, False])
 @pytest.mark.parametrize(
+    "transformers_layout,use_attention_gate",
+    [(False, True), (True, True), (True, False)],
+    ids=["remote-code", "transformers", "transformers-no-gate"],
+)
+@pytest.mark.parametrize(
     "ep,io_dtype,extra_options",
     [
         ("cpu", ir.DataType.FLOAT, {}),
@@ -265,8 +283,15 @@ def build_stand_in_d1(config, ep="cpu", io_dtype=ir.DataType.FLOAT, cache_dir=No
     ],
     ids=["cpu-FLOAT", "cuda-FLOAT16", "cuda-FLOAT16-paged"],
 )
-def test_lfm3_graph_wiring(ep, io_dtype, extra_options, use_sandwich_norm):
-    model = _build_stand_in_lfm3(ep, io_dtype, extra_options, use_sandwich_norm)
+def test_lfm3_graph_wiring(ep, io_dtype, extra_options, transformers_layout, use_attention_gate, use_sandwich_norm):
+    model = _build_stand_in_lfm3(
+        ep,
+        io_dtype,
+        extra_options,
+        use_sandwich_norm,
+        transformers_layout=transformers_layout,
+        use_attention_gate=use_attention_gate,
+    )
     graph = model.model.graph
     nodes = {node.name: node for node in graph}
     attention_op = "PagedAttention" if extra_options.get("use_paged_attention") else "GroupQueryAttention"
@@ -285,6 +310,10 @@ def test_lfm3_graph_wiring(ep, io_dtype, extra_options, use_sandwich_norm):
         assert {f"cos_cache_{layer_type}", f"sin_cache_{layer_type}"} <= attention_inputs
         assert not {f"cos_cache_{other}" for other in ROPE_PARAMETERS if other != layer_type} & attention_inputs
 
+        if not use_attention_gate:
+            assert not [name for name in nodes if name.startswith(f"{prefix}/gate/")]
+            assert nodes[f"{prefix}/o_proj/MatMul"].inputs[0].producer() is attention
+            continue
         # o_proj reads attention * sigmoid(gate_proj(x)): MatMul -> Sigmoid -> (Reshape) -> Mul -> (Reshape) -> o_proj,
         # with gate_proj reading the same normed input as the Q/K/V projections.
         gate = nodes[f"{prefix}/gate/Mul"]

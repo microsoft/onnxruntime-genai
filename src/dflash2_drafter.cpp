@@ -7,15 +7,20 @@
 #include "engine/request.h"
 #include "engine/decoders/varlen_decoder_io.h"
 #include "engine/paged_key_value_cache.h"
+#include "models/env_utils.h"
 #include "models/io/kv_cache.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <new>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -661,6 +666,16 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
         (context_window_ + static_cast<size_t>(config_.block_size) + paged_block_size_ - 1) /
             paged_block_size_ +
         1;
+  }
+  if (fixed_single_request_ && context_window_ == 0) {
+    throw std::runtime_error("Fixed DFlash2 requests require a windowed drafter.");
+  }
+  if (Ort::runtime_api_version >= 32) {
+    for (const auto& entry : model_->config_->model.decoder.session_options.config_entries) {
+      if (entry.first == "session.paged_attention.skip_input_sanitizer") {
+        fixed_padding_enabled_ = entry.second == "1";
+      }
+    }
   }
 
   const auto& inputs = config_.inputs;
@@ -1343,14 +1358,17 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   const size_t max_ctx_rows =
       ((std::max(context_window_, block_size) + block_size - 1) / block_size + 1) * block_size;
-  const bool fixed_graph_step = fixed_single_request_ && num_ctx_rows <= block_size;
+  const bool fixed_graph_step =
+      fixed_single_request_ &&
+      (num_ctx_rows == block_size || (fixed_padding_enabled_ && num_ctx_rows < block_size));
   if (fixed_single_request_) {
     if (served.size() != 1 || block_feed_indices.size() != 1 || num_ctx_rows == 0 ||
         num_ctx_rows > max_ctx_rows) {
       throw std::runtime_error("Fixed DFlash2 proposals require one request with 1..context_window context rows.");
     }
     if (fixed_graph_step) {
-      // Padded rows are outside cumulative_sequence_lengths and therefore never update the cache.
+      // The default PagedAttention sanitizer extends the final length to the physical row count.
+      // Padding is safe only when the session explicitly preserves our logical lengths.
       // Keep the real block-row and anchor-row maps: the last context row need not be row seven.
       layout.q_row_map.resize(2 * block_size, 0);
       layout.qkv_row_map.resize(2 * block_size, static_cast<int32_t>(block_size));
@@ -1647,7 +1665,9 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
         feed.first_position, feed.aux_row_count, "DFlash 2 cached positions");
   }
 
-  if (!drafts_wanted || device_selection) {
+  const auto trace = GetEnv("ORT_GENAI_TRACE_SPECULATIVE");
+  const bool trace_greedy = !trace.empty() && trace.front() == '1';
+  if (!drafts_wanted || (device_selection && !trace_greedy)) {
     return true;
   }
 
@@ -1669,6 +1689,41 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     candidate_cpu = candidate_span.CopyDeviceToCpu();
     scores_cpu = scores_span.CopyDeviceToCpu();
   }
+  if (trace_greedy) {
+    for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
+      const auto& feed = feeds[block_feed_indices[slot]];
+      if (feed.wants_independent_sampling || feed.wants_lattice) continue;
+      std::ostringstream record;
+      record << std::setprecision(9)
+             << "{\"event\":\"draft\",\"request\":" << reinterpret_cast<uintptr_t>(feed.request)
+             << ",\"base\":" << feed.first_position + feed.aux_row_count + 1
+             << ",\"context_first\":" << feed.first_position << ",\"context_rows\":" << feed.aux_row_count
+             << ",\"anchor\":" << feed.anchor_token << ",\"device_selection\":" << (device_selection ? 1 : 0)
+             << ",\"top_k\":" << top_k << ",\"steps\":[";
+      size_t previous = 0;
+      for (size_t step = 0; step < num_spec; ++step) {
+        const size_t candidate_offset = (slot * num_spec + step) * top_k;
+        const float* values = scores_cpu.data() + (candidate_offset + previous) * top_k;
+        const size_t best = static_cast<size_t>(std::max_element(values, values + top_k) - values);
+        record << (step == 0 ? "" : ",") << "{\"offset\":" << step << ",\"previous_index\":" << previous
+               << ",\"chosen_index\":" << best << ",\"chosen\":" << candidate_cpu[candidate_offset + best]
+               << ",\"candidates\":[";
+        for (size_t candidate = 0; candidate < top_k; ++candidate) {
+          record << (candidate == 0 ? "" : ",") << "[" << candidate_cpu[candidate_offset + candidate] << ",";
+          if (std::isfinite(values[candidate]))
+            record << values[candidate];
+          else
+            record << "null";
+          record << "]";
+        }
+        record << "]}";
+        previous = best;
+      }
+      record << "]}";
+      std::cout << "SpeculativeTrace " << record.str() << std::endl;
+    }
+  }
+  if (device_selection) return true;
   for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
     const size_t feed_index = block_feed_indices[slot];
     if (feeds[feed_index].wants_independent_sampling && draft_distributions) {

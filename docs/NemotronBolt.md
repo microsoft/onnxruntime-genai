@@ -3,7 +3,7 @@
 `nemotron_bolt` implements batch-one, single-CUDA-device greedy generation through
 the ordinary Model / Generator API and a single-slot Engine adapter. Both use the same
 native execution state. This is not a paged target or dynamically batched backend.
-The implementation runs the fixed-R8 target and the
+The implementation runs the fixed-R8 or dynamic-prefill target and the
 LiLiCorr DFlash2 drafter directly in C++ with ORT. No Python inference bridge or
 synthetic logits are involved.
 
@@ -27,11 +27,25 @@ input, which both retain the graph's full capacity of 135168.
 Configure the LiLiCorr `model.dflash2` section with five layers,
 block size 8, seven drafts, top-k 8, mask 990, sliding window 1024, and
 `inputs.anchor_row_index: "anchor_row_index"`. Set its filename to the packaged
-drafter ONNX path. Configure **both** sessions with the CUDA provider and
-`enable_cuda_graph: "1"` and `min_num_runs_before_cuda_graph_capture: "2"`.
+drafter ONNX path. For speculative decoding, configure **both** sessions with
+the CUDA provider and `enable_cuda_graph: "1"`. The legacy plugin provider's
+`min_num_runs_before_cuda_graph_capture: "2"` option is not supported by the
+built-in CUDA provider; do not carry it into that configuration.
 Set `ep.cuda.arena.use_cuda_mempool: "1"` in both session-options objects.
-Set `custom_ops_library: "libbolt_ops.so"` in decoder session options (also valid
-in drafter session options). Provider-specific memory/GEMM settings from the
+On loaded ORT runtimes 1.32 or newer, native Bolt automatically defaults the drafter
+session config entry `session.paged_attention.skip_input_sanitizer` to `"1"`,
+enabling padded drafter replay. Explicit entries are preserved: set `"0"` to opt
+out. Older or unrecognized loaded runtimes keep partial-row proposals unpadded
+and uncaptured, even with an explicit `"1"`. This policy uses the loaded runtime
+version, not the build headers or negotiated API table. Fixed-request
+packing requires a windowed drafter; full-attention DSpark keeps its existing
+non-fixed execution path.
+Legacy custom-op graphs require their matching `custom_ops_library` or
+`custom_ops_libraries` registrations. Graphs converted to the corresponding
+`com.microsoft` contrib operators require an ORT build containing those kernels
+instead. Remove custom-library registration only after converting and validating
+both target and drafter graphs.
+Provider-specific memory/GEMM settings from the
 reference runtime may be retained. Decoder cache name mappings and
 layer counts are not used: the native state validates the actual graph metadata.
 The standard decoder input keys `past_sequence_length: "seqlens_k"` and
@@ -46,7 +60,15 @@ for checkpoint retention, enablement, and memory limits.
 The drafter's internal paged cache and sliding window do
 not make the target paged or windowed.
 There are no Bolt-specific JSON fields.
-Set `speculative.max_draft_tokens: 7`; the verify width is fixed, not adaptive.
+Set `speculative.max_draft_tokens: 7` for speculative decoding; the verify width
+is fixed, not adaptive. Ordinary greedy decoding accepts `max_draft_tokens: 0`
+and executes fixed-R8 target blocks, committing only the first row. Configuring
+the model itself with zero draft tokens skips loading the drafter; requesting
+zero draft tokens from a model configured with a drafter leaves its weights
+loaded. These are different memory-measurement configurations.
+Target-only decoding permits capture to be disabled. Requesting capture requires
+a capture-enabled target session; speculative decoding requires both a loaded
+drafter and capture.
 
 With a plugin CUDA EP, register its library **before** constructing the model:
 
@@ -64,6 +86,10 @@ while not generator.is_done():
 tokens = generator.get_sequence(0)
 stats = generator.get_speculative_stats()  # Python dictionary
 ```
+
+For the built-in CUDA EP, omit the execution-provider-library registration.
+Provider-library registration and custom-operator-library registration are
+separate mechanisms.
 
 The plugin, ORT runtime, GenAI core/CUDA add-on, and custom operators must be
 mutually compatible. ORT API 27 or later is required to release captured graphs.
@@ -142,6 +168,37 @@ advances dense KV length by `accepted + 1`, and selects recurrent row `accepted`
 Only accepted context reaches the drafter. Its packed row maps preserve the real
 last-context `anchor_row_index`, even when padded to eight rows for graph replay.
 
+### Prompt chunk size
+
+A target whose `input_ids` row dimension is symbolic (`[1, target_rows]`) ingests prompts in
+larger uncaptured chunks; the R8 verification graph and its CUDA graph are unchanged. Set the
+rows per chunk with the standard `search.chunk_size` option, either in `genai_config.json`
+(`"search": {"chunk_size": 2048}`) or per generator with
+`params.set_search_options(chunk_size=2048)`.
+
+| `search.chunk_size` | Prompt ingestion |
+|---|---|
+| absent | 4,096 rows per chunk |
+| 1–8 | fixed R8 path |
+| > 8 | that many rows per chunk, capped at the KV capacity minus 8 |
+
+Fixed `[1, 8]` targets accept only `search.chunk_size <= 8` and reject larger values.
+
+The pinned native H128 Flash attention route partitions split-K work in 128-key tiles using the
+padded endpoint of each R8 call. Crossing a tile boundary inside a speculative
+block can therefore change BF16 attention arithmetic relative to target-only
+row zero, even with identical queries and valid-prefix KV. Speculative decode
+segments such blocks at the arithmetic boundary. Each segment still executes
+the native R8 graph with its own live state; all eight logical recurrent
+snapshots, logits, prediction IDs and auxiliary rows are merged on device before acceptance.
+Prefill and ordinary decoding are unchanged. A segmented verification round
+uses two actual target passes, which are included in `target_forward_passes`
+and `target_verify_forward_passes`; acceptance and round counters still describe
+the single seven-draft proposal. No reference routes, logits or caches are used.
+Temporary snapshot workspace contains only the prefix rows and is released
+after the merge completes on the device stream. Tail rows move in place using
+non-overlapping row copies; all graph-bound buffer addresses remain unchanged.
+
 Target and drafter capture/warm on dummy state, then reset before processing the
 real prompt. Each generator owns independent buffers and graph annotations.
 Drive generators sequentially; concurrent calls on a shared model are unsupported.
@@ -167,7 +224,7 @@ evidence is currently published with this PR.
 Only reset-to-zero rewind is supported: `generator.rewind_to(0)` clears target
 state, drafter context, and pending tokens. Continuing with a second
 `append_tokens()` requires this reset or a new generator. Sampling, beams,
-guidance, nontrivial penalties, external chunking/speculative strategies,
+guidance, nontrivial penalties, external speculative strategies,
 nonzero rewinds, extra inputs, and logits access/replacement are explicitly
 unsupported. In particular `get_logits()` fails rather than fabricating scores.
 
@@ -185,6 +242,29 @@ reset and at every output-budget boundary, terminal EOS, every recurrent
 acceptance row, and prompt lengths immediately below/at/above an eight-row chunk,
 the drafter context window, and the supported capacity (with rejection above
 capacity). Those independent real-graph checks remain outstanding.
+
+The compact prefix/tail merge also has a standalone CUDA regression using the
+tiny GPT-2 fixture rather than a Bolt package. Set
+`ORTGENAI_TEST_CUDA_PREFIX_MERGE=1` and select
+`NemotronBoltGPU.VerificationPrefixMergePreservesAllRowsWithCompactScratch`.
+It checks every split from one through seven rows, including the full supported
+FP32 recurrent-state shape, and verifies unchanged graph-bound addresses.
+
+`IdenticalCandidatePrefixReplay` compares sequential and block logits plus every
+recurrent and valid-prefix KV boundary from byte-validated identical prior state.
+`LiveOrdinarySpeculativeBoundaryStates` compares complete finite cache/logit
+boundaries using two independently advancing live generators, repeats requests
+after reset, and checks full token identity against supplied `expected_ordinary`
+fixtures. Set `ORTGENAI_BOLT_TEST_CASES` to a JSON object containing `cases`
+(`case_id`, integer `prompt_ids`, `max_new_tokens`, `expected_ordinary`) and
+`ORTGENAI_BOLT_OUTPUT` to an owned report prefix. These remain same-runtime
+consistency tests, not independent HuggingFace execution.
+
+The original custom-op package's benchmark scores remain scoped to its pinned
+runtime. Migration checks compare custom-op and contrib-op results in the same
+decoding mode. A pre-existing ordinary-versus-speculative sequence difference
+must be disclosed separately; passing migration checks does not establish
+ordinary/speculative equivalence or final release readiness.
 
 ## Direct GGUF weight loading (`gguf_initializers`)
 

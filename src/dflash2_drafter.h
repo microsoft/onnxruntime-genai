@@ -267,6 +267,7 @@ struct Dflash2Drafter {
  private:
   // Native fixed-R8 targets can pad 1..8 committed rows to one replayable proposal shape.
   bool fixed_single_request_{};
+  bool fixed_padding_enabled_{};
   struct RequestState {
     std::vector<int32_t> blocks;
     std::vector<int32_t> spill_blocks;

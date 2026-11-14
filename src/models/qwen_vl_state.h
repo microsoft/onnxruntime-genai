@@ -3,9 +3,39 @@
 
 #pragma once
 
+#include <limits>
+#include <stdexcept>
+
 #include "multi_modal.h"
 
 namespace Generators {
+
+inline int64_t CheckedQwenVisionProduct(int64_t left, int64_t right) {
+  if (left < 0 || right < 0 ||
+      (right != 0 && left > std::numeric_limits<int64_t>::max() / right)) {
+    throw std::runtime_error("Qwen vision size product is negative or exceeds int64 range");
+  }
+  return left * right;
+}
+
+inline int64_t CheckedQwenVisionSum(int64_t left, int64_t right) {
+  if (left < 0 || right < 0 || left > std::numeric_limits<int64_t>::max() - right) {
+    throw std::runtime_error("Qwen vision size sum is negative or exceeds int64 range");
+  }
+  return left + right;
+}
+
+inline int64_t GetQwenGridTokenCount(int64_t temporal, int64_t height, int64_t width,
+                                     int64_t spatial_merge_size = 1) {
+  if (temporal <= 0 || height <= 0 || width <= 0) {
+    throw std::runtime_error("Qwen image_grid_thw values must be positive");
+  }
+  if (spatial_merge_size <= 0) {
+    throw std::runtime_error("Qwen spatial_merge_size must be positive");
+  }
+  const auto merge_square = CheckedQwenVisionProduct(spatial_merge_size, spatial_merge_size);
+  return CheckedQwenVisionProduct(temporal, CheckedQwenVisionProduct(height, width)) / merge_square;
+}
 
 struct QwenVisionState : VisionState {
   using VisionState::VisionState;
@@ -21,11 +51,13 @@ struct QwenPatchLayout {
   int64_t temporal_multiplier{};
 
   int64_t ImagePatchCount(int64_t grid_tokens, int64_t height, int64_t width) const {
-    return temporal_multiplier > 0 ? temporal_multiplier * height * width : grid_tokens;
+    return temporal_multiplier > 0
+               ? CheckedQwenVisionProduct(temporal_multiplier, CheckedQwenVisionProduct(height, width))
+               : grid_tokens;
   }
 
   int64_t ImagePatchOffset(int64_t image_index, int64_t packed_offset) const {
-    return padded_image_stride > 0 ? image_index * padded_image_stride : packed_offset;
+    return padded_image_stride > 0 ? CheckedQwenVisionProduct(image_index, padded_image_stride) : packed_offset;
   }
 };
 
