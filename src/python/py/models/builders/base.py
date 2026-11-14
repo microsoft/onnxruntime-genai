@@ -762,7 +762,10 @@ class Model:
             ("trt-rtx", ir.DataType.FLOAT16),
             ("trt-rtx", ir.DataType.BFLOAT16),
         }
-        return (self.ep, self.io_dtype) in valid_gqa_configurations
+        # CPU GQA requires head_size to be divisible by 8; unsupported sizes use the MHA fallback.
+        return (self.ep, self.io_dtype) in valid_gqa_configurations and not (
+            self.ep == "cpu" and self.head_size % 8 != 0
+        )
 
     def is_packed_attn_supported(self) -> bool:
         valid_packed_attn_configurations = {
@@ -790,8 +793,9 @@ class Model:
         )
 
     def is_fused_rope_supported(self):
-        # DML EP requires separate RoPE op, so fused RoPE is not supported on DML.
-        return self.ep not in ["dml"]
+        # DML requires a separate RoPE op. CPU GQA only supports fused RoPE when
+        # head_size is a multiple of 16; standalone RoPE supports multiples of 8.
+        return self.ep != "dml" and not (self.ep == "cpu" and self.head_size % 16 != 0)
 
     def is_fused_qk_norm_gqa_supported(self):
         return (
@@ -853,6 +857,12 @@ class Model:
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 del self.input_names["position_ids"]
+
+        elif self.ep == "cpu" and self.head_size % 8 != 0:
+            # CPU GQA does not support these head sizes. Use the MHA fallback,
+            # which expands K/V heads before invoking the general attention op.
+            self.attention_attrs["op_type"] = "MultiHeadAttention"
+            print("MultiHeadAttention (fallback) is used in this model.")
 
         elif self.is_packed_attn_supported():
             # Change model settings for packed Attention
@@ -5273,6 +5283,20 @@ class Model:
         original_window_size = self.window_size
         self.window_size = original_window_size if self.is_local(layer_id) else -1
         try:
+            if self.attention_attrs["op_type"] == "MultiHeadAttention":
+                unsupported = []
+                if self.window_size is not None and self.window_size > 0:
+                    unsupported.append("sliding-window attention")
+                if self.attention_attrs["softcap"] != 0.0:
+                    unsupported.append("attention softcapping")
+                if self.attention_attrs["sinks"]:
+                    unsupported.append("attention sinks")
+                if unsupported:
+                    raise ValueError(
+                        "CPU MultiHeadAttention fallback does not support "
+                        + ", ".join(unsupported)
+                        + "; use a supported head size or execution provider"
+                    )
             self.make_attention_input_proj(layer_id, attention, root_input, **kwargs)
             self.make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
             self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
@@ -5368,13 +5392,14 @@ class Model:
                     self.make_add_bias(attention.v_proj.bias, v_add_name, root_input=self.attention_attrs["v_path"])
                     self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
-        # When q_norm/k_norm are present, the packed-QKV path inside GQA cannot be used
-        # (norm runs per-head before attention). Split here so downstream sees Q/K/V separately.
+        # Per-head Q/K norm and standalone RoPE require separate Q/K/V inputs.
         # Placed after the (optional) packed Add so packed bias fusion is preserved.
         if (
             pack_qkv
-            and self.attention_attrs["q_norm"]
-            and self.attention_attrs["k_norm"]
+            and (
+                (self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"])
+                or (self.attention_attrs["rope"] and not self.attention_attrs["use_rope_in_attn"])
+            )
         ):
             split_name = f"/model/layers.{layer_id}/attn/qkv_proj/Split"
             split_outputs = [f"{split_name}/output_{i}" for i in range(3)]
@@ -7222,8 +7247,15 @@ class Model:
         self.mask_attrs["mask_name"] = tile_name
 
     def make_past_key_subgraph(self, basename):
+        cache_names = self.input_names.get("past_key_values.key", {})
+        if isinstance(cache_names, dict):
+            cache_name = next(iter(cache_names.values()), "")
+        else:
+            cache_name = cache_names
+        if not cache_name:
+            raise ValueError("MHA mask reformatting requires an attention-layer KV cache input")
         shape_name = f"{basename}/Shape"
-        self.make_shape(shape_name, "past_key_values.0.key", shape=[4])
+        self.make_shape(shape_name, cache_name, shape=[4])
         gather_name = f"{basename}/Gather"
         gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/2"]
         self.make_gather(gather_name, gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)

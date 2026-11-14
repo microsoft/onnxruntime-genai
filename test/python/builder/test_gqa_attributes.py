@@ -30,6 +30,12 @@ Model = base_module.Model
 
 
 class _FakeGQAModel:
+    input_names: dict[str, str]
+    is_gqa_supported = Model.is_gqa_supported
+    is_packed_attn_supported = Model.is_packed_attn_supported
+    is_packed_matmul_supported = Model.is_packed_matmul_supported
+    is_fused_rope_supported = Model.is_fused_rope_supported
+    make_attention_init = Model.make_attention_init
     is_fused_qk_norm_gqa_supported = Model.is_fused_qk_norm_gqa_supported
     uses_windowed_kv_cache = Model.uses_windowed_kv_cache
     make_group_query_attention = Model.make_group_query_attention
@@ -50,6 +56,8 @@ class _FakeGQAModel:
         self.num_attn_heads = 8
         self.num_kv_heads = 2
         self.head_size = 16
+        self.input_names = {}
+        self.matmul_attrs = {"use_lora": False}
         self.window_size = -1
         self.attention_attrs = {
             "op_type": "GroupQueryAttention",
@@ -57,6 +65,7 @@ class _FakeGQAModel:
             "softcap": 0.0,
             "rope": True,
             "use_rope_in_attn": True,
+            "use_packed_matmul": False,
             "qk_norm_epsilon": 1e-6,
         }
         self.rope_attrs = {"interleaved": 0}
@@ -70,6 +79,45 @@ class _FakeGQAModel:
         pass
 
 
+def _initialize_cpu_gqa(head_size):
+    model = _FakeGQAModel("cpu")
+    model.io_dtype = base_module.ir.DataType.FLOAT
+    model.head_size = head_size
+    model.attention_attrs["use_rope_in_attn"] = False
+    model.input_names = {"position_ids": "position_ids"}
+    model.make_attention_init(config=None)
+    return model
+
+
+@pytest.mark.parametrize(
+    ("head_size", "expected_fused_rope"),
+    [(8, False), (16, True), (24, False), (32, True), (72, False)],
+)
+def test_cpu_gqa_uses_fused_rope_only_for_head_sizes_multiple_of_16(head_size, expected_fused_rope):
+    model = _initialize_cpu_gqa(head_size)
+
+    assert model.attention_attrs["use_rope_in_attn"] is expected_fused_rope
+    assert ("position_ids" not in model.input_names) is expected_fused_rope
+
+
+@pytest.mark.parametrize("head_size", [4, 12, 20])
+def test_cpu_uses_multi_head_attention_fallback_when_gqa_head_size_is_not_multiple_of_8(head_size):
+    model = _initialize_cpu_gqa(head_size)
+
+    assert model.attention_attrs["op_type"] == "MultiHeadAttention"
+    assert model.attention_attrs["use_packed_matmul"] is False
+    assert model.attention_attrs["use_rope_in_attn"] is False
+    assert "position_ids" in model.input_names
+
+
+@pytest.mark.parametrize(("ep", "expected_fused_rope"), [("dml", False), ("cuda", True), ("webgpu", True)])
+def test_non_cpu_fused_rope_support_is_unchanged(ep, expected_fused_rope):
+    model = _FakeGQAModel(ep)
+    model.head_size = 24
+
+    assert model.is_fused_rope_supported() is expected_fused_rope
+
+
 def test_cpu_does_not_enable_fused_qk_norm_gqa_by_default():
     assert not _FakeGQAModel("cpu").is_fused_qk_norm_gqa_supported()
     assert _FakeGQAModel("cuda").is_fused_qk_norm_gqa_supported()
@@ -81,11 +129,7 @@ def test_cpu_does_not_enable_fused_qk_norm_gqa_by_default():
 def test_qk_norm_fusion_is_automatic_only_for_supported_attention(provider, op_type, rope, use_rope_in_attn):
     model = _FakeGQAModel(provider)
     model.attention_attrs.update(op_type=op_type, rope=rope, use_rope_in_attn=use_rope_in_attn)
-    expected = (
-        provider in {"cuda", "webgpu"}
-        and op_type == "GroupQueryAttention"
-        and (not rope or use_rope_in_attn)
-    )
+    expected = provider in {"cuda", "webgpu"} and op_type == "GroupQueryAttention" and (not rope or use_rope_in_attn)
     assert model.is_fused_qk_norm_gqa_supported() is expected
 
 

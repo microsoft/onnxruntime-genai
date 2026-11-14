@@ -17,10 +17,15 @@ class SmolLM3Model(LlamaModel):
         # So, we temporarily modify the model's attributes before calling the
         # base `make_attention` method, then restore them immediately after.
         original_use_rope = self.attention_attrs["use_rope_in_attn"]
+        original_rope = self.attention_attrs["rope"]
         original_window_size = self.window_size
 
         # Enable/disable RoPE for the current layer.
-        self.attention_attrs["use_rope_in_attn"] = bool(self.no_rope_layers[layer_id])
+        # Keep the per-layer RoPE selection within the provider's fusion
+        # capabilities. CPU fallback attention uses standalone RotaryEmbedding
+        # for unsupported head sizes and must not be switched back to fused RoPE.
+        self.attention_attrs["rope"] = original_rope and bool(self.no_rope_layers[layer_id])
+        self.attention_attrs["use_rope_in_attn"] = original_use_rope and self.attention_attrs["rope"]
 
         # Set the sliding window size for the current layer.
         assert self.layer_types[layer_id] in {"sliding_attention", "full_attention"}
@@ -28,8 +33,9 @@ class SmolLM3Model(LlamaModel):
             self.window_size = -1
 
         # Call the original `make_attention` with the temporarily-modified settings.
-        super().make_attention(layer_id, attention, root_input, **kwargs)
-
-        # Restore original values
-        self.attention_attrs["use_rope_in_attn"] = original_use_rope
-        self.window_size = original_window_size
+        try:
+            super().make_attention(layer_id, attention, root_input, **kwargs)
+        finally:
+            self.attention_attrs["rope"] = original_rope
+            self.attention_attrs["use_rope_in_attn"] = original_use_rope
+            self.window_size = original_window_size

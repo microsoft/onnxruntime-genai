@@ -35,6 +35,7 @@ base_module = _load_builder_module("base")
 qwen_module = _load_builder_module("qwen")
 Model = base_module.Model
 Qwen35TextModel = qwen_module.Qwen35TextModel
+SmolLM3Model = _load_builder_module("smollm").SmolLM3Model
 
 from loaders.base import QuantizedTensorModule  # noqa: E402
 from loaders.modelopt import ModeloptModel  # noqa: E402
@@ -66,11 +67,33 @@ def _model(model_type, extra_options, use_paged_attention=True):
         "use_packed_matmul": False,
         "use_matmul_in_attn": False,
         "use_rope_in_attn": False,
+        "rope": False,
         "q_path": "",
         "k_path": "",
         "v_path": "",
     }
     return model
+
+
+@pytest.mark.parametrize("fused", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_smollm_layer_rope_selection_and_restore(monkeypatch, fused, enabled):
+    model = _model(SmolLM3Model, {})
+    model.attention_attrs.update(rope=True, use_rope_in_attn=fused)
+    model.no_rope_layers = [enabled]
+    model.layer_types = ["full_attention"]
+    model.window_size = 16
+    seen = []
+
+    def capture(self, layer_id, attention, root_input, **kwargs):
+        seen.append((self.attention_attrs["rope"], self.attention_attrs["use_rope_in_attn"]))
+
+    monkeypatch.setattr(SmolLM3Model.__bases__[0], "make_attention", capture)
+    model.make_attention(0, None, "root")
+    assert seen == [(enabled, fused and enabled)]
+    assert model.attention_attrs["rope"] is True
+    assert model.attention_attrs["use_rope_in_attn"] is fused
+    assert model.window_size == 16
 
 
 @pytest.mark.parametrize("use_lora", [False, True])
@@ -166,6 +189,111 @@ def test_qwen35_fused_qkv_splits_gated_q_before_the_q_gate_split():
 
 SEPARATE = ["q_proj", "k_proj", "v_proj"]
 PACKED = ["qkv_proj"]
+
+
+@pytest.mark.parametrize("head_size", [8, 24])
+@pytest.mark.parametrize("bias", [False, True])
+def test_cpu_packed_projection_splits_before_standalone_rope(head_size, bias):
+    model = _model(Model, {}, use_paged_attention=False)
+    model.ep = "cpu"
+    model.io_dtype = ir.DataType.FLOAT
+    model.head_size = head_size
+    model.input_names = {"position_ids": "position_ids"}
+    model.attention_attrs["rope"] = True
+    model.make_attention_init(config=None)
+    model.rope_attrs["op_type"] = "RotaryEmbedding"
+    attention = SimpleNamespace(
+        q_proj=torch.nn.Linear(HIDDEN, HEADS * head_size, bias=bias),
+        k_proj=torch.nn.Linear(HIDDEN, KV_HEADS * head_size, bias=bias),
+        v_proj=torch.nn.Linear(HIDDEN, KV_HEADS * head_size, bias=bias),
+    )
+    splits, rotary = [], []
+    model.make_packed_matmul = lambda q, k, v, name, root: name
+    model.make_packed_add = lambda *args, **kwargs: None
+    model.make_split = lambda name, inputs, outputs, dtypes, shapes, axis: splits.append((inputs, outputs))
+    model.make_rotary_embedding_op = lambda name, root_input, **kwargs: rotary.append((name, root_input))
+
+    model.make_attention_input_proj(3, attention, "root")
+    model.make_attention_qk_rope(3)
+
+    [(inputs, outputs)] = splits
+    assert inputs[0].endswith("/qkv_proj/Add/output_0" if bias else "/qkv_proj/MatMul/output_0")
+    assert inputs[1] == f"/model/constants/INT64/[{HEADS * head_size}, {KV_HEADS * head_size}, {KV_HEADS * head_size}]"
+    assert [root for _, root in rotary] == outputs[:2]
+    assert model.attention_attrs["v_path"] == outputs[2]
+
+
+@pytest.mark.parametrize("head_size", [4, 12])
+def test_cpu_non_aligned_head_size_uses_mha_rope_cache_path(head_size):
+    model = _model(Model, {}, use_paged_attention=False)
+    model.ep = "cpu"
+    model.io_dtype = ir.DataType.FLOAT
+    model.head_size = head_size
+    model.input_names = {"position_ids": "position_ids"}
+    model.attention_attrs["rope"] = True
+    model.make_attention_init(config=None)
+    model.rope_attrs["op_type"] = "RotaryEmbedding"
+
+    attention = SimpleNamespace(
+        q_proj=torch.nn.Linear(HIDDEN, HEADS * head_size, bias=False),
+        k_proj=torch.nn.Linear(HIDDEN, KV_HEADS * head_size, bias=False),
+        v_proj=torch.nn.Linear(HIDDEN, KV_HEADS * head_size, bias=False),
+    )
+    projections, rotary = [], []
+    model.make_matmul = lambda proj, name, root, **kwargs: projections.append(name) or name
+    model.make_rotary_embedding_op = lambda name, root_input, **kwargs: rotary.append(root_input)
+
+    model.make_attention_input_proj(3, attention, "root")
+    model.make_attention_qk_rope(3)
+
+    assert model.attention_attrs["op_type"] == "MultiHeadAttention"
+    assert projections == [
+        "/model/layers.3/attn/q_proj/MatMul",
+        "/model/layers.3/attn/k_proj/MatMul",
+        "/model/layers.3/attn/v_proj/MatMul",
+    ]
+    assert rotary == [f"{name}/output_0" for name in projections[:2]]
+
+
+@pytest.mark.parametrize("feature", ["window", "softcap", "sinks"])
+def test_cpu_mha_rejects_unsupported_attention_features(feature):
+    model = _model(Model, {}, use_paged_attention=False)
+    model.ep = "cpu"
+    model.attention_attrs.update(op_type="MultiHeadAttention", softcap=0.0, sinks=False)
+    model.window_size = 16 if feature == "window" else -1
+    model.is_local = lambda layer_id: True
+    if feature == "softcap":
+        model.attention_attrs["softcap"] = 1.0
+    elif feature == "sinks":
+        model.attention_attrs["sinks"] = True
+    with pytest.raises(ValueError, match="fallback does not support"):
+        model.make_attention(0, None, "root")
+
+
+def test_mha_mask_uses_first_attention_layer_cache():
+    model = _model(Model, {}, use_paged_attention=False)
+    model.input_names = {"past_key_values.key": {2: "past_key_values.2.key"}}
+    shapes = []
+    model.make_shape = lambda name, root, **kwargs: shapes.append(root)
+    model.make_gather = lambda *args, **kwargs: None
+    model.make_past_key_subgraph("/mask")
+    assert shapes == ["past_key_values.2.key"]
+
+
+@pytest.mark.parametrize("rope,fused", [(False, False), (True, True)])
+def test_packed_projection_stays_packed_without_standalone_rope(rope, fused):
+    model = _model(Model, {})
+    model.attention_attrs.update(use_packed_matmul=True, rope=rope, use_rope_in_attn=fused)
+    model.make_packed_matmul = lambda q, k, v, name, root: name
+    model.make_split = lambda *args, **kwargs: pytest.fail("packed QKV should not be split")
+    attention = SimpleNamespace(
+        q_proj=torch.nn.Linear(HIDDEN, Q_SIZE, bias=False),
+        k_proj=torch.nn.Linear(HIDDEN, KV_SIZE, bias=False),
+        v_proj=torch.nn.Linear(HIDDEN, KV_SIZE, bias=False),
+    )
+
+    model.make_attention_input_proj(3, attention, "root")
+    assert model.attention_attrs["q_path"].endswith("/qkv_proj/MatMul/output_0")
 
 
 def _float_attention():
