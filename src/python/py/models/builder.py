@@ -63,6 +63,7 @@ from builders import (
     Phi3VModel,
     Phi4MMModel,
     PhiModel,
+    Qwen3ASRModel,
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen4ExpModel,
@@ -868,6 +869,9 @@ def create_model(
             onnx_model.model_type = "qwen2_5_vl_text"
     elif config.architectures[0] == "Qwen3ForCausalLM":
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3ASRForConditionalGeneration":
+        # The decoder, audio encoder and embedding models of the qwen3_asr pipeline
+        onnx_model = Qwen3ASRModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
         onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:

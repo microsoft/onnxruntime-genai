@@ -104,7 +104,7 @@ struct SpeechState : State {
   std::unique_ptr<MultiModalFeatures> audio_features_;
 };
 
-// Lfm2AudioSpeechState: per-clip encoder loop for LFM2-Audio.
+// Lfm2AudioSpeechState: per-clip encoder loop for LFM2-Audio and Qwen3-ASR.
 //
 // The processor stacks the clips of one prompt into a zero-padded [N, T_max, num_mels] mel tensor
 // with their real frame counts alongside. The published encoder export is traced for a single clip
@@ -112,8 +112,13 @@ struct SpeechState : State {
 // each clip's own frames out of that tensor, runs the encoder on [1, T_i, num_mels], and writes the
 // results one after another into the contiguous [1, total_tokens, hidden] feature buffer the
 // embedding model expects, in clip order.
+//
+// frame_multiple: the encoder takes a whole number of frame_multiple-frame chunks per clip (Qwen3-ASR:
+// 100). A clip's slice is then its real frame count rounded up to that multiple, and the encoder is
+// given the real count as the clip's length.
 struct Lfm2AudioSpeechState : SpeechState {
-  using SpeechState::SpeechState;  // inherit constructor
+  Lfm2AudioSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params, int64_t frame_multiple = 1)
+      : SpeechState{model, params}, frame_multiple_{frame_multiple} {}
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) override;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
@@ -135,13 +140,16 @@ struct Lfm2AudioSpeechState : SpeechState {
   // Reads the bound shapes and checks them against the per-clip token counts.
   SpeechBindings ResolveBindings() const;
 
-  // Runs the encoder on clip `index`'s own frames and returns its features.
-  std::unique_ptr<OrtValue> RunClip(const SpeechBindings& bindings, int64_t index, int64_t num_frames);
+  // Runs the encoder on the first num_frames frames of clip `index` with valid_frames as its length
+  // and returns its features.
+  std::unique_ptr<OrtValue> RunClip(const SpeechBindings& bindings, int64_t index, int64_t num_frames,
+                                    int64_t valid_frames);
 
   size_t FindInput(const std::string& name) const;
   size_t FindOutput(const std::string& name) const;
 
   std::vector<int64_t> tokens_per_clip_;
+  int64_t frame_multiple_{1};
 };
 
 // Factory: pick the right SpeechState subclass based on model type.
