@@ -1945,7 +1945,7 @@ TEST_F(Qwen38GraphEngineTest, NativePrefixCacheRestoresLongestPrefixAndOnlyInges
   EXPECT_EQ(engine->PrefixCacheStats()->matched_tokens, 5u);
 }
 
-TEST_F(Qwen38GraphEngineTest, NativePrefixCacheDoesNotRestoreDivergentOrEvictedState) {
+TEST_F(Qwen38GraphEngineTest, NativePrefixCacheDoesNotRestoreDivergentState) {
   device_->prefix_caching = true;
   device_->max_prefix_snapshots = 1;
   auto engine = MakeEngine();
@@ -1959,10 +1959,42 @@ TEST_F(Qwen38GraphEngineTest, NativePrefixCacheDoesNotRestoreDivergentOrEvictedS
   EXPECT_EQ(RunToCompletion(*engine, second).usage.cached_prompt_tokens, 0u);
   second->Close();
 
-  auto shorter = Begin(*engine, Prompt(8), 2);
-  EXPECT_EQ(RunToCompletion(*engine, shorter).usage.cached_prompt_tokens, 0u);
-  EXPECT_EQ(device_->CallCount("restore:8"), 0u);
+  auto original = Begin(*engine, Prompt(13), 2);
+  EXPECT_EQ(RunToCompletion(*engine, original).usage.cached_prompt_tokens, 0u);
+  EXPECT_EQ(device_->CallCount("restore:13"), 0u);
   EXPECT_EQ(engine->PrefixCacheStats()->hits, 0u);
+}
+
+TEST_F(Qwen38GraphEngineTest, NativePrefixCachePrunesEvictedStateEvenWhenPublicationFails) {
+  for (bool allocation_failure : {false, true}) {
+    device_ = std::make_shared<ScriptedQwen38Device>();
+    device_->prefix_caching = true;
+    device_->max_prefix_snapshots = 1;
+    auto engine = MakeEngine();
+    auto first = Begin(*engine, Prompt(13), 2);
+    RunToCompletion(*engine, first);
+    first->Close();
+
+    device_->fail_capture_after_eviction = allocation_failure;
+    device_->refuse_capture_after_eviction = !allocation_failure;
+    auto different = Prompt(13);
+    different.back() += 1;
+    auto second = Begin(*engine, different, 2);
+    EXPECT_EQ(RunToCompletion(*engine, second).usage.cached_prompt_tokens, 0u);
+    EXPECT_EQ(engine->PrefixCacheStats()->evictions, 1u);
+    EXPECT_EQ(engine->PrefixCacheStats()->publication_refusals, 1u);
+    second->Close();
+
+    device_->fail_capture_after_eviction = false;
+    device_->refuse_capture_after_eviction = false;
+    auto original = Begin(*engine, Prompt(13), 2);
+    const auto result = RunToCompletion(*engine, original);
+    EXPECT_EQ(result.tokens, Expected(13, 2));
+    EXPECT_EQ(result.usage.cached_prompt_tokens, 0u);
+    EXPECT_EQ(device_->CallCount("restore:13"), 0u);
+    EXPECT_EQ(engine->PrefixCacheStats()->evictions, 1u);
+    EXPECT_TRUE(device_->ContextIsHealthy());
+  }
 }
 
 TEST_F(Qwen38GraphEngineTest, NativePrefixCacheDoesNotCreditReusedPriorTurnHistoryAsNewInput) {

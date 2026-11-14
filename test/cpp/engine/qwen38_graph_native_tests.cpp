@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -74,6 +75,60 @@ TEST_F(Qwen38GraphNativeTest, SequentialEngineThreadsAndTheLoadingThreadAdvanceO
   }
   ExpectOneStateUpdatePerLiveStep(RunTwoLiveSteps(model));
   ExpectOneStateUpdatePerLiveStep(RunTwoLiveSteps(model));
+}
+
+TEST_F(Qwen38GraphNativeTest, DeviceMemoryBudgetValidatesFixedStateWithOrWithoutPrefixCaching) {
+  for (bool prefix_caching : {false, true}) {
+    for (bool fits : {false, true}) {
+      SCOPED_TRACE(prefix_caching);
+      SCOPED_TRACE(fits);
+      auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-qwen38");
+      config->engine.dynamic_batching.emplace();
+      auto& batching = *config->engine.dynamic_batching;
+      batching.max_batch_size = 1;
+      batching.prefix_caching = prefix_caching;
+      batching.device_memory_budget_bytes = fits ? uint64_t{1} << 40 : 1;
+      batching.device_memory_headroom_bytes = 0;
+      if (fits) {
+        auto model = CreateModel(GetOrtEnv(), std::move(config));
+        EXPECT_FALSE(model->config_->engine.dynamic_batching);
+        ExpectOneStateUpdatePerLiveStep(RunTwoLiveSteps(model));
+      } else {
+        try {
+          (void)CreateModel(GetOrtEnv(), std::move(config));
+          FAIL() << "A one-byte budget cannot fit the native state";
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(std::string{error.what()}.find("device_memory_budget_bytes is too small"), std::string::npos);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(Qwen38GraphNativeTest, UtilizationLimitControlsDefaultOnSnapshotReuseAfterNormalization) {
+  for (bool retain_snapshots : {false, true}) {
+    SCOPED_TRACE(retain_snapshots);
+    auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-qwen38");
+    config->engine.dynamic_batching.emplace();
+    auto& batching = *config->engine.dynamic_batching;
+    batching.max_batch_size = 1;
+    ASSERT_FALSE(batching.prefix_caching.has_value());
+    batching.gpu_utilization_factor = retain_snapshots ? 1.0f : std::numeric_limits<float>::min();
+    auto model = CreateModel(GetOrtEnv(), std::move(config));
+    ASSERT_FALSE(model->config_->engine.dynamic_batching);
+    auto engine = std::make_shared<Engine>(model);
+    TurnOptions options;
+    options.max_generated_tokens = 2;
+    const std::array<int32_t, 2> prompt{0, 0};
+    for (int repeat = 0; repeat < 2; ++repeat) {
+      auto request = CreateRequestWithPrompt(engine, prompt, options);
+      ExpectOneStateUpdatePerLiveStep({RunOne(*engine), RunOne(*engine)});
+      EXPECT_EQ(request->TurnCachedPromptTokens(), retain_snapshots && repeat != 0 ? prompt.size() : 0u);
+      request->Close();
+    }
+    ASSERT_TRUE(engine->PrefixCacheStats());
+    EXPECT_EQ(engine->PrefixCacheStats()->hits, retain_snapshots ? 1u : 0u);
+  }
 }
 
 TEST_F(Qwen38GraphNativeTest, AdaptiveBudgetEnvironmentDefaultsAndOptOutReachTheNativeSession) {

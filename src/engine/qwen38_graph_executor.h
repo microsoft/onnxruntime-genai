@@ -14,6 +14,7 @@
 #include "engine.h"
 #include "fixed_slot_scheduler.h"
 #include "token_producing_session.h"
+#include "prefix-checkpoint-index.h"
 
 // Qwen-specific device-cycle orchestration. Reusable admission/residency lives in
 // FixedSlotCacheManager/FixedSlotScheduler; completion identity and settlement live in
@@ -143,6 +144,8 @@ class Qwen38GraphSession : public FixedSlotSession {
   struct PrefixEntry {
     std::vector<int32_t> tokens;
     std::shared_ptr<const Qwen38PrefixState> state;
+    std::span<const int32_t> Tokens() const { return tokens; }
+    bool IsResident() const { return state->IsResident(); }
   };
   const PrefixEntry* FindPrefix(std::span<const int32_t> tokens) const;
   void SavePrefix(std::span<const int32_t> tokens);
@@ -169,7 +172,7 @@ class Qwen38GraphSession : public FixedSlotSession {
   SpeculativeStats stats_;
   TokenProducingSession completions_;
   BackendWorkMetrics work_metrics_;
-  std::vector<PrefixEntry> prefixes_;
+  PrefixCheckpointIndex<PrefixEntry> prefixes_;
   PrefixCacheMetrics prefix_metrics_;
   size_t adopted_prefix_{};
   size_t pending_cached_prefix_{};

@@ -72,6 +72,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
   int draft_forward_override{-1};
   bool prefix_caching{};
   bool fail_capture_allocation{};
+  bool fail_capture_after_eviction{};
+  bool refuse_capture_after_eviction{};
   bool fail_restore{};
   size_t max_prefix_snapshots{8};
 
@@ -170,6 +172,8 @@ class ScriptedQwen38Device final : public Qwen38DecodeDevice {
       if (auto state = prefix_snapshots_.front().lock()) state->resident = false;
       prefix_snapshots_.erase(prefix_snapshots_.begin());
     }
+    if (fail_capture_after_eviction) throw std::bad_alloc{};
+    if (refuse_capture_after_eviction) return nullptr;
     auto state = std::make_shared<PrefixState>(*this);
     prefix_snapshots_.push_back(state);
     return state;
