@@ -383,13 +383,15 @@ Snapshot storage uses one Engine-owned policy, not separate limits keyed by
 limits default to zero and disable that tier. Omitting the entire object preserves
 legacy device-resident DFlash snapshots, count-limited and reserved from the
 existing cache budget. An explicit empty object or all-zero budgets disable
-snapshot storage on CPU/CUDA without disabling target prefix caching.
+snapshot storage on CPU/CUDA without disabling legacy target-only prefix caching.
+Full-attention paired DFlash reuse requires enabled snapshot storage.
 `max_snapshots`, when present, is the shared count cap, not a per-component
 allowance. It is unbounded when omitted. Separate Engine instances have
 independent policies; these are not process-wide limits.
 
 **Current integration: drafter and target-window snapshots.** DFlash ring payloads
-and paired target sliding-window KV/scale payloads share this policy. These limits do not cover retained
+and paired target sliding-window KV/scale payloads share this policy.
+These limits do not cover retained
 target KV, hybrid fixed-state checkpoints, active drafter rings, or total process
 memory. Target KV and fixed state remain device-resident under their existing
 budgets. CPU execution supports explicit RAM and disk tiers; explicit VRAM
@@ -421,7 +423,8 @@ reclaimed at the count limit. Target KV and fixed-state reclamation are unchange
 
 `dflash2_max_snapshots` defaults to one and adds a DFlash-only count ceiling
 across all tiers. Zero disables DFlash snapshots and full-attention paired reuse,
-but preserves legacy target-only prefix caching. The DFlash count is also capped by the hybrid fixed-state checkpoint
+but preserves legacy target-only prefix caching. The DFlash count is also capped by the
+hybrid fixed-state checkpoint
 capacity (`max_batch_size`). `max_snapshots` is an optional additional count cap
 shared by every producer; zero disables all snapshot publication. Neither count
 increases a tier budget or enables storage when an explicit policy sets all byte
