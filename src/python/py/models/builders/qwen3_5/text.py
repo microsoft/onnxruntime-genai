@@ -39,6 +39,7 @@ class Qwen35TextModel(Model):
             raise ValueError("linear_attn_op is selected automatically by execution provider; remove this option. Dense CPU/DML/TRT-RTX exports retain LinearAttention.")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
+        self.make_gated_delta_net_init(extra_options)
         self.configure_gated_delta_net_io()
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
@@ -51,6 +52,20 @@ class Qwen35TextModel(Model):
         self.rope_attrs["cast"]["use_fp32"] = True
         self.rope_attrs["cast"]["root_input"] = True
         self.rope_attrs["cast"]["output_0"] = True
+
+    def make_gated_delta_net_init(self, extra_options):
+        # Internal recurrent-kernel chunking, independent of Engine prompt scheduling.
+        self.gated_delta_net_attrs = {"chunk_size": 64}
+        if "webgpu_gdn_chunk_size" not in extra_options:
+            return
+        if self.ep != "webgpu":
+            raise ValueError("webgpu_gdn_chunk_size requires the WebGPU execution provider")
+        if "linear_attention" not in self.layer_types:
+            raise ValueError("webgpu_gdn_chunk_size requires a Qwen linear-attention layer")
+        value = extra_options["webgpu_gdn_chunk_size"]
+        if isinstance(value, bool) or str(value) not in {"16", "64"}:
+            raise ValueError("webgpu_gdn_chunk_size must be 16 or 64")
+        self.gated_delta_net_attrs["chunk_size"] = int(value)
 
     def configure_gated_delta_net_io(self):
         """Declare every linear-attention graph binding, so emitters never respell a name or shape."""
@@ -440,6 +455,7 @@ class Qwen35TextModel(Model):
             "qk_l2_norm": 1,
             "update_rule": "gated_delta",
             "scale": 0.0,
+            "chunk_size": self.gated_delta_net_attrs["chunk_size"],
             "output_shape": [*token_shape, value_heads, value_head_dim],
         }
         if packed:

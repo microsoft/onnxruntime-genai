@@ -28,6 +28,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Include Last Hidden States Output](#include-last-hidden-states-output)
     - [Include Auxiliary Hidden States Output](#include-auxiliary-hidden-states-output)
     - [Build with Paged Attention](#build-with-paged-attention)
+    - [Configure WebGPU GatedDeltaNet Chunking](#configure-webgpu-gateddeltanet-chunking)
     - [Disable Windowed KV Cache](#disable-windowed-kv-cache)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
@@ -636,6 +637,24 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp
 ```bash
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu --runtime_config '{"engine":{"dynamic_batching":{"num_blocks":1024}}}' --extra_options use_paged_attention=true
 ```
+
+#### Configure WebGPU GatedDeltaNet Chunking
+
+For Qwen hybrid WebGPU exports, `webgpu_gdn_chunk_size=16` selects the internal
+GatedDeltaNet kernel chunk attribute. Accepted values are `16` and `64`; the
+default remains `64`. This requires a Qwen linear-attention layer and WebGPU;
+an explicit override on another provider is rejected. It does not change
+weights, FP32 recurrent state or accumulation, or Engine scheduling.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i target_checkpoint -o output -p int4 -e webgpu --extra_options use_paged_attention=true num_blocks=128 webgpu_gdn_chunk_size=16
+# From source, at repository root:
+python src/python/py/models/builder.py -i target_checkpoint -o output -p int4 -e webgpu --extra_options use_paged_attention=true num_blocks=128 webgpu_gdn_chunk_size=16
+```
+
+See the [Qwen WebGPU coding profile](../../../../docs/qwen_webgpu_coding_profile.md)
+for the separate selected-logits, DFlash 2, scheduling, and qualification settings.
 
 #### Disable Windowed KV Cache
 

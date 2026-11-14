@@ -1171,6 +1171,11 @@ def get_args():
                     GatedDeltaNet accepts 0 or 2..9. A nonzero window sets state_update_capacity=W-1;
                     an explicit capacity must agree. Dense CPU/DML/TRT-RTX retain LinearAttention.
                     Requires ONNX Runtime kernels that implement this attribute.
+                webgpu_gdn_chunk_size = Qwen3.5/3.8 GatedDeltaNet internal kernel chunk size on WebGPU.
+                    Values: 16 or 64. Default is 64 (unchanged). Requires a linear-attention layer.
+                    This is independent of paged_chunk_size and max_scheduled_tokens. Does not change
+                    weights, FP32 recurrent state, gate arithmetic, or accumulation precision.
+                    Requires a WebGPU plugin implementing the selected chunk path.
                 enable_cuda_fpa_intb_gemm = Select the CUDA fpA_intB MatMulNBits kernel family
                     for weights exported in the default raw blockwise layout. Default is false.
                     Writes ep.cuda.fpa_intb_gemm=1 to the decoder session options and only

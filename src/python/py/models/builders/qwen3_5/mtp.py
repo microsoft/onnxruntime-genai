@@ -27,6 +27,8 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         self.mtp_layer_config.num_hidden_layers = 1
 
         extra_options = copy.deepcopy(extra_options)
+        # This target-only policy has no recurrent operator in the MTP head.
+        extra_options.pop("webgpu_gdn_chunk_size", None)
         extra_options["num_hidden_layers"] = 1
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 

@@ -847,8 +847,13 @@ def test_qwen38_capacity_is_cleared_without_linear_attention_layers():
     assert "state_update.capture_count" not in model.input_names
 
 
-def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
+@pytest.mark.parametrize(
+    "ep, options, chunk", [("cuda", {}, 64), ("webgpu", {}, 64), ("webgpu", {"webgpu_gdn_chunk_size": 16}, 16)]
+)
+def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch, ep, options, chunk):
     model = _packed_gated_delta_net_model()
+    model.ep = ep
+    model.make_gated_delta_net_init(options)
     model.configure_gated_delta_net_io()
     model.input_names["cumulative_sequence_lengths"] = "cumulative_sequence_lengths"
     model.input_names["past.recurrent"] = {0: "past"}
@@ -862,6 +867,7 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
     model.make_gated_delta_net_layer(0, SimpleNamespace(A_log="a_log", dt_bias="dt_bias"), "conv", "b", "a")
 
     gdn = calls[0]
+    assert gdn["chunk_size"] == chunk
     assert gdn["q_path"] == "conv"
     assert gdn["k_path"] == ""
     assert gdn["v_path"] == ""
@@ -878,9 +884,14 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
     }
 
 
-def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
+@pytest.mark.parametrize(
+    "ep, options, chunk", [("cuda", {}, 64), ("webgpu", {}, 64), ("webgpu", {"webgpu_gdn_chunk_size": 16}, 16)]
+)
+def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch, ep, options, chunk):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
-    model.ep = "cuda"
+    model.ep = ep
+    model.layer_types = ["linear_attention"]
+    model.make_gated_delta_net_init(options)
     model.context_length_attrs = {"state_update_capacity": 0}
     model.use_paged_attention = False
     model.io_dtype = base_module.ir.DataType.FLOAT16
@@ -910,6 +921,7 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     )
 
     gdn = calls[0][1]
+    assert gdn["chunk_size"] == chunk
     assert gdn["q_path"] == "conv_output"
     assert gdn["k_path"] == ""
     assert gdn["v_path"] == ""
