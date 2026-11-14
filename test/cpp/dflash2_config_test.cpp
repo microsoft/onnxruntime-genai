@@ -3579,6 +3579,9 @@ TEST(Dflash2ConfigTest, DoesNotWarnAboutDraftWidthWithoutABlockDrafter) {
 
 #if USE_CUDA
 TEST(PrefixSnapshotCacheTest, CudaSizeChurnReclaimsPhysicalBacking) {
+  if (!std::getenv("ORTGENAI_TEST_CUDA_SNAPSHOT_CHURN")) {
+    GTEST_SKIP() << "Set ORTGENAI_TEST_CUDA_SNAPSHOT_CHURN with an admitted CUDA device and registered CUDA EP";
+  }
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
   ClearProviders(*config);
   SetProviderOption(*config, "cuda", {}, {});
