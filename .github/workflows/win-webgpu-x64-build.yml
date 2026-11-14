@@ -93,6 +93,7 @@ jobs:
             --update --build `
             --skip_examples `
             --cmake_extra_defines `
+              USE_WEBGPU=ON `
               TEST_PHI2=True `
               TEST_QWEN_2_5=True `
               'CMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
@@ -148,7 +149,7 @@ jobs:
 
       - name: Run required WebGPU Engine tests
         run: |
-          & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep --gtest_filter="DeviceSpanTest.*:GraphBuilderTest.*:BackingOwners/WebGpuStateReplayTest.*:WebGpuFixedStatePoolTest.*:FixedStatePoolTest.DeferredReplayFailurePoisonsPool:VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder" --gtest_output="xml:webgpu-engine-tests.xml"
+          & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep --gtest_filter="DeviceSpanTest.*:GraphBuilderTest.*:BackingOwners/WebGpuStateReplayTest.*:WebGpuFixedStatePoolTest.*:FixedStatePoolTest.DeferredReplayFailurePoisonsPool:VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder:WebGpuGrowthTest.*:WebGpuCaptureFallback.*" --gtest_output="xml:webgpu-engine-tests.xml"
           if ($LASTEXITCODE -ne 0) { throw "WebGPU Engine tests failed: $LASTEXITCODE" }
           [xml]$results = Get-Content webgpu-engine-tests.xml
           $required = @(

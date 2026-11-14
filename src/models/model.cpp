@@ -62,6 +62,7 @@
 #include "ep/openvino/interface.h"
 #include "ep/qnn/interface.h"
 #include "ep/ryzenai/interface.h"
+#include "ep/webgpu/model.h"
 #include "session_options.h"
 
 namespace Generators {
@@ -808,7 +809,7 @@ State::~State() {
   // in try/catch because destructors must not throw -- a throw during unwinding
   // would call std::terminate.
 #if ORT_API_VERSION >= 27
-  if (graph_capture_session_) {
+  if (graph_capture_session_ && (model_.p_device_->GetType() != DeviceType::WEBGPU || Ort::api_version >= 27)) {
     // Include captures from earlier adapter sets, as well as all input lengths.
     graph_ids_.ForEachAssignedId([&](int id_value) {
       try {
@@ -1760,7 +1761,7 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
   return std::make_unique<Config>(path, json_overlay);
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+static std::shared_ptr<Model> CreateModelImpl(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   const bool text_only = ModelType::IsLLM(config->model.type);
   if (text_only && (!config->model.vision.filename.empty() || !config->model.vision.pipeline.empty())) {
     throw std::runtime_error(
@@ -1828,6 +1829,14 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<MarianModel>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
+}
+
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  const auto& providers = config->model.decoder.session_options.providers;
+  if (!providers.empty() && providers.front() == "WebGPU") {
+    return WebGPU::CreateModel(ort_env, std::move(config), CreateModelImpl);
+  }
+  return CreateModelImpl(ort_env, std::move(config));
 }
 
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model) {

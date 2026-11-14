@@ -7,6 +7,10 @@
 
 namespace Generators {
 
+namespace WebGPU {
+struct ConvKeyValueCache;
+}
+
 bool HasConvKeyValueCache(const Model& model);
 
 // Combines attention KV cache layers with fixed-size convolution state layers.
@@ -18,6 +22,7 @@ struct ConvKeyValueCache : KeyValueCache {
   void RewindTo(size_t index) override;
 
  private:
+  friend struct WebGPU::ConvKeyValueCache;
   template <typename ScoreType>
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);

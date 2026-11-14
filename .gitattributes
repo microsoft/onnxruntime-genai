@@ -2,3 +2,6 @@
 # (LF) upstream sources on every platform, including Windows (where core.autocrlf would
 # otherwise convert them to CRLF in the working tree and break the apply).
 *.patch text eol=lf
+
+# Preserve the serialized ONNX test fixture without text conversion or diffs.
+/test/models/webgpu-capture-fallback/*.onnx binary

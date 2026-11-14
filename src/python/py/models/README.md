@@ -709,6 +709,8 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 This scenario is for when you want to enable WebGPU graph capture for your ONNX model.
 
+For eligible shared-KV, single-beam WebGPU decoders, GenAI treats an omitted `enableGraphCapture` provider option as enabled. An explicit `"0"` remains off. Recognized initialization refusals fall back to eager; errors during generation still propagate. The builder retains its existing opt-in behavior and configuration output.
+
 ```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_webgpu_graph=true

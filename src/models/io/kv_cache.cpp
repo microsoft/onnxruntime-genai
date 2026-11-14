@@ -13,6 +13,7 @@
 #include "shared_kv_cache.h"
 #include "static_kv_cache.h"
 #include "windowed_kv_cache.h"
+#include "../../ep/webgpu/kv_cache.h"
 #include <algorithm>
 
 namespace Generators {
@@ -64,6 +65,9 @@ std::unique_ptr<KeyValueCache> CreateStandardKeyValueCache(State& state) {
   // LFM2 models interleave attention and conv layers, requiring a cache that handles
   // both KV cache for attention layers and fixed-size conv state for conv layers.
   if (HasConvKeyValueCache(state.model_)) {
+    if (state.model_.p_device_kvcache_->GetType() == DeviceType::WEBGPU) {
+      return std::make_unique<WebGPU::ConvKeyValueCache>(state);
+    }
     return std::make_unique<ConvKeyValueCache>(state);
   }
 
@@ -87,6 +91,9 @@ std::unique_ptr<KeyValueCache> CreateStandardKeyValueCache(State& state) {
     }
     if (kv_cache_quantization_bits == 4 || kv_cache_quantization_bits == 8) {
       return std::make_unique<QuantizedSharedKeyValueCache>(state);
+    }
+    if (state.model_.p_device_kvcache_->GetType() == DeviceType::WEBGPU) {
+      return std::make_unique<WebGPU::SharedKeyValueCache>(state);
     }
     return std::make_unique<SharedKeyValueCache>(state);
   }

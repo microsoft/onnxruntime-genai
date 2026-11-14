@@ -6,6 +6,7 @@
 #include "static_kv_cache.h"
 #include "../../logging.h"
 #include "../model.h"
+#include "../../ep/webgpu/kv_cache.h"
 
 #include <algorithm>
 
@@ -63,8 +64,8 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
 
     // Shared KV cache: same policy as DefaultKeyValueCache. Start from the genai
     // search option, then let DetectAndConfigureFixedKvShape force share-buffer when
-    // the ONNX graph fixes the kv seq_len. The buffer is sized to that fixed dim when
-    // present, otherwise to search.max_length for symbolic graphs.
+    // the ONNX graph fixes the kv seq_len. Supported symbolic WebGPU caches grow
+    // geometrically; other shared caches retain their existing max_length capacity.
     kv_share_buffer_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
     const int64_t fixed_kv_seq_len = DetectAndConfigureFixedKvShape(
         model_.session_info_, kv_input_name_strings_, kv_layer_count_,
@@ -97,9 +98,11 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
     }
 
     if (kv_share_buffer_) {
-      const int64_t seq_cap = fixed_kv_seq_len > 0
-                                  ? fixed_kv_seq_len
-                                  : static_cast<int64_t>(state_.params_->search.max_length);
+      int64_t seq_cap = fixed_kv_seq_len > 0 ? fixed_kv_seq_len
+                                             : static_cast<int64_t>(state_.params_->search.max_length);
+      if (fixed_kv_seq_len == 0 && WebGPU::SharedCacheGrowth::IsSupported(state_, kv_input_name_strings_, kv_output_name_strings_)) {
+        seq_cap = 1;
+      }
       if (seq_cap <= 0) {
         throw std::runtime_error(
             "ConvKeyValueCache: past_present_share_buffer requires a fixed kv seq_len in the "
@@ -157,8 +160,7 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
 }
 
 void ConvKeyValueCache::Add() {
-  // Add KV cache inputs/outputs. In shared-buffer mode and for windowed layers past == present
-  // (one buffer), so the input is bound to the present tensor.
+  // Shared and windowed past/present alias the same tensor; growth rebinds both together.
   kv_input_index_ = state_.inputs_.size();
   for (int i = 0; i < kv_layer_count_ * 2; ++i) {
     state_.inputs_.push_back(kv_share_buffer_ || kv_windowed_[i / 2] ? kv_presents_[i].get() : kv_empty_past_.get());
@@ -185,9 +187,8 @@ void ConvKeyValueCache::Add() {
 
 void ConvKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
   // --- Update KV cache (attention layers) ---
-  // In shared-buffer mode the past/present KV buffers are fixed and reused in place
-  // (the session writes new tokens into the same buffer), so there is nothing to
-  // grow or swap here. Only the dynamic/growing path needs updating.
+  // Shared past/present have already grown together and are updated in place.
+  // Nonshared caches swap the previous output into the next input.
   if (!kv_share_buffer_) {
     if (!kv_is_first_update_) {
       for (int i = 0; i < kv_layer_count_ * 2; i++) {

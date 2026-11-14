@@ -20,6 +20,9 @@ namespace Generators {
 struct Tokenizer;
 struct MultiModalProcessor;
 class ThreadPool;
+namespace WebGPU {
+struct SharedCacheGrowth;
+}
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
@@ -128,6 +131,7 @@ struct State {
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
+  friend struct WebGPU::SharedCacheGrowth;
   // Capture identity includes input length, execution variant, and active adapters.
   // IDs are unique across states sharing a session and stay owned until destruction.
   GraphAnnotationIds graph_ids_;

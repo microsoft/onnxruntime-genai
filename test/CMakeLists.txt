@@ -30,6 +30,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/mtp_config_test.cpp"
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/qwen2vl_position_inputs_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/shared_cache_growth_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
@@ -364,6 +365,11 @@ list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/state_graph_capture_tests.cpp"
 )
 add_executable(engine_unit_tests ${engine_unit_test_srcs})
+if(USE_WEBGPU)
+  target_sources(engine_unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/cpp/shared_cache_growth_tests.cpp")
+  target_compile_definitions(engine_unit_tests PRIVATE
+    ORTGENAI_TEST_WEBGPU_FALLBACK_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/models/webgpu-capture-fallback")
+endif()
 target_include_directories(engine_unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${onnxruntime_extensions_SOURCE_DIR}/shared/api
