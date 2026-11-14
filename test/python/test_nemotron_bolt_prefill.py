@@ -275,15 +275,38 @@ def test_prefill_converter_banks_mamba2_verify_and_enables_continuous_batching(p
     )
     onnx.save(model, str(synthetic_r8_package / "model.onnx"))
 
+    (synthetic_r8_package / "config.json").write_text(json.dumps({"llm_config": {"max_position_embeddings": 262144}}))
     output = synthetic_r8_package.parent / "paged-cb-pkg"
     prefill_converter.convert(synthetic_r8_package, output)
 
     out_cfg = json.loads((output / "genai_config.json").read_text())
+    assert out_cfg["model"]["context_length"] == 262144
     assert out_cfg["engine"]["dynamic_batching"]["max_batch_size"] == 4
     profiles = {p["id"]: p["overlay"]["engine"]["dynamic_batching"] for p in out_cfg["runtime_profiles"]}
     assert profiles["consumer-gpu-30g"]["max_batch_size"] == 1
     assert profiles["consumer-gpu-32g"]["max_batch_size"] == 1
-    assert "max_batch_size" not in profiles["gpu-132k"]
+    assert profiles["gpu-256k-b1"]["max_batch_size"] == 1
+    assert profiles["gpu-256k-b2"]["max_batch_size"] == 2
+    assert profiles["gpu-256k-b4"]["max_batch_size"] == 4
+    assert profiles["gpu-256k-b8"]["max_batch_size"] == 8
+    assert (
+        profiles["gpu-256k-b1"]["num_blocks"]
+        < profiles["gpu-256k-b2"]["num_blocks"]
+        < profiles["gpu-256k-b4"]["num_blocks"]
+        < profiles["gpu-256k-b8"]["num_blocks"]
+    )
+    # Verify contiguous, non-overlapping VRAM bounds across all non-24g tiers:
+    elig = {p["id"]: p["eligibility"] for p in out_cfg["runtime_profiles"]}
+    ordered = ["consumer-gpu-30g", "consumer-gpu-32g", "gpu-256k-b1", "gpu-256k-b2", "gpu-256k-b4", "gpu-256k-b8"]
+    assert (
+        elig["consumer-gpu-24g"]["maximum_total_device_memory_bytes"] + 1
+        == (elig["consumer-gpu-30g"]["minimum_total_device_memory_bytes"])
+    )
+    for idx in range(len(ordered) - 1):
+        prev_id, next_id = ordered[idx], ordered[idx + 1]
+        assert (
+            elig[prev_id]["maximum_total_device_memory_bytes"] + 1 == elig[next_id]["minimum_total_device_memory_bytes"]
+        )
 
     out_model = onnx.load(str(output / "model.onnx"))
     in_shapes = {

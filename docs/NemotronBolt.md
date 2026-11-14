@@ -18,8 +18,15 @@ synthetic logits are involved.
 ## Package configuration
 
 Use `model.type: "nemotron_bolt"`, `model.vocab_size: 131072`,
-`model.context_length: 135160`, and `model.decoder.filename: "model.onnx"` for a
-fixed-R8 graph with KV capacity 135168. `context_length`
+and `model.decoder.filename: "model.onnx"`.
+For converted `com.microsoft:PagedAttention` packages (`examples/python/nemotron-bolt-prefill.py`),
+`model.context_length` and `search.max_length` are promoted to `max_position_embeddings`
+(`262144` / `256K`), `block_table` columns are bounded per sequence to
+`ceil((context_length + 8) / 256)` (`1025` blocks = `262,400` KV slots), and disjoint
+`runtime_profiles` automatically size `max_batch_size` (`1, 2, 4, 8`) and `num_blocks`
+(`133, 261, 1029, 2058, 4116, 8231`) by GPU VRAM (`24 GiB` through `> 84 GiB` RTX PRO 6000 / H200 / B200).
+For legacy fixed-R8 dense-KV graphs with KV capacity 135168, use
+`model.context_length: 135160`; dense-KV `context_length`
 must reserve at least eight scratch positions below the graph's KV capacity.
 `search.max_length` includes the prompt and must not exceed `context_length`.
 Usual BOS/PAD/EOS fields apply, including an EOS list such as `[2, 11]`.

@@ -1005,6 +1005,139 @@ TEST(NemotronBolt, PromptAtBudgetIsImmediatelyDone) {
   EXPECT_THROW(search->CommitToken(21), std::runtime_error);
 }
 
+TEST(NemotronBolt, Disjoint256kRuntimeProfilesSelectExpectedBatchAndBlocksByVram) {
+  const std::string doc = R"({
+    "model": {
+      "type": "nemotron_bolt",
+      "vocab_size": 131072,
+      "context_length": 262144,
+      "decoder": {
+        "filename": "model.onnx",
+        "num_hidden_layers": 55,
+        "num_key_value_heads": 2,
+        "head_size": 128,
+        "state_groups": [{"kind": "paged_kv", "layer_ids": [7, 14, 21, 28, 35, 42, 49, 54]}]
+      }
+    },
+    "speculative": {"max_draft_tokens": 7},
+    "engine": {
+      "dynamic_batching": {
+        "block_size": 256,
+        "num_blocks": 4116,
+        "max_batch_size": 4,
+        "max_scheduled_tokens": 4096
+      }
+    },
+    "runtime_profiles": [
+      {
+        "id": "consumer-gpu-24g",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 21474836480,
+          "maximum_total_device_memory_bytes": 26843545600,
+          "minimum_effective_host_memory_bytes": 68719476736,
+          "is_integrated": false
+        },
+        "overlay": {"engine": {"dynamic_batching": {"num_blocks": 133, "max_batch_size": 1, "max_scheduled_tokens": 4096}}}
+      },
+      {
+        "id": "consumer-gpu-24g-host-64g",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 21474836480,
+          "maximum_total_device_memory_bytes": 26843545600,
+          "maximum_effective_host_memory_bytes": 68719476735,
+          "is_integrated": false
+        },
+        "overlay": {"engine": {"dynamic_batching": {"num_blocks": 133, "max_batch_size": 1, "max_scheduled_tokens": 4096}}}
+      },
+      {
+        "id": "consumer-gpu-30g",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 26843545601,
+          "maximum_total_device_memory_bytes": 32212254720,
+          "is_integrated": false
+        },
+        "overlay": {"engine": {"dynamic_batching": {"num_blocks": 133, "max_batch_size": 1, "max_scheduled_tokens": 4096}}}
+      },
+      {
+        "id": "consumer-gpu-32g",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 32212254721,
+          "maximum_total_device_memory_bytes": 36507222016,
+          "is_integrated": false
+        },
+        "overlay": {"engine": {"dynamic_batching": {"num_blocks": 261, "max_batch_size": 1, "max_scheduled_tokens": 4096}}}
+      },
+      {
+        "id": "gpu-256k-b1",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 36507222017,
+          "maximum_total_device_memory_bytes": 45097156608,
+          "is_integrated": false
+        },
+        "overlay": {"engine": {"dynamic_batching": {"num_blocks": 1029, "max_batch_size": 1, "max_scheduled_tokens": 4096}}}
+      },
+      {
+        "id": "gpu-256k-b2",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 45097156609,
+          "maximum_total_device_memory_bytes": 57982058496,
+          "is_integrated": false
+        },
+        "overlay": {"engine": {"dynamic_batching": {"num_blocks": 2058, "max_batch_size": 2, "max_scheduled_tokens": 4096}}}
+      },
+      {
+        "id": "gpu-256k-b4",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 57982058497,
+          "maximum_total_device_memory_bytes": 90194313216,
+          "is_integrated": false
+        },
+        "overlay": {"engine": {"dynamic_batching": {"num_blocks": 4116, "max_batch_size": 4, "max_scheduled_tokens": 4096}}}
+      },
+      {
+        "id": "gpu-256k-b8",
+        "eligibility": {
+          "minimum_total_device_memory_bytes": 90194313217,
+          "is_integrated": false
+        },
+        "overlay": {"engine": {"dynamic_batching": {"num_blocks": 8231, "max_batch_size": 8, "max_scheduled_tokens": 4096}}}
+      }
+    ]
+  })";
+
+  constexpr uint64_t kGiB = uint64_t{1} << 30;
+  struct Expectation {
+    uint64_t vram_bytes;
+    uint64_t host_bytes;
+    size_t expected_batch;
+    size_t expected_blocks;
+  };
+  const std::array<Expectation, 8> cases{{
+      {24 * kGiB, 128 * kGiB, 1, 133},
+      {24 * kGiB, 32 * kGiB, 1, 133},
+      {30 * kGiB, 128 * kGiB, 1, 133},
+      {32 * kGiB, 128 * kGiB, 1, 261},
+      {40 * kGiB, 256 * kGiB, 1, 1029},
+      {48 * kGiB, 256 * kGiB, 2, 2058},
+      {80 * kGiB, 512 * kGiB, 4, 4116},
+      {89 * kGiB, 512 * kGiB, 8, 8231},
+  }};
+  for (const auto& tc : cases) {
+    Config cfg{fs::path{}, {}, doc};
+    ApplyRuntimeProfile(cfg, RuntimeProfileDeviceFacts{tc.vram_bytes, false, std::nullopt, tc.host_bytes, std::nullopt});
+    ASSERT_TRUE(cfg.engine.dynamic_batching.has_value());
+    EXPECT_EQ(cfg.engine.dynamic_batching->max_batch_size, tc.expected_batch) << "vram=" << tc.vram_bytes;
+    EXPECT_EQ(cfg.engine.dynamic_batching->num_blocks, tc.expected_blocks) << "vram=" << tc.vram_bytes;
+  }
+  {
+    Config cfg{fs::path{}, {}, doc};
+    ApplyRuntimeProfile(cfg, RuntimeProfileDeviceFacts{141 * kGiB, false, std::nullopt, 1024 * kGiB, std::nullopt});
+    ASSERT_TRUE(cfg.engine.dynamic_batching.has_value());
+    EXPECT_EQ(cfg.engine.dynamic_batching->max_batch_size, 8u);
+    EXPECT_EQ(cfg.engine.dynamic_batching->num_blocks, 8231u);
+  }
+}
+
 std::unique_ptr<Config> BoltTestConfig(const char* path) {
   auto config = std::make_unique<Config>(fs::path{path}, "{}");
   for (auto* session : {&config->model.decoder.session_options,
@@ -1985,6 +2118,80 @@ TEST(NemotronBoltGPU, ContinuousBatchingMatchesGeneratorAcrossStaggeredArrivalsA
   for (const auto& item : items) total_expected += item.expected.size();
   EXPECT_EQ(stats.tokens_emitted, total_expected);
   EXPECT_GT(stats.rounds, 0u);
+}
+
+TEST(NemotronBoltGPU, FinalContextBoundaryFallsBackCleanlyPastDrafterRopeCeiling) {
+  const char* path = std::getenv("ORTGENAI_BOLT_TEST_MODEL");
+  if (!path)
+    GTEST_SKIP() << "Set ORTGENAI_BOLT_TEST_MODEL to a banked PagedAttention Bolt package";
+
+  // Cap context_length at 64 so generating from prompt=44 to 64 crosses length + 8 > context_length
+  // (positions 57..63) in both Generator and concurrent Engine decode.
+  auto cfg = CreateConfig(GetOrtEnv(), path);
+  cfg->runtime_profiles.clear();
+  cfg->model.context_length = 64;
+  cfg->search.max_length = 64;
+  cfg->model.eos_token_id = {cfg->model.vocab_size - 1};
+  cfg->engine.dynamic_batching = Config::Engine::DynamicBatching{};
+  cfg->engine.dynamic_batching->block_size = 256;
+  cfg->engine.dynamic_batching->num_blocks = 16;
+  cfg->engine.dynamic_batching->max_batch_size = 2;
+  cfg->engine.dynamic_batching->max_scheduled_tokens = 64;
+  auto model = CreateModel(GetOrtEnv(), std::move(cfg));
+  auto* bolt = dynamic_cast<NemotronBoltModel*>(model.get());
+  ASSERT_NE(bolt, nullptr);
+  if (!bolt->paged_attention_ || !bolt->batched_recurrent_) {
+    GTEST_SKIP() << "Package does not expose banked PagedAttention state";
+  }
+
+  std::array<std::vector<int32_t>, 2> prompts;
+  std::array<std::vector<int32_t>, 2> expected;
+  for (size_t idx = 0; idx < 2; ++idx) {
+    prompts[idx].resize(44);
+    for (size_t j = 0; j < 44; ++j) {
+      prompts[idx][j] = static_cast<int32_t>(200 + idx * 53 + (j % 29));
+    }
+    auto params = CreateGeneratorParams(*model);
+    params->search.do_sample = false;
+    params->search.max_length = 64;
+    auto gen = CreateGenerator(*model, *params);
+    gen->AppendTokens(prompts[idx]);
+    while (!gen->IsDone()) {
+      gen->GenerateNextToken();
+      const auto seq = gen->GetSequence(0).CopyDeviceToCpu();
+      expected[idx].push_back(seq.back());
+    }
+    ASSERT_EQ(expected[idx].size(), 20u);
+  }
+
+  auto engine = std::make_shared<Engine>(model);
+  std::array<std::shared_ptr<Request>, 2> reqs;
+  std::array<std::vector<int32_t>, 2> actual;
+  for (size_t idx = 0; idx < 2; ++idx) {
+    RequestOptions req_opts;
+    req_opts.max_session_tokens = 64;
+    reqs[idx] = engine->CreateRequest(req_opts);
+    TurnOptions turn_opts;
+    turn_opts.do_sample = false;
+    turn_opts.max_generated_tokens = 20;
+    reqs[idx]->BeginTurn(prompts[idx], turn_opts);
+  }
+  std::array<EngineEvent, 32> events{};
+  while (engine->HasPendingRequests()) {
+    const size_t n = engine->Run(events);
+    for (size_t e = 0; e < n; ++e) {
+      ASSERT_EQ(events[e].flags & EngineEventFlagFailed, 0u);
+      const size_t idx = (events[e].request == reqs[0]) ? 0u : 1u;
+      if (events[e].flags & EngineEventFlagToken) {
+        actual[idx].push_back(events[e].token);
+      }
+      if (events[e].flags & EngineEventFlagTurnFinished) {
+        reqs[idx]->Close();
+      }
+    }
+  }
+  EXPECT_EQ(actual[0], expected[0]);
+  EXPECT_EQ(actual[1], expected[1]);
 }
 
 }  // namespace

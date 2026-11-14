@@ -50,14 +50,39 @@ def _extract_protocol_tokens(source: Path, model_cfg: dict) -> None:
             model_cfg[cfg_key] = token_map[token_str]
 
 
+def _extract_max_position_embeddings(source: Path) -> int | None:
+    cfg_path = source / "config.json"
+    if not cfg_path.is_file():
+        return None
+    hf_cfg = json.loads(cfg_path.read_text())
+    for candidate in (
+        hf_cfg.get("llm_config", {}).get("max_position_embeddings")
+        if isinstance(hf_cfg.get("llm_config"), dict)
+        else None,
+        hf_cfg.get("max_position_embeddings"),
+    ):
+        if isinstance(candidate, int) and candidate > 0:
+            return candidate
+    return None
+
+
 def _ensure_cuda_arena_extend_strategy(session_options: dict) -> None:
     for entry in session_options.get("provider_options", []):
         if "cuda" in entry and isinstance(entry["cuda"], dict):
             entry["cuda"].setdefault("arena_extend_strategy", "kSameAsRequested")
 
 
-def _default_bolt_runtime_profiles(blocks_32k: int, blocks_64k: int, blocks_full: int) -> list[dict]:
-    return [
+def _default_bolt_runtime_profiles(
+    blocks_32k: int,
+    blocks_64k: int,
+    blocks_b1: int,
+    blocks_b2: int | None = None,
+    blocks_b4: int | None = None,
+    blocks_b8: int | None = None,
+    *,
+    banked_mamba: bool = False,
+) -> list[dict]:
+    profiles = [
         {
             "id": "consumer-gpu-24g",
             "eligibility": {
@@ -149,7 +174,7 @@ def _default_bolt_runtime_profiles(blocks_32k: int, blocks_64k: int, blocks_full
             "id": "consumer-gpu-32g",
             "eligibility": {
                 "minimum_total_device_memory_bytes": 32212254721,
-                "maximum_total_device_memory_bytes": 53687091200,
+                "maximum_total_device_memory_bytes": 36507222016 if banked_mamba else 53687091200,
                 "is_integrated": False,
             },
             "overlay": {
@@ -170,30 +195,140 @@ def _default_bolt_runtime_profiles(blocks_32k: int, blocks_64k: int, blocks_full
                 },
             },
         },
-        {
-            "id": "gpu-132k",
-            "eligibility": {
-                "minimum_total_device_memory_bytes": 53687091201,
-                "is_integrated": False,
-            },
-            "overlay": {
-                "model": {
-                    "decoder": {
-                        "filename": "model.onnx",
-                        "session_options": {
-                            "session.moe.offload.mode": "disabled",
-                        },
-                    }
-                },
-                "engine": {
-                    "dynamic_batching": {
-                        "num_blocks": blocks_full,
-                        "max_scheduled_tokens": PREFILL_CHUNK_TOKENS,
-                    }
-                },
-            },
-        },
     ]
+    if not banked_mamba:
+        profiles.append(
+            {
+                "id": "gpu-256k-b1",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 53687091201,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "disabled",
+                            },
+                        }
+                    },
+                    "engine": {
+                        "dynamic_batching": {
+                            "num_blocks": blocks_b1,
+                            "max_batch_size": 1,
+                            "max_scheduled_tokens": PREFILL_CHUNK_TOKENS,
+                        }
+                    },
+                },
+            }
+        )
+        return profiles
+
+    profiles.extend(
+        [
+            {
+                "id": "gpu-256k-b1",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 36507222017,
+                    "maximum_total_device_memory_bytes": 45097156608,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "disabled",
+                            },
+                        }
+                    },
+                    "engine": {
+                        "dynamic_batching": {
+                            "num_blocks": blocks_b1,
+                            "max_batch_size": 1,
+                            "max_scheduled_tokens": PREFILL_CHUNK_TOKENS,
+                        }
+                    },
+                },
+            },
+            {
+                "id": "gpu-256k-b2",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 45097156609,
+                    "maximum_total_device_memory_bytes": 57982058496,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "disabled",
+                            },
+                        }
+                    },
+                    "engine": {
+                        "dynamic_batching": {
+                            "num_blocks": blocks_b2 or blocks_b1,
+                            "max_batch_size": 2,
+                            "max_scheduled_tokens": PREFILL_CHUNK_TOKENS,
+                        }
+                    },
+                },
+            },
+            {
+                "id": "gpu-256k-b4",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 57982058497,
+                    "maximum_total_device_memory_bytes": 90194313216,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "disabled",
+                            },
+                        }
+                    },
+                    "engine": {
+                        "dynamic_batching": {
+                            "num_blocks": blocks_b4 or blocks_b1,
+                            "max_batch_size": 4,
+                            "max_scheduled_tokens": PREFILL_CHUNK_TOKENS,
+                        }
+                    },
+                },
+            },
+            {
+                "id": "gpu-256k-b8",
+                "eligibility": {
+                    "minimum_total_device_memory_bytes": 90194313217,
+                    "is_integrated": False,
+                },
+                "overlay": {
+                    "model": {
+                        "decoder": {
+                            "filename": "model.onnx",
+                            "session_options": {
+                                "session.moe.offload.mode": "disabled",
+                            },
+                        }
+                    },
+                    "engine": {
+                        "dynamic_batching": {
+                            "num_blocks": blocks_b8 or blocks_b1,
+                            "max_batch_size": 8,
+                            "max_scheduled_tokens": PREFILL_CHUNK_TOKENS,
+                        }
+                    },
+                },
+            },
+        ]
+    )
+    return profiles
 
 
 def _convert_gqa_to_paged_attention(graph: onnx.GraphProto) -> list[int]:
@@ -548,11 +683,16 @@ def convert(
         decoder_cfg["state_groups"] = [{"kind": "paged_kv", "layer_ids": paged_layer_ids}]
 
         context_len = int(model_cfg.get("context_length", 135160))
+        max_pos = _extract_max_position_embeddings(source)
+        if max_pos is not None and max_pos > context_len:
+            context_len = max_pos
+            model_cfg["context_length"] = context_len
+            if isinstance(config.get("search"), dict):
+                config["search"]["max_length"] = context_len
         kv_heads = int(decoder_cfg.get("num_key_value_heads", 2))
         head_size = int(decoder_cfg.get("head_size", 128))
         target_block_bytes = len(paged_layer_ids) * 2 * PAGED_BLOCK_SIZE * kv_heads * head_size * 2
-        aux_reserved_1 = 0
-        aux_reserved_full = 0
+        per_req_df_bytes = 0
         if "dflash2" in model_cfg and isinstance(model_cfg["dflash2"], dict):
             dflash = model_cfg["dflash2"]
             df_layers = int(dflash.get("num_hidden_layers", 5))
@@ -562,23 +702,51 @@ def convert(
             df_block = int(dflash.get("block_size", 8))
             df_pages = math.ceil((max(df_window, 0) + 2 * df_block) / PAGED_BLOCK_SIZE) + 1
             per_req_df_bytes = df_pages * df_layers * 2 * PAGED_BLOCK_SIZE * df_kv_heads * df_head_size * 2 + 196608
-            aux_reserved_1 = math.ceil(per_req_df_bytes / max(target_block_bytes, 1))
-            aux_reserved_full = math.ceil((effective_max_batch_size * per_req_df_bytes) / max(target_block_bytes, 1))
+
+        def _aux_blocks(batch: int) -> int:
+            if per_req_df_bytes == 0:
+                return 0
+            return math.ceil((batch * per_req_df_bytes) / max(target_block_bytes, 1))
 
         full_target_blocks = math.ceil((context_len + 8) / PAGED_BLOCK_SIZE)
-        blocks_full = full_target_blocks + aux_reserved_full
-        blocks_64k = min(full_target_blocks, 257) + aux_reserved_1
-        blocks_32k = min(full_target_blocks, 129) + aux_reserved_1
+        blocks_32k = min(full_target_blocks, 129) + _aux_blocks(1)
+        blocks_64k = min(full_target_blocks, 257) + _aux_blocks(1)
+        blocks_b1 = full_target_blocks + _aux_blocks(1)
+        blocks_b2 = 2 * full_target_blocks + _aux_blocks(2)
+        blocks_b4 = 4 * full_target_blocks + _aux_blocks(4)
+        blocks_b8 = 8 * full_target_blocks + _aux_blocks(8)
+        blocks_default = effective_max_batch_size * full_target_blocks + _aux_blocks(effective_max_batch_size)
         config["engine"] = {
             "dynamic_batching": {
                 "block_size": PAGED_BLOCK_SIZE,
-                "num_blocks": blocks_full,
+                "num_blocks": blocks_default,
                 "max_batch_size": effective_max_batch_size,
                 "max_scheduled_tokens": PREFILL_CHUNK_TOKENS,
             }
         }
-        if "runtime_profiles" not in config:
-            config["runtime_profiles"] = _default_bolt_runtime_profiles(blocks_32k, blocks_64k, blocks_full)
+        existing_profiles = config.get("runtime_profiles")
+        legacy_profile_ids = {
+            "consumer-gpu-24g",
+            "consumer-gpu-24g-host-64g",
+            "consumer-gpu-30g",
+            "consumer-gpu-32g",
+            "gpu-132k",
+        }
+        is_legacy_generated = (
+            isinstance(existing_profiles, list)
+            and banked_mamba
+            and {str(p.get("id", "")) for p in existing_profiles} == legacy_profile_ids
+        )
+        if "runtime_profiles" not in config or is_legacy_generated:
+            config["runtime_profiles"] = _default_bolt_runtime_profiles(
+                blocks_32k,
+                blocks_64k,
+                blocks_b1,
+                blocks_b2,
+                blocks_b4,
+                blocks_b8,
+                banked_mamba=banked_mamba,
+            )
         else:
             for prof in config["runtime_profiles"]:
                 pid = str(prof.get("id", ""))
@@ -591,11 +759,11 @@ def convert(
                     elif "32g" in pid or "64k" in pid:
                         eng_db["num_blocks"] = blocks_64k
                     else:
-                        eng_db["num_blocks"] = blocks_full
+                        eng_db["num_blocks"] = blocks_b1
                 if is_consumer_tier:
                     eng_db.setdefault("max_batch_size", 1)
                 else:
-                    eng_db.pop("max_batch_size", None)
+                    eng_db.setdefault("max_batch_size", effective_max_batch_size)
                 eng_db.setdefault("max_scheduled_tokens", PREFILL_CHUNK_TOKENS)
                 if overlay.get("speculative", {}).get("max_draft_tokens") == config.get("speculative", {}).get(
                     "max_draft_tokens"

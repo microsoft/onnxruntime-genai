@@ -750,6 +750,7 @@ void NemotronBoltState::Reset() {
   anchor_ = 0;
   drafts_.clear();
   pending_.clear();
+  has_drafts_ = false;
   prefilled_ = false;
   stats_ = {};
 }
@@ -1055,6 +1056,7 @@ void NemotronBoltState::Propose(size_t context_rows, size_t first_position, int3
               proposals.size() == 1 && proposals[0].size() == 7,
           "LiLiCorr drafter did not produce seven tokens");
   drafts_ = std::move(proposals[0]);
+  has_drafts_ = true;
   ++stats_.draft_forward_passes;
 }
 
@@ -1112,8 +1114,13 @@ void NemotronBoltState::Prefill(std::span<const int32_t> tokens) {
       state_row_ = static_cast<int32_t>(valid - 1);
       pos += bolt_.target_rows_;
     }
-    if (drafter_)
+    const size_t max_context = static_cast<size_t>(bolt_.config_->model.context_length);
+    if (drafter_ && tokens.size() + kBoltVerifyRows <= max_context) {
       Propose(draft_rows, draft_start, anchor_, single_chunk ? aux_view_.get() : prefill_aux_.get());
+    } else {
+      has_drafts_ = false;
+      drafts_.clear();
+    }
     if (tokens.size() < static_cast<size_t>(params_->search.max_length)) {
       pending_.push_back(anchor_);
       stats_.tokens_queued = 1;
@@ -1135,7 +1142,7 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
   Require(params_->search.max_length > 0 &&
               public_length < static_cast<size_t>(params_->search.max_length),
           "generation is already at its output budget");
-  if (pending_.empty() && !drafter_) {
+  if (pending_.empty() && (!drafter_ || !has_drafts_)) {
     // Only row zero is committed; later rows are causal scratch and are overwritten.
     const auto rows = bolt_.single_token_decode_ ? 1 : bolt_.target_rows_;
     const auto predictions = Verify(std::vector<int32_t>(rows, anchor_));
@@ -1190,7 +1197,13 @@ int32_t NemotronBoltState::NextToken(size_t public_length) {
                           (!tokens.empty() && std::find(model_.config_->model.eos_token_id.begin(),
                                                         model_.config_->model.eos_token_id.end(), tokens.back()) !=
                                                   model_.config_->model.eos_token_id.end());
-    if (!finishes) Propose(committed_rows + 1, first_position, anchor_);
+    const size_t max_context = static_cast<size_t>(bolt_.config_->model.context_length);
+    if (!finishes && length_ + kBoltVerifyRows <= max_context) {
+      Propose(committed_rows + 1, first_position, anchor_);
+    } else {
+      has_drafts_ = false;
+      drafts_.clear();
+    }
   }
   Require(!pending_.empty(), "no token available");
   const int32_t token = pending_.front();
@@ -1238,7 +1251,13 @@ NemotronBoltBatchState::NemotronBoltBatchState(const NemotronBoltModel& model,
               model.has_logit_rows_ && model.has_aux_rows_ && max_slots_ <= kBoltMaxBatchSize &&
               model.paged_num_blocks_ >= max_slots_,
           "NemotronBoltBatchState requires a PagedAttention dynamic-prefill Bolt target with banked recurrent state");
-  prefill_chunk_rows_ = NemotronBoltPrefillChunkRows(params.search.chunk_size, model.capacity_);
+  const size_t max_seq_tokens =
+      static_cast<size_t>(std::max(model.config_->model.context_length, 1)) + kBoltVerifyRows;
+  max_blocks_per_seq_ = std::max<size_t>(
+      1, std::min(model.paged_num_blocks_,
+                  (max_seq_tokens + kBoltPagedBlockSize - 1) / kBoltPagedBlockSize));
+  prefill_chunk_rows_ =
+      NemotronBoltPrefillChunkRows(params.search.chunk_size, max_blocks_per_seq_ * kBoltPagedBlockSize);
 
   const auto& info = model.session_info_;
   const auto& dev_mem_info = model.p_device_->GetAllocator().GetInfo();
@@ -1261,7 +1280,7 @@ NemotronBoltBatchState::NemotronBoltBatchState(const NemotronBoltModel& model,
     }
     decode_meta_span_.CopyCpuToDevice();
   }
-  decode_block_table_span_ = model.p_device_->Allocate<int32_t>(max_slots_ * model.paged_num_blocks_);
+  decode_block_table_span_ = model.p_device_->Allocate<int32_t>(max_slots_ * max_blocks_per_seq_);
   decode_block_table_span_.CpuSpan();
 
   decode_row_indices_ = std::make_unique<Tensor>(model.p_device_, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
@@ -1278,7 +1297,9 @@ NemotronBoltBatchState::NemotronBoltBatchState(const NemotronBoltModel& model,
   decode_attn_meta_->CreateTensor(meta_3_shape, true);
   {
     const std::array<int32_t, 3> meta{
-        static_cast<int32_t>(kBoltVerifyRows), static_cast<int32_t>(model.capacity_), 1};
+        static_cast<int32_t>(kBoltVerifyRows),
+        static_cast<int32_t>(max_blocks_per_seq_ * kBoltPagedBlockSize),
+        1};
     Upload(*decode_attn_meta_, std::span<const int32_t>{meta});
   }
 
@@ -1406,7 +1427,7 @@ NemotronBoltBatchState::NemotronBoltBatchState(const NemotronBoltModel& model,
     const std::array<int64_t, 1> b_shape{static_cast<int64_t>(b)};
     const std::array<int64_t, 1> bp1_shape{static_cast<int64_t>(b + 1)};
     const std::array<int64_t, 2> bt_shape{
-        static_cast<int64_t>(b), static_cast<int64_t>(model.paged_num_blocks_)};
+        static_cast<int64_t>(b), static_cast<int64_t>(max_blocks_per_seq_)};
     const std::array<int64_t, 1> rows_1d{static_cast<int64_t>(rows_b)};
     const std::array<int64_t, 3> logits_shape{
         1, static_cast<int64_t>(rows_b), model.config_->model.vocab_size};
@@ -1426,7 +1447,7 @@ NemotronBoltBatchState::NemotronBoltBatchState(const NemotronBoltModel& model,
     add_in_view(input_idx_state_slots_, meta_dev + 3 * max_slots_ + 1, b * sizeof(int32_t), b_shape,
                 ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
     add_in_view(input_idx_block_table_, bt_dev,
-                b * model.paged_num_blocks_ * sizeof(int32_t), bt_shape,
+                b * max_blocks_per_seq_ * sizeof(int32_t), bt_shape,
                 ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
     add_in_view(input_idx_logit_rows_, idx_dev, rows_b * sizeof(int64_t), rows_1d,
                 ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
@@ -1469,7 +1490,7 @@ NemotronBoltBatchState::NemotronBoltBatchState(const NemotronBoltModel& model,
   mixed_ids_span_.CpuSpan();
   mixed_meta_span_ = model.p_device_->Allocate<int32_t>(4 * max_slots_ + 4);
   mixed_meta_span_.CpuSpan();
-  mixed_block_table_span_ = model.p_device_->Allocate<int32_t>(max_slots_ * model.paged_num_blocks_);
+  mixed_block_table_span_ = model.p_device_->Allocate<int32_t>(max_slots_ * max_blocks_per_seq_);
   mixed_block_table_span_.CpuSpan();
   mixed_logit_rows_span_ = model.p_device_->Allocate<int64_t>(max_slots_ * kBoltVerifyRows);
   mixed_logit_rows_span_.CpuSpan();
@@ -1514,11 +1535,11 @@ NemotronBoltBatchState::NemotronBoltBatchState(const NemotronBoltModel& model,
       decode_meta_span_.CopyCpuToDevice();
 
       auto bt_cpu = decode_block_table_span_.CpuSpan();
-      std::fill_n(bt_cpu.begin(), b * model.paged_num_blocks_, int32_t{-1});
+      std::fill_n(bt_cpu.begin(), b * max_blocks_per_seq_, int32_t{-1});
       for (size_t i = 0; i < b; ++i) {
-        bt_cpu[i * model.paged_num_blocks_] = static_cast<int32_t>(i);
+        bt_cpu[i * max_blocks_per_seq_] = static_cast<int32_t>(i);
       }
-      decode_block_table_span_.subspan(0, b * model.paged_num_blocks_).CopyCpuRangeToDevice();
+      decode_block_table_span_.subspan(0, b * max_blocks_per_seq_).CopyCpuRangeToDevice();
 
       inputs_ = batch_bindings_[b].inputs;
       outputs_ = batch_bindings_[b].outputs;
@@ -1576,6 +1597,7 @@ size_t NemotronBoltBatchState::BlocksNeededForSlot(size_t slot, size_t total_seq
 void NemotronBoltBatchState::EnsureSlotBlocks(size_t slot, size_t total_seq_len) {
   auto& blocks = slot_blocks_.at(slot);
   const size_t needed = (total_seq_len + kBoltPagedBlockSize - 1) / kBoltPagedBlockSize;
+  Require(needed <= max_blocks_per_seq_, "sequence exceeds per-request block-table capacity");
   while (blocks.size() < needed) {
     Require(!free_blocks_.empty(), "PagedAttention block pool exhausted");
     blocks.push_back(free_blocks_.back());
@@ -1597,6 +1619,7 @@ void NemotronBoltBatchState::ResetAll() {
     s.state_row = 0;
     s.anchor = 0;
     s.drafts.clear();
+    s.has_drafts = false;
     s.prefilled = false;
     s.dirty = false;
   }
@@ -1632,6 +1655,7 @@ void NemotronBoltBatchState::ResetSlot(size_t slot) {
   s.state_row = 0;
   s.anchor = 0;
   s.drafts.clear();
+  s.has_drafts = false;
   s.prefilled = false;
 }
 
@@ -1681,7 +1705,7 @@ void NemotronBoltBatchState::StepPureDecode(std::span<const NemotronBoltSlotTask
     s.dirty = true;
     EnsureSlotBlocks(s_idx, s.length + kBoltVerifyRows);
     ids_cpu[i * kBoltVerifyRows] = s.anchor;
-    if (drafter_) {
+    if (drafter_ && s.has_drafts) {
       Require(s.drafts.size() == kBoltVerifyRows - 1, "missing draft block for speculative slot");
       for (size_t j = 0; j < kBoltVerifyRows - 1; ++j) {
         ids_cpu[i * kBoltVerifyRows + 1 + j] = s.drafts[j];
@@ -1707,7 +1731,7 @@ void NemotronBoltBatchState::StepPureDecode(std::span<const NemotronBoltSlotTask
 
   if (!same_block_table) {
     auto bt_cpu = decode_block_table_span_.CpuSpan();
-    const size_t cols = bolt_.paged_num_blocks_;
+    const size_t cols = max_blocks_per_seq_;
     for (size_t i = 0; i < b; ++i) {
       const auto& blocks = slot_blocks_[tasks[i].slot];
       auto row = bt_cpu.subspan(i * cols, cols);
@@ -1729,22 +1753,26 @@ void NemotronBoltBatchState::StepPureDecode(std::span<const NemotronBoltSlotTask
   ++stats_.target_forward_passes;
 
   auto preds_cpu = decode_pred_span_.subspan(0, rows).CopyDeviceToCpu();
+  const size_t max_context = static_cast<size_t>(bolt_.config_->model.context_length);
   std::vector<Dflash2Drafter::Feed> feeds;
   std::vector<size_t> feed_slots;
   if (drafter_) {
     feeds.reserve(b);
     feed_slots.reserve(b);
   }
+  bool counted_verify_pass = false;
 
   for (size_t i = 0; i < b; ++i) {
     const size_t s_idx = tasks[i].slot;
     auto& s = slots_[s_idx];
     auto& out = results[i];
     std::span<const int64_t> preds_i{preds_cpu.data() + i * kBoltVerifyRows, kBoltVerifyRows};
-    if (!drafter_) {
+    if (!drafter_ || !s.has_drafts) {
       s.anchor = static_cast<int32_t>(preds_i[0]);
       ++s.length;
       s.state_row = 0;
+      s.has_drafts = false;
+      s.drafts.clear();
       out.tokens[0] = s.anchor;
       out.count = 1;
       out.speculation = SpeculativeRowMetrics{1, 1};
@@ -1760,7 +1788,8 @@ void NemotronBoltBatchState::StepPureDecode(std::span<const NemotronBoltSlotTask
     for (size_t j = 0; j < tokens.size(); ++j) out.tokens[j] = tokens[j];
     out.count = tokens.size();
     out.speculative_round = true;
-    out.verify_forward_passes = (i == 0) ? 1 : 0;
+    out.verify_forward_passes = counted_verify_pass ? 0 : 1;
+    counted_verify_pass = true;
     out.speculation = SpeculativeRowMetrics{7, round_stats.accepted};
 
     const size_t first_position = s.length;
@@ -1770,7 +1799,7 @@ void NemotronBoltBatchState::StepPureDecode(std::span<const NemotronBoltSlotTask
 
     const bool finishes =
         tokens.size() >= tasks[i].remaining_budget || (!tokens.empty() && IsEosToken(tokens.back()));
-    if (!finishes) {
+    if (!finishes && s.length + kBoltVerifyRows <= max_context) {
       feeds.push_back(Dflash2Drafter::Feed{
           .request = s.drafter_key.get(),
           .aux_row_begin = i * kBoltVerifyRows,
@@ -1781,6 +1810,9 @@ void NemotronBoltBatchState::StepPureDecode(std::span<const NemotronBoltSlotTask
           .wants_drafts = true,
       });
       feed_slots.push_back(s_idx);
+    } else {
+      s.has_drafts = false;
+      s.drafts.clear();
     }
   }
 
@@ -1792,6 +1824,7 @@ void NemotronBoltBatchState::StepPureDecode(std::span<const NemotronBoltSlotTask
     for (size_t f = 0; f < feeds.size(); ++f) {
       Require(proposals[f].size() == kBoltVerifyRows - 1, "DFlash2 drafter did not produce seven tokens");
       slots_[feed_slots[f]].drafts = std::move(proposals[f]);
+      slots_[feed_slots[f]].has_drafts = true;
     }
     ++stats_.draft_forward_passes;
   }
@@ -1907,7 +1940,7 @@ void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlot
     auto ids_cpu = ids_sub.CpuSpan();
     auto meta_cpu = mixed_meta_span_.CpuSpan();
     auto bt_cpu = mixed_block_table_span_.CpuSpan();
-    const size_t cols = bolt_.paged_num_blocks_;
+    const size_t cols = max_blocks_per_seq_;
 
     meta_cpu[max_slots_] = 0;
     for (size_t i = 0; i < b; ++i) {
@@ -1916,7 +1949,7 @@ void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlot
       const auto& lay = layouts[i];
       if (task.is_decode) {
         ids_cpu[lay.row_offset] = s.anchor;
-        if (drafter_) {
+        if (drafter_ && s.has_drafts) {
           for (size_t j = 0; j < kBoltVerifyRows - 1; ++j) {
             ids_cpu[lay.row_offset + 1 + j] = s.drafts[j];
           }
@@ -1963,7 +1996,7 @@ void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlot
   const std::array<int64_t, 1> b_shape{static_cast<int64_t>(b)};
   const std::array<int64_t, 1> bp1_shape{static_cast<int64_t>(b + 1)};
   const std::array<int64_t, 2> bt_shape{
-      static_cast<int64_t>(b), static_cast<int64_t>(bolt_.paged_num_blocks_)};
+      static_cast<int64_t>(b), static_cast<int64_t>(max_blocks_per_seq_)};
   const std::array<int64_t, 1> lr_shape{static_cast<int64_t>(logit_rows.size())};
   const std::array<int64_t, 1> ar_shape{static_cast<int64_t>(aux_rows.size())};
   const std::array<int64_t, 1> attn_meta_shape{3};
@@ -1985,7 +2018,7 @@ void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlot
       ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
   auto bt_ort = OrtValue::CreateTensor(
       dev_mem_info, mixed_block_table_span_.Span().data(),
-      b * bolt_.paged_num_blocks_ * sizeof(int32_t), bt_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+      b * max_blocks_per_seq_ * sizeof(int32_t), bt_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
   auto lr_ort = OrtValue::CreateTensor(
       dev_mem_info, mixed_logit_rows_span_.Span().data(), logit_rows.size() * sizeof(int64_t),
       lr_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
@@ -2045,6 +2078,7 @@ void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlot
       }
     }
 
+    const size_t max_context = static_cast<size_t>(bolt_.config_->model.context_length);
     std::vector<Dflash2Drafter::Feed> feeds;
     std::vector<size_t> feed_slots;
     std::vector<size_t> feed_task_indices;
@@ -2059,10 +2093,12 @@ void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlot
 
       if (task.is_decode) {
         std::span<const int64_t> preds_i{preds_host.data() + lay.logit_offset, kBoltVerifyRows};
-        if (!drafter_) {
+        if (!drafter_ || !s.has_drafts) {
           s.anchor = static_cast<int32_t>(preds_i[0]);
           ++s.length;
           s.state_row = 0;
+          s.has_drafts = false;
+          s.drafts.clear();
           out.tokens[0] = s.anchor;
           out.count = 1;
           out.speculation = SpeculativeRowMetrics{1, 1};
@@ -2087,7 +2123,7 @@ void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlot
 
         const bool finishes =
             tokens.size() >= task.remaining_budget || (!tokens.empty() && IsEosToken(tokens.back()));
-        if (!finishes) {
+        if (!finishes && s.length + kBoltVerifyRows <= max_context) {
           feeds.push_back(Dflash2Drafter::Feed{
               .request = s.drafter_key.get(),
               .aux_row_begin = lay.aux_offset,
@@ -2099,6 +2135,9 @@ void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlot
           });
           feed_slots.push_back(task.slot);
           feed_task_indices.push_back(i);
+        } else {
+          s.has_drafts = false;
+          s.drafts.clear();
         }
       } else {
         s.length += lay.row_count;
@@ -2113,7 +2152,8 @@ void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlot
             out.tokens[0] = s.anchor;
             out.count = 1;
             out.speculation = SpeculativeRowMetrics{1, 1};
-            if (drafter_ && task.remaining_budget > 1 && !IsEosToken(s.anchor)) {
+            if (drafter_ && task.remaining_budget > 1 && !IsEosToken(s.anchor) &&
+                s.length + kBoltVerifyRows <= max_context) {
               if (!lay.single_aux_chunk) needs_staged_propose_aux = true;
               feeds.push_back(Dflash2Drafter::Feed{
                   .request = s.drafter_key.get(),
@@ -2126,6 +2166,9 @@ void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlot
               });
               feed_slots.push_back(task.slot);
               feed_task_indices.push_back(i);
+            } else {
+              s.has_drafts = false;
+              s.drafts.clear();
             }
           }
         }
@@ -2178,6 +2221,7 @@ void NemotronBoltBatchState::StepMixedOrPrefill(std::span<const NemotronBoltSlot
       for (size_t f = 0; f < feeds.size(); ++f) {
         Require(proposals[f].size() == kBoltVerifyRows - 1, "DFlash2 drafter did not produce seven tokens");
         slots_[feed_slots[f]].drafts = std::move(proposals[f]);
+        slots_[feed_slots[f]].has_drafts = true;
       }
       ++stats_.draft_forward_passes;
     } else if (!want_any_preds) {

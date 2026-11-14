@@ -150,6 +150,7 @@ struct NemotronBoltState : State {
   int32_t anchor_{};
   std::vector<int32_t> drafts_;
   std::deque<int32_t> pending_;
+  bool has_drafts_{};
   bool prefilled_{};
   SpeculativeStats stats_;
 };
@@ -186,6 +187,7 @@ struct NemotronBoltBatchState : State {
     int32_t state_row{};
     int32_t anchor{};
     std::vector<int32_t> drafts;
+    bool has_drafts{};
     bool prefilled{};
     bool dirty{};
   };
@@ -202,6 +204,7 @@ struct NemotronBoltBatchState : State {
 
   const NemotronBoltModel& bolt_;
   size_t max_slots_{1};
+  size_t max_blocks_per_seq_{1};
   size_t prefill_chunk_rows_{kBoltVerifyRows};
   std::map<std::string, std::unique_ptr<Tensor>> tensors_;
   std::vector<std::string> input_storage_, output_storage_;
