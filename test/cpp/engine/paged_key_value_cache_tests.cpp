@@ -3,7 +3,10 @@
 
 #include <array>
 #include <algorithm>
+#include <filesystem>
 #include <limits>
+#include <random>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -15,6 +18,7 @@
 #include "models/io/kv_cache.h"
 #include "models/model_state_manifest.h"
 #include "logging.h"
+#include "dflash2_drafter.h"
 
 namespace Generators {
 namespace test {
@@ -1064,6 +1068,117 @@ TEST(PagedKeyValueCacheManifestTest, RemovalReusesCommittedSlidingWindowCapacity
   EXPECT_TRUE(cache->OwnsRequest(second.get()));
 }
 
+TEST(PagedKeyValueCacheManifestTest, DflashPrefixRestoresPrivateWindowRingsAndQuantizationScales) {
+  for (const char* path : {MODEL_PATH "engine/synthetic-paged",
+                           MODEL_PATH "engine/synthetic-paged-scales"}) {
+    SCOPED_TRACE(path);
+    auto model = CreateModel(GetOrtEnv(), path);
+    auto& batching = *model->config_->engine.dynamic_batching;
+    batching.prefix_caching = true;
+    batching.max_snapshots = 2;
+    batching.dflash2_max_snapshots = 2;
+    batching.snapshot_cache.ram_bytes = 1 << 20;
+    model->config_->model.dflash2.filename = "draft.onnx";
+    model->config_->model.dflash2.sliding_window = 0;
+    auto& decoder = model->config_->model.decoder;
+    decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+    decoder.sliding_window->window_size = 4;
+    decoder.sliding_window->layers = {1};
+    decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+    model->config_->search.chunk_size = 4;
+    // The scale fixture declares 128 blocks in both pools: 64 two-block rings and 128 primary blocks.
+    batching.max_batch_size = 64;
+    const size_t primary_block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+    batching.num_blocks = 128 + (128 + primary_block_bytes - 1) / primary_block_bytes;
+    ASSERT_TRUE(ResolvePrefixCachingEnabled(model, 1));
+    auto cache = std::make_unique<PagedKeyValueCache>(model, 1);
+    ASSERT_GT(cache->Snapshot().total_blocks, 0u);
+    ASSERT_GT(cache->Snapshot().window_blocks.blocks_per_request, 0u);
+    auto storage = std::make_shared<PrefixSnapshotCache>(
+        std::array<size_t, 3>{0, 1 << 20, 0}, 1);
+    cache->InitializeSnapshotCache(storage);
+    ASSERT_TRUE(cache->WindowPrefixSnapshotEnabled());
+    auto owner = MakeDoublesEngine(model, 2, EosToken(*model)).engine;
+    const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+    auto first = CreateRequestWithPrompt(owner, std::span<const int32_t>{prompt}.first(8));
+    {
+      const std::array requests{PagedCacheReservationRequest{first.get(), 8, true, 8}};
+      auto reservation = cache->Reserve(requests);
+      reservation.Commit();
+    }
+    const auto source = cache->Snapshot();
+    const auto& source_blocks = source.window_blocks.requests.front().block_ids;
+    auto params = CreateGeneratorParams(*model);
+    ModelIO state(*params, *model);
+    cache->UpdateState(state, {first});
+    std::vector<size_t> window_outputs;
+    std::vector<std::vector<std::vector<uint8_t>>> expected;
+    for (size_t output = 0; output < state.outputs_.size(); ++output) {
+      auto* value = state.outputs_[output];
+      const auto info = value->GetTensorTypeAndShapeInfo();
+      if (std::string{state.output_names_[output]}.find("present.1.") != 0) continue;
+      window_outputs.push_back(output);
+      const size_t block_bytes =
+          info->GetElementCount() * Ort::SizeOf(info->GetElementType()) / source.window_blocks.total_blocks;
+      auto* bytes = value->GetTensorMutableData<uint8_t>();
+      for (size_t block = 0; block < source.window_blocks.total_blocks; ++block) {
+        std::fill_n(bytes + block * block_bytes, block_bytes,
+                    static_cast<uint8_t>(17 + output * 3 + block));
+      }
+      std::vector<std::vector<uint8_t>> ring;
+      for (const auto block : source_blocks) {
+        ring.emplace_back(bytes + block * block_bytes, bytes + (block + 1) * block_bytes);
+      }
+      expected.push_back(std::move(ring));
+    }
+    ASSERT_GE(window_outputs.size(), 2u);
+    auto window = cache->CaptureWindowPrefix(first.get(), 8);
+    ASSERT_NE(window, nullptr);
+    EXPECT_EQ(PagedWindowPrefixCheckpointBytes(model), window->bytes);
+    cache->SealCommittedBlocks(first.get(), prompt);
+    auto boundary = cache->DraftBoundary(first.get(), 8);
+    ASSERT_TRUE(boundary.has_value());
+    auto generation = std::make_shared<int>(0);
+    auto checkpoint = std::make_shared<Dflash2PrefixCheckpoint>();
+    checkpoint->token_count = 8;
+    checkpoint->target_mapped = true;
+    checkpoint->target_generation = generation;
+    checkpoint->target_window = window;
+    ASSERT_TRUE(cache->AttachDraftCheckpoint(*boundary, checkpoint));
+    checkpoint.reset();
+    window.reset();
+    cache->Remove(first);
+    auto match = cache->MatchPrefix(prompt, 8);
+    ASSERT_EQ(match.token_count, 8u);
+    auto competing = std::make_shared<PagedWindowPrefixCheckpoint>();
+    competing->type = match.target_window_checkpoint->type;
+    competing->shapes = match.target_window_checkpoint->shapes;
+    EXPECT_FALSE(storage->Allocate(competing, model->p_device_kvcache_, "paged-window", 2));
+    for (size_t output : window_outputs) {
+      auto* value = state.outputs_[output];
+      const auto info = value->GetTensorTypeAndShapeInfo();
+      std::fill_n(value->GetTensorMutableData<uint8_t>(),
+                  info->GetElementCount() * Ort::SizeOf(info->GetElementType()), uint8_t{0xEE});
+    }
+    auto second = CreateRequestWithPrompt(owner, prompt);
+    const std::array requests{PagedCacheReservationRequest{second.get(), 9, true, 9, &match}};
+    auto reservation = cache->Reserve(requests);
+    cache->RestoreWindowPrefix(second.get(), match, reservation);
+    reservation.Commit();
+    const auto destination = cache->Snapshot();
+    const auto& destination_blocks = destination.window_blocks.requests.front().block_ids;
+    for (size_t output = 0; output < window_outputs.size(); ++output) {
+      const auto* bytes = state.outputs_[window_outputs[output]]->GetTensorData<uint8_t>();
+      const size_t block_bytes = expected[output].front().size();
+      for (size_t block = 0; block < destination_blocks.size(); ++block) {
+        const auto offset = destination_blocks[block] * block_bytes;
+        EXPECT_EQ(std::vector<uint8_t>(bytes + offset, bytes + offset + block_bytes), expected[output][block]);
+      }
+    }
+    cache->Remove(second);
+  }
+}
+
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingRetainsSlidingLayersAndScalesInFullPagedStorage) {
   for (const char* path : {MODEL_PATH "engine/synthetic-paged",
                            MODEL_PATH "engine/synthetic-paged-scales"}) {
@@ -1179,20 +1294,33 @@ TEST(PagedKeyValueCacheManifestTest, PrefixCachingSharesSlidingKVBeyondRingWrap)
   }
 }
 
-TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesSlidingWindowCompatibility) {
+TEST(PagedKeyValueCacheManifestTest, TargetSlidingWindowRequiresOptInRegardlessOfPhysicalStorage) {
+  for (bool window_table : {false, true}) {
+    for (const auto enabled : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+      SCOPED_TRACE(window_table);
+      SCOPED_TRACE(enabled.value_or(false));
+      auto model = LoadSyntheticPagedModel();
+      auto& decoder = model->config_->model.decoder;
+      decoder.sliding_window.emplace();
+      decoder.sliding_window->window_size = 4;
+      decoder.sliding_window->layers = {1};
+      decoder.inputs.block_table_windowed = window_table ? decoder.inputs.block_table : "";
+      model->config_->search.chunk_size = 4;
+      model->config_->engine.dynamic_batching->prefix_caching = enabled;
+      auto cache = MakePagedCache(model);
+      EXPECT_EQ(cache->PrefixCachingEnabled(), enabled.value_or(false));
+      EXPECT_EQ(cache->Snapshot().window_blocks.total_blocks != 0,
+                window_table && !enabled.value_or(false));
+    }
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, WindowedDrafterDoesNotOptOutTheTargetPrefixCache) {
   auto model = LoadSyntheticPagedModel();
-  auto& decoder = model->config_->model.decoder;
-  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
-  decoder.sliding_window->window_size = 4;
-  decoder.sliding_window->layers = {1};
-  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
-  model->config_->search.chunk_size = 4;
-
+  model->config_->model.dflash2.filename = "drafter.onnx";
+  model->config_->model.dflash2.sliding_window = 8;
   EXPECT_FALSE(model->config_->engine.dynamic_batching->prefix_caching.has_value());
-  EXPECT_FALSE(ResolvePrefixCachingEnabled(model, /*auxiliary_bytes_per_block=*/0));
-  auto cache = MakePagedCache(model);
-
-  EXPECT_FALSE(cache->PrefixCachingEnabled());
+  EXPECT_TRUE(MakePagedCache(model)->PrefixCachingEnabled());
 }
 
 TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesAuxiliaryCacheCompatibility) {
@@ -1217,13 +1345,46 @@ TEST(PagedKeyValueCacheManifestTest, SingleBlockPoolKeepsPrefixCachingEnabled) {
 }
 
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsDsparkAuxiliaryState) {
-  auto model = LoadSyntheticPagedModel();
-  auto& batching = *model->config_->engine.dynamic_batching;
-  batching.prefix_caching = true;
-  model->config_->model.dflash2.filename = "dspark.onnx";
-  model->config_->model.dflash2.is_dspark = true;
+  for (int window : {0, 8}) {
+    for (bool explicit_policy : {false, true}) {
+      SCOPED_TRACE(window);
+      SCOPED_TRACE(explicit_policy);
+      auto model = LoadSyntheticPagedModel();
+      auto& batching = *model->config_->engine.dynamic_batching;
+      if (explicit_policy) batching.prefix_caching = true;
+      model->config_->model.dflash2.filename = "dspark.onnx";
+      model->config_->model.dflash2.is_dspark = true;
+      model->config_->model.dflash2.sliding_window = window;
 
-  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+      if (explicit_policy) {
+        EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+      } else {
+        EXPECT_FALSE(MakePagedCache(model)->PrefixCachingEnabled());
+      }
+    }
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, TargetMappedDrafterPreservesTargetStateConstraints) {
+  for (bool fixed_state : {false, true}) {
+    for (bool mtp : {false, true}) {
+      for (bool explicit_policy : {false, true}) {
+        SCOPED_TRACE(fixed_state);
+        SCOPED_TRACE(mtp);
+        SCOPED_TRACE(explicit_policy);
+        auto model = fixed_state ? LoadSyntheticCompositeModel() : LoadSyntheticPagedModel();
+        if (explicit_policy) model->config_->engine.dynamic_batching->prefix_caching = true;
+        model->config_->model.dflash2.filename = "drafter.onnx";
+        model->config_->model.dflash2.sliding_window = 0;
+        if (mtp) model->config_->model.mtp.filename = "head.onnx";
+        if (explicit_policy && (fixed_state || mtp)) {
+          EXPECT_THROW(ResolvePrefixCachingEnabled(model, 1), std::runtime_error);
+        } else {
+          EXPECT_EQ(ResolvePrefixCachingEnabled(model, 1), !fixed_state && !mtp);
+        }
+      }
+    }
+  }
 }
 
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingSupportsFixedAuxiliaryPool) {
@@ -1628,6 +1789,318 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
 
 INSTANTIATE_TEST_SUITE_P(SnapshotLimits, Dflash2SnapshotEngineTest, ::testing::Values(0u, 1u, 2u, 3u));
 
+class Dflash2MappedPrefixTestBase : public ::testing::Test {
+ protected:
+  static std::shared_ptr<Model> LoadModel(bool windowed) {
+    auto model = LoadSyntheticPagedPerTokenModel();
+    model->config_->search.chunk_size = 4;
+    auto& batching = *model->config_->engine.dynamic_batching;
+    batching.prefix_caching = true;
+    batching.max_batch_size = 64;
+    batching.max_snapshots = 1;
+    batching.dflash2_max_snapshots = 1;
+    batching.snapshot_cache.ram_bytes = 1024 * 1024;
+    if (windowed) {
+      auto& decoder = model->config_->model.decoder;
+      decoder.sliding_window.emplace();
+      decoder.sliding_window->window_size = 4;
+      decoder.sliding_window->layers = {4};
+      decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+    }
+    auto& draft = model->config_->model.dflash2;
+    draft.filename = (fs::path{".."} / "synthetic-dspark" / "dflash2-fp16-aux.onnx").string();
+    draft.num_hidden_layers = 1;
+    draft.num_key_value_heads = 1;
+    draft.head_size = 1;
+    draft.block_size = 4;
+    draft.num_draft_tokens = 3;
+    draft.selector_top_k = 2;
+    draft.mask_token_id = 31;
+    draft.sliding_window = 0;
+    draft.main_aux_hidden_states = "hidden_states";
+    // Both fixture cache inputs have 128 blocks, including the two-block window rings.
+    const size_t primary_bytes = PagedKeyValueCacheBytesPerBlock(model);
+    const size_t draft_bytes = Dflash2Drafter::BytesPerBlock(
+        *model->config_, batching.block_size, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    const size_t reserved = Dflash2Drafter::FullAttentionReservedBytes(
+        batching.block_size, draft.block_size, batching.max_batch_size, draft_bytes);
+    batching.num_blocks = (128 * (primary_bytes + draft_bytes) + reserved) / primary_bytes;
+    return model;
+  }
+
+  static void Drain(Engine& engine, const std::shared_ptr<Request>& request,
+                    std::vector<int32_t>* output = nullptr) {
+    std::array<EngineEvent, 16> events;
+    size_t steps = 0;
+    while (engine.HasPendingRequests()) {
+      ASSERT_LT(++steps, 100u);
+      const size_t count = engine.Run(events);
+      for (size_t i = 0; i < count; ++i) {
+        if (events[i].flags & EngineEventFlagFailed) {
+          ASSERT_NO_THROW(engine.Run(events));
+        }
+        ASSERT_EQ(events[i].flags & EngineEventFlagFailed, 0u);
+        if (output && (events[i].flags & EngineEventFlagToken)) {
+          output->push_back(events[i].token);
+        }
+      }
+    }
+    EXPECT_TRUE(request->IsTurnComplete());
+  }
+};
+
+class Dflash2MappedPrefixTest : public Dflash2MappedPrefixTestBase,
+                                public ::testing::WithParamInterface<bool> {
+ protected:
+  std::shared_ptr<Model> LoadModel() const {
+    return Dflash2MappedPrefixTestBase::LoadModel(GetParam());
+  }
+};
+
+TEST_F(Dflash2MappedPrefixTestBase, DiskReadFailureRollsBackPairedAdoptionAndReplansFreshPrefill) {
+  for (const int failure_case : {0, 1, 2}) {
+    SCOPED_TRACE(failure_case);
+    const bool partial_read = failure_case == 1;
+    const bool device_failure = failure_case == 2;
+    struct SnapshotDirectory {
+      std::filesystem::path path{std::filesystem::temp_directory_path() /
+                                 ("oga-paired-read-failure-" + std::to_string(std::random_device{}()))};
+      SnapshotDirectory() {
+        if (!std::filesystem::create_directory(path))
+          throw std::runtime_error("Unable to create snapshot test directory.");
+      }
+      ~SnapshotDirectory() {
+        std::error_code error;
+        std::filesystem::remove(path, error);
+      }
+    } directory;
+    CountingCudaDevice fence{DeviceType::CPU};
+    auto model = LoadModel(true);
+    auto& storage = model->config_->engine.dynamic_batching->snapshot_cache;
+    storage.ram_bytes = 0;
+    storage.disk_bytes = 1024 * 1024;
+    storage.directory = directory.path.string();
+    auto dependencies = Engine::CreateDependencies(model);
+    auto cache = dependencies.cache_manager;
+    auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+    const std::array<int32_t, 5> prompt{2, 3, 4, 5, 6};
+    auto warm = engine->CreateRequest();
+    warm->BeginTurn(std::span<const int32_t>{prompt}.first(4), 1);
+    Drain(*engine, warm);
+    ASSERT_FALSE(HasFatalFailure());
+    warm->Close();
+
+    auto replay = engine->CreateRequest();
+    replay->BeginTurn(prompt, 3);
+    auto second = engine->CreateRequest();
+    second->BeginTurn(prompt, 3);
+    const auto match = cache->MatchPrefix(*replay);
+    ASSERT_NE(match, nullptr);
+    ASSERT_NE(match->target_window_checkpoint, nullptr);
+    const auto& checkpoint = match->target_window_checkpoint;
+    ASSERT_EQ(checkpoint->tier, PrefixSnapshotCache::Tier::Disk);
+    ASSERT_GT(checkpoint->shapes.size(), 1u);
+    const auto payload = std::filesystem::directory_iterator(directory.path)->path() / "payload";
+    std::filesystem::resize_file(
+        payload, partial_read ? static_cast<uintmax_t>(checkpoint->shapes.front().front()) : 0);
+    const auto before = cache->Snapshot();
+    std::array<EngineEvent, 16> events;
+    if (device_failure) {
+      auto* device = model->p_device_kvcache_;
+      fence.state->fail_synchronize = true;
+      model->p_device_kvcache_ = &fence;
+      size_t count = 0;
+      ASSERT_NO_THROW(count = engine->Run(events));
+      model->p_device_kvcache_ = device;
+      ASSERT_GT(count, 0u);
+      EXPECT_NE(events[0].flags & EngineEventFlagFailed, 0u);
+      EXPECT_GT(fence.state->synchronize_calls, 0u);
+      EXPECT_THROW(engine->Run(events), EngineStepError);
+      EXPECT_EQ(checkpoint->state, PrefixSnapshotCache::State::Resident);
+      EXPECT_TRUE(ValidateCacheInvariants(cache->Snapshot()).empty());
+      continue;
+    }
+    EXPECT_EQ(engine->Run(events), 0u);
+    EXPECT_TRUE(engine->HasPendingRequests());
+    EXPECT_EQ(checkpoint->state, PrefixSnapshotCache::State::Evicted);
+    EXPECT_FALSE(match->draft_checkpoint->IsResident());
+    EXPECT_EQ(cache->MatchPrefix(*replay), nullptr);
+    for (const auto& request : {replay, second}) {
+      EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+      EXPECT_EQ(request->TurnCachedPromptTokens(), 0u);
+      EXPECT_FALSE(cache->IsResident(request));
+    }
+    const auto after = cache->Snapshot();
+    EXPECT_EQ(after.free_blocks, before.free_blocks);
+    EXPECT_EQ(after.window_blocks.free_blocks, before.window_blocks.free_blocks);
+    EXPECT_TRUE(after.transaction_reserved_block_ids.empty());
+    EXPECT_TRUE(after.transaction_adopted_block_ids.empty());
+    EXPECT_TRUE(after.window_blocks.transaction_reserved_block_ids.empty());
+    EXPECT_TRUE(ValidateCacheInvariants(after).empty());
+
+    auto cold_model = LoadModel(true);
+    cold_model->config_->engine.dynamic_batching->prefix_caching = false;
+    auto cold_engine = std::make_shared<Engine>(cold_model);
+    auto cold = cold_engine->CreateRequest();
+    cold->BeginTurn(prompt, 3);
+    std::vector<int32_t> expected;
+    Drain(*cold_engine, cold, &expected);
+    ASSERT_FALSE(HasFatalFailure());
+    ASSERT_FALSE(expected.empty());
+    cold->Close();
+
+    std::array<std::vector<int32_t>, 2> outputs;
+    size_t steps = 0;
+    while (engine->HasPendingRequests()) {
+      ASSERT_LT(++steps, 100u);
+      const size_t count = engine->Run(events);
+      for (size_t i = 0; i < count; ++i) {
+        ASSERT_EQ(events[i].flags & EngineEventFlagFailed, 0u);
+        if (events[i].flags & EngineEventFlagToken) {
+          outputs[events[i].request == replay ? 0 : 1].push_back(events[i].token);
+        }
+      }
+    }
+    for (size_t i = 0; i < outputs.size(); ++i) {
+      EXPECT_EQ(outputs[i], expected);
+    }
+    for (const auto& request : {replay, second}) {
+      EXPECT_TRUE(request->IsTurnComplete());
+      EXPECT_EQ(request->TurnCachedPromptTokens(), 0u);
+      request->Close();
+    }
+    auto unrelated = engine->CreateRequest();
+    const std::array<int32_t, 5> other_prompt{7, 8, 9, 10, 11};
+    unrelated->BeginTurn(other_prompt, 3);
+    cold = cold_engine->CreateRequest();
+    cold->BeginTurn(other_prompt, 3);
+    std::vector<int32_t> actual;
+    expected.clear();
+    Drain(*engine, unrelated, &actual);
+    Drain(*cold_engine, cold, &expected);
+    ASSERT_FALSE(HasFatalFailure());
+    ASSERT_FALSE(expected.empty());
+    EXPECT_EQ(actual, expected);
+    unrelated->Close();
+    cold->Close();
+    EXPECT_EQ(engine->GetSpeculativeStats().dflash2_failures, 0u);
+    EXPECT_EQ(engine->GetSpeculativeStats().dflash2_disables, 0u);
+    EXPECT_EQ(cache->ResidentRequestCount(), 0u);
+    EXPECT_TRUE(ValidateCacheInvariants(cache->Snapshot()).empty());
+  }
+}
+
+TEST_P(Dflash2MappedPrefixTest, DisabledStorageConstructsAndDecodesWithoutPairedReuse) {
+  for (const auto* policy : {
+           R"({"snapshot_cache":{}})",
+           R"({"snapshot_cache":{"vram_bytes":0,"ram_bytes":0,"disk_bytes":0}})",
+           R"({"dflash2_max_snapshots":0})",
+           R"({"max_snapshots":0})"}) {
+    SCOPED_TRACE(policy);
+    auto model = LoadModel();
+    OverlayConfig(*model->config_, std::string{R"({"engine":{"dynamic_batching":)"} + policy + "}}");
+    auto dependencies = Engine::CreateDependencies(model);
+    EXPECT_FALSE(dependencies.cache_manager->PrefixCachingEnabled());
+    EXPECT_FALSE(dependencies.dflash2_prefix_checkpoints_enabled);
+    auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+    auto request = engine->CreateRequest();
+    request->BeginTurn(std::array<int32_t, 4>{2, 3, 4, 5}, 2);
+    Drain(*engine, request);
+    ASSERT_FALSE(HasFatalFailure());
+    EXPECT_EQ(engine->GetSpeculativeStats().dflash2_failures, 0u);
+    EXPECT_GT(engine->GetSpeculativeStats().draft_forward_passes, 0u);
+    request->Close();
+  }
+}
+
+TEST_P(Dflash2MappedPrefixTest, PublishesFirstTerminalBoundaryAndRetainsUsefulEarlierWindow) {
+  for (const auto& [prompt_length, snapshot_count] :
+       {std::pair<size_t, size_t>{4, 1}, {8, 1}, {4, 2}, {8, 2}}) {
+    SCOPED_TRACE(prompt_length);
+    SCOPED_TRACE(snapshot_count);
+    auto model = LoadModel();
+    model->config_->engine.dynamic_batching->max_snapshots = snapshot_count;
+    model->config_->engine.dynamic_batching->dflash2_max_snapshots = snapshot_count;
+    auto dependencies = Engine::CreateDependencies(model);
+    auto cache = dependencies.cache_manager;
+    auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+    const std::array<int32_t, 9> tokens{2, 3, 4, 5, 6, 7, 8, 9, 10};
+    auto first = engine->CreateRequest();
+    first->BeginTurn(std::span<const int32_t>{tokens}.first(prompt_length), 1);
+    Drain(*engine, first);
+    ASSERT_FALSE(HasFatalFailure());
+    first->Close();
+    auto extension = engine->CreateRequest();
+    extension->BeginTurn(std::span<const int32_t>{tokens}.first(prompt_length + 1), 1);
+    const size_t expected = GetParam() && prompt_length == 8 && snapshot_count == 1 ? 4 : prompt_length;
+    {
+      const auto match = cache->MatchPrefix(*extension);
+      ASSERT_NE(match, nullptr);
+      EXPECT_EQ(match->token_count, expected);
+      ASSERT_NE(match->draft_checkpoint, nullptr);
+      EXPECT_EQ(match->target_window_checkpoint != nullptr, GetParam());
+    }
+    std::vector<int32_t> actual;
+    Drain(*engine, extension, &actual);
+    ASSERT_FALSE(HasFatalFailure());
+    EXPECT_EQ(extension->TurnCachedPromptTokens(), expected);
+    auto cold_model = LoadModel();
+    cold_model->config_->engine.dynamic_batching->prefix_caching = false;
+    auto cold_engine = std::make_shared<Engine>(cold_model);
+    auto cold = cold_engine->CreateRequest();
+    cold->BeginTurn(std::span<const int32_t>{tokens}.first(prompt_length + 1), 1);
+    std::vector<int32_t> reference;
+    Drain(*cold_engine, cold, &reference);
+    ASSERT_FALSE(HasFatalFailure());
+    ASSERT_FALSE(reference.empty());
+    EXPECT_EQ(actual, reference);
+    cold->Close();
+    EXPECT_EQ(engine->GetSpeculativeStats().dflash2_failures, 0u);
+    extension->Close();
+    EXPECT_EQ(cache->ResidentRequestCount(), 0u);
+    EXPECT_TRUE(ValidateCacheInvariants(cache->Snapshot()).empty());
+  }
+}
+
+TEST_P(Dflash2MappedPrefixTest, RecoverySkipsResidentContextAndDraftsFreshRequests) {
+  auto model = LoadModel();
+  auto dependencies = Engine::CreateDependencies(model);
+  auto cache = dependencies.cache_manager;
+  auto* drafter = dependencies.dflash2_drafter.get();
+  auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+  const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+  auto resident = engine->CreateRequest();
+  resident->BeginTurn(prompt, 4);
+  std::array<EngineEvent, 16> events;
+  EXPECT_EQ(engine->Run(events), 0u);
+  ASSERT_EQ(resident->ProcessedSequenceLength(), 4);
+  auto checkpoint = cache->MatchPrefix(*resident);
+  ASSERT_NE(checkpoint, nullptr);
+  ASSERT_NE(checkpoint->draft_checkpoint, nullptr);
+  drafter->ReleaseAll();
+  EXPECT_FALSE(checkpoint->draft_checkpoint->IsResident());
+  EXPECT_EQ(cache->MatchPrefix(*resident), nullptr);
+  Drain(*engine, resident);
+  ASSERT_FALSE(HasFatalFailure());
+  EXPECT_GT(drafter->AdmissionMisses(), 0u);
+  resident->Close();
+  checkpoint.reset();
+  const auto before = engine->GetSpeculativeStats();
+  auto fresh = engine->CreateRequest();
+  fresh->BeginTurn(prompt, 4);
+  Drain(*engine, fresh);
+  ASSERT_FALSE(HasFatalFailure());
+  const auto after = engine->GetSpeculativeStats();
+  EXPECT_GT(after.draft_forward_passes, before.draft_forward_passes);
+  EXPECT_GT(after.draft_tokens_proposed, before.draft_tokens_proposed);
+  EXPECT_EQ(after.dflash2_failures, 0u);
+  EXPECT_EQ(after.dflash2_disables, 0u);
+  fresh->Close();
+  EXPECT_TRUE(ValidateCacheInvariants(cache->Snapshot()).empty());
+}
+
+INSTANTIATE_TEST_SUITE_P(FullAndWindowedTargets, Dflash2MappedPrefixTest, ::testing::Bool());
+
 TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {
   auto model = LoadSyntheticPagedModel();
   auto& decoder = model->config_->model.decoder;
@@ -1778,6 +2251,75 @@ TEST(PagedKeyValueCacheManifestTest, RejectsEmptyLegacyPagedGroup) {
         }
       },
       std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, DraftersInheritTheTargetPrefixCachingPolicy) {
+  for (int window : {0, 8}) {
+    for (auto enabled : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+      SCOPED_TRACE(window);
+      SCOPED_TRACE(enabled.has_value() ? (enabled.value() ? "enabled" : "disabled") : "default");
+      auto model = LoadSyntheticPagedModel();
+      model->config_->model.dflash2.filename = "drafter.onnx";
+      model->config_->model.dflash2.sliding_window = window;
+      model->config_->engine.dynamic_batching->prefix_caching = enabled;
+      PagedKeyValueCache cache{model, /*auxiliary_bytes_per_block=*/window == 0 ? 1u : 0u};
+      EXPECT_EQ(cache.PrefixCachingEnabled(), enabled.value_or(true));
+    }
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, MappedDflashMetadataDoesNotReserveSnapshotVram) {
+  auto model = LoadSyntheticPagedModel();
+  model->config_->model.dflash2.filename = "drafter.onnx";
+  model->config_->model.dflash2.sliding_window = 0;
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.num_blocks = 8;
+  const size_t block_bytes = PagedKeyValueCacheBytesPerBlock(model);
+  auto reference = CacheManager::Create(model, block_bytes);
+  const size_t target_blocks = reference->Snapshot().total_blocks;
+  ASSERT_GT(target_blocks, 0u);
+  reference.reset();
+  batching.snapshot_cache.vram_bytes = std::numeric_limits<size_t>::max();
+  auto cache = CacheManager::Create(model, block_bytes);
+  EXPECT_TRUE(cache->PrefixCachingEnabled());
+  EXPECT_EQ(cache->DraftCheckpointVramBytes(), 0u);
+  EXPECT_EQ(cache->Snapshot().total_blocks, target_blocks);
+}
+
+TEST(PagedKeyValueCacheManifestTest, MappedDflashReservesOnlyWholeWindowSnapshotsWithinCountLimits) {
+  CountingCudaDevice device;
+  auto model = LoadSyntheticPagedModel();
+  struct RestoreDevice {
+    ~RestoreDevice() { model.p_device_kvcache_ = original; }
+    Model& model;
+    DeviceInterface* original;
+  } restore{*model, std::exchange(model->p_device_kvcache_, &device)};
+  model->config_->model.dflash2.filename = "drafter.onnx";
+  model->config_->model.dflash2.sliding_window = 0;
+  auto& decoder = model->config_->model.decoder;
+  decoder.sliding_window.emplace();
+  decoder.sliding_window->window_size = 4;
+  decoder.sliding_window->layers = {4};
+  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+  model->config_->search.chunk_size = 4;
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching = true;
+  batching.max_batch_size = 2;
+  batching.dflash2_max_snapshots = 3;
+  const size_t bytes = PagedWindowPrefixCheckpointBytes(model);
+  ASSERT_GT(bytes, 0u);
+  for (const size_t count : {1u, 2u, 3u}) {
+    SCOPED_TRACE(count);
+    batching.max_snapshots = count;
+    batching.snapshot_cache.vram_bytes = 3 * bytes + bytes / 2;
+    auto cache = CacheManager::Create(model, 1);
+    EXPECT_EQ(cache->DraftCheckpointVramBytes(), std::min(count, size_t{2}) * bytes);
+    cache.reset();
+    batching.snapshot_cache.vram_bytes = bytes + bytes / 2;
+    cache = CacheManager::Create(model, 1);
+    EXPECT_EQ(cache->DraftCheckpointVramBytes(), bytes);
+  }
 }
 
 }  // namespace

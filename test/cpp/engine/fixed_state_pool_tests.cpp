@@ -839,8 +839,12 @@ TEST_F(FixedStatePoolTest, DraftAttachmentRequiresExactFixedBoundaryAndRetainsLe
   ASSERT_NE(registration.identity, nullptr);
   ASSERT_TRUE(index.AttachCheckpoint(registration.identity, fixed));
 
+  PrefixSnapshotCache storage{{0, 16, 0}, 1};
   auto draft = std::make_shared<Dflash2PrefixCheckpoint>();
   draft->token_count = block_size;
+  draft->shapes = {{16}};
+  draft->type = Ort::TypeToTensorType<uint8_t>;
+  ASSERT_TRUE(storage.Allocate(draft, GetDeviceInterface(DeviceType::CPU)));
   ASSERT_TRUE(index.CanAttachDraftCheckpoint(registration.identity, block_size));
   EXPECT_FALSE(index.CanAttachDraftCheckpoint(registration.identity, block_size * 2));
   auto other = pool.CapturePrefixCheckpoint(kRequestA);
@@ -862,7 +866,6 @@ TEST_F(FixedStatePoolTest, DraftAttachmentRequiresExactFixedBoundaryAndRetainsLe
   EXPECT_EQ(match.draft_checkpoint, nullptr);
   EXPECT_EQ(match.fixed_state_checkpoint, fixed);
   match = {};
-  PrefixSnapshotCache storage{{0, 16, 0}, 1};
   auto snapshot = std::make_shared<Dflash2PrefixCheckpoint>();
   snapshot->token_count = block_size;
   snapshot->shapes = {{16}};

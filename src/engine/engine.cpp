@@ -412,6 +412,11 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
     throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
   }
 
+  if (dflash2_drafter_->UsesTargetBlockTables()) {
+    for (auto& feed : dflash2_feeds_) {
+      feed.target_blocks = cache_manager_->RequestBlocks(feed.request);
+    }
+  }
   if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_,
                                 &dflash2_draft_distributions_, &dflash2_lattices_)) {
     ++speculative_stats_.draft_forward_passes;
@@ -424,7 +429,9 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
   for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
     const auto& entry = step_plan_.requests[i];
     const auto& feed = dflash2_feeds_[i];
-    if (!entry.is_prefill || !feed.draft_eligible ||
+    // Target-mapped context stays mirrored even when this turn cannot use proposals.
+    if (!entry.is_prefill ||
+        (!feed.draft_eligible && !dflash2_drafter_->UsesTargetBlockTables()) ||
         feed.first_position + feed.aux_row_count != entry.target_cache_slots) {
       continue;
     }
@@ -434,7 +441,19 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
       continue;
     }
     try {
-      auto checkpoint = dflash2_drafter_->CapturePrefix(feed.request, entry.target_cache_slots);
+      // An exact-prompt endpoint cannot serve identical replay. Publish it only with spare
+      // storage, so it cannot evict an earlier checkpoint that can.
+      const bool preserve_existing =
+          dflash2_drafter_->UsesTargetBlockTables() &&
+          entry.target_cache_slots == static_cast<size_t>(entry.sequence_length_before);
+      auto target_window = cache_manager_->CaptureWindowPrefix(
+          feed.request, entry.target_cache_slots, preserve_existing);
+      if (cache_manager_->WindowPrefixSnapshotEnabled() && !target_window) {
+        cache_manager_->RecordPrefixPublicationRefusal();
+        continue;
+      }
+      auto checkpoint = dflash2_drafter_->CapturePrefix(
+          feed.request, entry.target_cache_slots, std::move(target_window));
       if (!checkpoint || !cache_manager_->AttachDraftCheckpoint(*boundary, std::move(checkpoint))) {
         cache_manager_->RecordPrefixPublicationRefusal();
       }
@@ -2329,6 +2348,11 @@ void Engine::RunDynamic() {
               "Fixed state slots do not match scheduled request row order.");
         }
       }
+    } catch (const PrefixSnapshotReadError&) {
+      // ReserveStep unwound its provisional ownership and discarded the unreadable checkpoint.
+      // The adoption guard restores request boundaries; the next Run replans without that hit.
+      ++transaction_metrics_.rollbacks;
+      return;
     } catch (...) {
       ++transaction_metrics_.reservation_failures;
       MarkUnhealthyAndThrow(
