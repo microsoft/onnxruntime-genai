@@ -23,10 +23,15 @@ class PrefixCheckpointIndex {
  public:
   // Borrowed until the next index mutation. Lookup neither leases nor touches storage.
   const Entry* Find(std::span<const int32_t> tokens) const {
+    return Find(tokens, [](const Entry&) { return true; });
+  }
+
+  template <typename Compatible>
+  const Entry* Find(std::span<const int32_t> tokens, Compatible&& compatible) const {
     const Entry* best = nullptr;
     for (const auto& entry : entries_) {
       const auto prefix = entry.Tokens();
-      if (entry.IsResident() && !prefix.empty() && prefix.size() <= tokens.size() &&
+      if (entry.IsResident() && compatible(entry) && !prefix.empty() && prefix.size() <= tokens.size() &&
           (!best || prefix.size() > best->Tokens().size()) &&
           std::equal(prefix.begin(), prefix.end(), tokens.begin()))
         best = &entry;

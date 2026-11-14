@@ -6,6 +6,7 @@
 #include "models/model.h"
 #include "kv_cache.h"  // For ComposeKeyValueName
 #include "models/io/recurrent_state.h"
+#include "models/state-checkpoint.h"
 #include <algorithm>
 
 namespace Generators {
@@ -344,6 +345,18 @@ bool RecurrentState::TryBatchedSlotPromote(size_t slot) {
 
   return device.CopyStateSlots(slot_descs_.Span().data(), static_cast<int>(slot_descs_.size()),
                                static_cast<int>(slot), static_cast<int>(state_window_) - 1);
+}
+
+void RecurrentState::BindCheckpoint(StateCheckpointDescription& description) {
+  for (size_t i = 0; i < presents_.size(); ++i)
+    description.BindTensor(output_name_strings_[i], [this, i] { return presents_[i].get(); });
+  description.BindValue<int>(
+      [this] { return forward_length_; },
+      [this](const int& length) {
+        forward_length_ = length;
+        snapshot_valid_ = false;
+        if (state_update_active_) *state_update_active_->GetTensorMutableData<int32_t>() = 0;
+      });
 }
 
 void RecurrentState::Update() {

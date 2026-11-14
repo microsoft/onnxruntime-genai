@@ -12,6 +12,7 @@ struct SharedKeyValueCache : DefaultKeyValueCacheBase {
 
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
+  bool BindCheckpoint(StateCheckpointDescription& description) override;
 };
 
 }  // namespace Generators

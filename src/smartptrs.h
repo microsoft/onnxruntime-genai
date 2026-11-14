@@ -29,6 +29,7 @@ struct State;
 struct KeyValueCache;
 struct PositionInputs;
 struct DeviceInterface;
+class StateCheckpointDescription;
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
@@ -133,6 +134,7 @@ struct PositionInputs {
   virtual void RewindTo(size_t index) = 0;
   virtual OrtValue* GetRotaryPositionIds() { return nullptr; }
   virtual void SetRotaryPositionIds(OrtValue* positions) { (void)positions; }
+  virtual bool BindCheckpoint(StateCheckpointDescription&) { return false; }
 };
 
 struct BatchedSamplerState {
@@ -249,7 +251,8 @@ struct StateUpdateReplayDesc {
 // Version 20: Config gained memory budget/headroom settings; DeviceInterface gained sampler startup-byte sizing.
 // Version 21: Config::Engine::DynamicBatching gained host/device media budgets, changing Config's layout.
 // Version 22: Config's decoder/drafter layouts gained GGUF initializer mappings.
-inline constexpr uint32_t kDeviceInterfaceVersion = 22;
+// Version 23: State, KeyValueCache, and PositionInputs gained checkpoint hooks.
+inline constexpr uint32_t kDeviceInterfaceVersion = 23;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

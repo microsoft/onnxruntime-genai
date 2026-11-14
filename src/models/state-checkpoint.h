@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "../engine/prefix_snapshot_cache.h"
@@ -74,6 +75,8 @@ class StateCheckpointDescription {
 
   explicit StateCheckpointDescription(const void* owner) : owner_{owner} {}
   void BindBuffer(std::string name, std::function<Buffer()> view);
+  void BindTensor(std::string name, std::function<OrtValue*()> tensor,
+                  StateCheckpointLayout layout = {});
   void BindTensors(std::map<std::string, std::unique_ptr<OrtValue>>& tensors, DeviceInterface* device);
 
   template <typename T>
@@ -114,16 +117,18 @@ class StateCheckpointDescription {
 
 class StateCheckpointCache {
  public:
+  using Compatibility = std::pair<size_t, size_t>;
   struct Entry : StateCheckpointDescription::Snapshot {
     std::vector<int32_t> tokens;
+    Compatibility compatibility{};
     std::span<const int32_t> Tokens() const { return tokens; }
     bool IsResident() const { return state == PrefixSnapshotCache::State::Resident; }
   };
   StateCheckpointCache(std::shared_ptr<PrefixSnapshotCache> storage, size_t granularity,
                        std::string component = "native");
-  std::shared_ptr<Entry> Find(std::span<const int32_t> tokens);
+  std::shared_ptr<Entry> Find(std::span<const int32_t> tokens, Compatibility compatibility = {});
   void Capture(std::span<const int32_t> tokens, const StateCheckpointDescription& description,
-               DeviceInterface* device);
+               DeviceInterface* device, Compatibility compatibility = {});
   void Restore(const Entry& entry, const StateCheckpointDescription& description, DeviceInterface* device);
   const PrefixCacheMetrics& Metrics() const { return metrics_; }
 

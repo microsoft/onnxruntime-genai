@@ -626,13 +626,11 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   // Chunked prefill: bounds the ORT activation arena of the prompt forward (see the constructor).
   // Off (single forward) when the chunk size is 0 or the prompt fits in one chunk.
   const size_t total = input_ids.size();
-  size_t tail = total;
   if (prefill_chunk_ > 0 && total > static_cast<size_t>(prefill_chunk_)) {
     const size_t chunk = static_cast<size_t>(prefill_chunk_);
     for (size_t off = 0; off < total; off += chunk) {
       const size_t n = std::min(chunk, total - off);
       main_->AppendTokens(cpu_span<const int32_t>(input_ids.data() + off, n));
-      tail = n;  // outputs below are read from the final chunk's forward
     }
   } else {
     main_->AppendTokens(input_ids);
@@ -647,7 +645,10 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
   }
 
   OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.mtp.main_hidden_states.c_str());
-  const int last = static_cast<int>(tail) - 1;
+  const auto hidden_shape = hidden->GetTensorTypeAndShapeInfo()->GetShape();
+  if (hidden_shape.size() < 2 || hidden_shape[hidden_shape.size() - 2] <= 0)
+    throw std::runtime_error("MtpGenerator: the target prefill must emit at least one hidden-state row");
+  const int last = static_cast<int>(hidden_shape[hidden_shape.size() - 2]) - 1;
   ExtractHiddenPosition(hidden, last);  // h for the token we are about to predict
   if (sampling_) {
     // Sample the first generated token from the truncated target distribution at the last prompt

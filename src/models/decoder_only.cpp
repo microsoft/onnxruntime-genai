@@ -1,6 +1,7 @@
 #include "generator/generators.h"
 #include "decoder_only.h"
 #include "engram.h"
+#include "state-checkpoint.h"
 #include <charconv>
 #include <limits>
 #include "preprocessing/multi_modal_processor.h"
@@ -193,6 +194,22 @@ DecoderOnly_State::~DecoderOnly_State() = default;
 
 void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   extra_inputs_.Add(extra_inputs, model_.session_decoder_->GetInputNames());
+  checkpoint_extra_inputs_ = checkpoint_extra_inputs_ || !extra_inputs.empty();
+}
+
+std::unique_ptr<StateCheckpointDescription> DecoderOnly_State::DescribeCheckpoint() {
+  if (params_->BatchBeamSize() != 1 || hidden_states_ || engram_state_ || indexer_cache_ ||
+      checkpoint_extra_inputs_ || !adapter_names_.empty() || !model_.rope_context_input_.empty())
+    return nullptr;
+  auto description = std::make_unique<StateCheckpointDescription>(&model_);
+  if ((kv_cache_ && !kv_cache_->BindCheckpoint(*description)) ||
+      !position_inputs_->BindCheckpoint(*description))
+    return nullptr;
+  input_ids_.BindCheckpoint(*description);
+  if (recurrent_state_) recurrent_state_->BindCheckpoint(*description);
+  if (ple_state_) ple_state_->BindCheckpoint(*description);
+  description->BindValue(first_run_);
+  return description;
 }
 
 void DecoderOnly_State::SetHiddenStates(OrtValue* hidden_states) {
@@ -206,6 +223,15 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                                          bool all_tokens_valid) {
+  return RunImpl(total_length, next_tokens, next_indices, all_tokens_valid, true);
+}
+
+void DecoderOnly_State::RunPrefill(int total_length, DeviceSpan<int32_t>& next_tokens) {
+  RunImpl(total_length, next_tokens, {}, true, false);
+}
+
+DeviceSpan<float> DecoderOnly_State::RunImpl(int total_length, DeviceSpan<int32_t>& next_tokens,
+                                             DeviceSpan<int32_t> next_indices, bool all_tokens_valid, bool extract_logits) {
   size_t num_tokens = next_tokens.size();
   const auto& chunk_size_opt = params_->search.chunk_size;
 
@@ -214,7 +240,7 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   const bool replaying_rope_cache = rope_context_length_ && num_tokens == static_cast<size_t>(total_length);
   if ((first_run_ || replaying_rope_cache) && chunk_size_opt.has_value() &&
       chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
-    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value(), all_tokens_valid);
+    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value(), all_tokens_valid, extract_logits);
   }
 
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
@@ -258,11 +284,12 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   if (recurrent_state_) recurrent_state_->SetForwardLength(seq_len);
   if (ple_state_) ple_state_->SetForwardLength(seq_len);
 
-  return logits_.Get(all_tokens_valid);
+  return extract_logits ? logits_.Get(all_tokens_valid) : DeviceSpan<float>{};
 }
 
 DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
-                                                     DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid) {
+                                                     DeviceSpan<int32_t> next_indices, size_t chunk_size, bool all_tokens_valid,
+                                                     bool extract_logits) {
   // Chunking logic for context phase - process in chunks based on configured chunk_size
   size_t num_tokens = next_tokens.size();
   size_t processed_tokens = 0;
@@ -295,7 +322,7 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   }
 
   // Return logits from the last chunk for potential sampling
-  return logits_.Get(all_tokens_valid);
+  return extract_logits ? logits_.Get(all_tokens_valid) : DeviceSpan<float>{};
 }
 
 void DecoderOnly_State::ValidateRewindTo(size_t index) const {

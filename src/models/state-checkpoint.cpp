@@ -26,6 +26,10 @@ std::unique_ptr<OrtValue> ByteView(DeviceInterface* device, void* address, size_
 
 }  // namespace
 
+std::unique_ptr<StateCheckpointDescription> State::DescribeCheckpoint() {
+  return nullptr;
+}
+
 std::vector<PrefixSnapshotCache::Entry::Range> StateCheckpointLayout::Ranges(
     std::span<const int64_t> shape, size_t element_bytes, size_t tensor_bytes,
     size_t length, size_t selected_row) const {
@@ -67,6 +71,19 @@ void StateCheckpointDescription::BindBuffer(std::string name, std::function<Buff
   for (const auto& binding : bindings_)
     if (binding.name == name) throw std::invalid_argument("Duplicate checkpoint state binding.");
   bindings_.push_back({std::move(name), std::move(view)});
+}
+
+void StateCheckpointDescription::BindTensor(
+    std::string name, std::function<OrtValue*()> tensor, StateCheckpointLayout layout) {
+  BindBuffer(std::move(name), [tensor = std::move(tensor), layout] {
+    auto* value = tensor();
+    if (!value) throw std::runtime_error("Checkpoint tensor is not allocated.");
+    const auto info = value->GetTensorTypeAndShapeInfo();
+    const auto type = info->GetElementType();
+    return Buffer{static_cast<uint8_t*>(value->GetTensorMutableRawData()),
+                  Multiply(info->GetElementCount(), Ort::SizeOf(type)),
+                  info->GetShape(), type, layout};
+  });
 }
 
 void StateCheckpointDescription::BindTensors(
@@ -214,24 +231,32 @@ StateCheckpointCache::StateCheckpointCache(std::shared_ptr<PrefixSnapshotCache> 
   if (!storage_ || granularity_ == 0) throw std::invalid_argument("Invalid checkpoint cache policy.");
 }
 
-std::shared_ptr<StateCheckpointCache::Entry> StateCheckpointCache::Find(std::span<const int32_t> tokens) {
+std::shared_ptr<StateCheckpointCache::Entry> StateCheckpointCache::Find(
+    std::span<const int32_t> tokens, Compatibility compatibility) {
   metrics_.evictions += entries_.Prune();
   ++metrics_.lookups;
   metrics_.queried_tokens += tokens.size() / granularity_ * granularity_;
-  const auto* match = entries_.Find(tokens);
+  const auto* match = entries_.Find(tokens, [compatibility](const auto& entry) {
+    return entry.checkpoint->compatibility == compatibility;
+  });
   if (match) ++metrics_.matches;
   return match ? match->checkpoint : nullptr;
 }
 
 void StateCheckpointCache::Capture(std::span<const int32_t> tokens,
-                                   const StateCheckpointDescription& description, DeviceInterface* device) {
+                                   const StateCheckpointDescription& description, DeviceInterface* device,
+                                   Compatibility compatibility) {
   if (tokens.empty() || tokens.size() % granularity_ != 0)
     throw std::runtime_error("Invalid committed checkpoint boundary.");
   device->Synchronize();
   metrics_.evictions += entries_.Prune();
-  if (const auto* existing = entries_.Find(tokens); existing && existing->Tokens().size() == tokens.size()) return;
+  const auto* existing = entries_.Find(tokens, [compatibility](const auto& entry) {
+    return entry.checkpoint->compatibility == compatibility;
+  });
+  if (existing && existing->Tokens().size() == tokens.size()) return;
   entries_.TryPublish(metrics_, [&]() -> std::optional<IndexedEntry> {
     auto entry = std::make_shared<Entry>();
+    entry->compatibility = compatibility;
     entry->tokens.assign(tokens.begin(), tokens.end());
     if (!description.Capture(entry, *storage_, device, tokens.size(), component_)) {
       ++metrics_.retention_refusals;

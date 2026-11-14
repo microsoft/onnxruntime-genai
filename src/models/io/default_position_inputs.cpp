@@ -3,6 +3,7 @@
 #include "generator/generators.h"
 #include "models/model.h"
 #include "models/model_type.h"
+#include "models/state-checkpoint.h"
 
 #include <algorithm>
 #include <cmath>
@@ -98,9 +99,24 @@ void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
     }
   }
   is_first_update_ = false;
+  current_length_ = total_length;
+}
+
+bool DefaultPositionInputs::BindCheckpoint(StateCheckpointDescription& description) {
+  if (state_.params_->BatchBeamSize() != 1) return false;
+  // Batch-one default positions and masks are reconstructible; retain no prompt-sized copies.
+  description.BindValue<int>(
+      [this] { return current_length_; },
+      [this](const int& length) {
+        RewindTo(0);
+        if (length != 0) Update({}, length, length);
+        current_length_ = length;
+      });
+  return true;
 }
 
 void DefaultPositionInputs::RewindTo(size_t index) {
+  current_length_ = static_cast<int>(index);
   // Reset the state of the position inputs
   if (index == 0) {
     is_first_update_ = true;

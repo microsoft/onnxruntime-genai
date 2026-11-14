@@ -15,6 +15,7 @@ struct PleState {
   void RewindTo(size_t index);
   void ValidateRewindTo(size_t index) const;
   void Snapshot(size_t position);
+  void BindCheckpoint(StateCheckpointDescription& description);
   void SetForwardLength(int sequence_length) { forward_length_ = sequence_length; }
   void CropToPosition(size_t position);
   void ValidateCropPosition(size_t position) const;

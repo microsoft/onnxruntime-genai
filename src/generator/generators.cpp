@@ -832,7 +832,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     search_->AppendTokens(input_ids_device);
   } else {
     search_->AppendTokens(input_ids_device);
-    ComputeLogits(input_ids_device);
+    ComputePrefillLogits(input_ids_device, input_ids);
   }
 
   generation_telemetry_.CompleteAppend(
@@ -869,7 +869,77 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   }
   search_->AppendTokens(input_ids);
   computed_logits_ = false;
-  ComputeLogits(input_ids);
+  ComputePrefillLogits(input_ids);
+}
+
+void Generator::ComputePrefillLogits(DeviceSpan<int32_t> next_tokens, cpu_span<const int32_t> tokens) {
+  cached_prompt_tokens_ = 0;
+  const auto& config = *model_->config_;
+  const auto& batching = config.engine.dynamic_batching;
+  if (!IsPrefixCachingRequested(config) || !batching || batching->block_size == 0 ||
+      next_tokens.size() <= batching->block_size ||
+      search_->GetSequenceLength() != static_cast<int>(next_tokens.size()) ||
+      phi3_rope_threshold_ != 0 || rope_context_threshold_ != 0) {
+    ComputeLogits(next_tokens);
+    return;
+  }
+  auto description = state_->DescribeCheckpoint();
+  if (!description) {
+    ComputeLogits(next_tokens);
+    return;
+  }
+  StateCheckpointCache* cache = nullptr;
+  {
+    std::lock_guard lock{model_->generator_prefix_mutex_};
+    if (!model_->generator_prefix_cache_) {
+      if (auto storage = CreateNativePrefixSnapshotCache(config))
+        model_->generator_prefix_cache_ = std::make_shared<StateCheckpointCache>(
+            std::move(storage), batching->block_size, "generator");
+    }
+    cache = model_->generator_prefix_cache_.get();
+  }
+  if (!cache) {
+    ComputeLogits(next_tokens);
+    return;
+  }
+  if (tokens.empty()) {
+    auto cpu = next_tokens.CopyDeviceToCpu();
+    tokens = cpu_span<const int32_t>{cpu.data(), cpu.size()};
+  }
+  size_t valid_end = tokens.size();
+  while (valid_end != 0 && tokens[valid_end - 1] == config.model.pad_token_id) --valid_end;
+  const size_t checkpoint = valid_end == 0 ? 0 : (valid_end - 1) / batching->block_size * batching->block_size;
+  if (checkpoint == 0) {
+    ComputeLogits(next_tokens);
+    return;
+  }
+  const size_t chunk_size = state_->params_->search.chunk_size.value_or(0);
+  const StateCheckpointCache::Compatibility compatibility{state_->params_->search.max_length, chunk_size};
+  {
+    std::lock_guard lock{model_->generator_prefix_mutex_};
+    if (auto saved = cache->Find(tokens.first(checkpoint), compatibility)) {
+      cache->Restore(*saved, *description, model_->p_device_kvcache_);
+      cached_prompt_tokens_ = saved->tokens.size();
+    }
+  }
+  size_t position = cached_prompt_tokens_;
+  auto run_until = [&](size_t end) {
+    while (position < end) {
+      const size_t count = chunk_size == 0 ? end - position : std::min(chunk_size, end - position);
+      auto chunk = next_tokens.subspan(position, count);
+      position += count;
+      state_->RunPrefill(static_cast<int>(position), chunk);
+    }
+  };
+  if (position < checkpoint) {
+    run_until(checkpoint);
+    std::lock_guard lock{model_->generator_prefix_mutex_};
+    cache->Capture(tokens.first(checkpoint), *description, model_->p_device_kvcache_,
+                   compatibility);
+  }
+  if (chunk_size != 0 && next_tokens.size() - position > chunk_size)
+    run_until(position + (next_tokens.size() - position - 1) / chunk_size * chunk_size);
+  ComputeLogits(next_tokens.subspan(position, next_tokens.size() - position));
 }
 
 void Generator::RunGeneratedToken() {
