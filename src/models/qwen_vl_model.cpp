@@ -435,7 +435,7 @@ void Qwen2_5_VL_PipelineState::RunVision(const std::vector<ExtraInput>& extra_in
     throw std::runtime_error("Vision pipeline: expected output shape rank 2, got " + std::to_string(out_shape.size()));
   }
 
-  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
   std::span<float> data_span(image_features_buffer_.data(), image_features_buffer_.size());
   std::span<const int64_t> shape_span(out_shape.data(), out_shape.size());
   image_features_value_ = OrtValue::CreateTensor<float>(*mem_info, data_span, shape_span);
@@ -636,7 +636,7 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   }
 
   const auto storage_type = owner ? output_type : ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
-  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
   void* data = owner ? owner->GetTensorMutableRawData() : combined.data();
   const std::array<int64_t, 2> compact_shape{total_tokens, hidden_size};
   auto features = VisionOutputToFloat(OrtValue::CreateTensor(

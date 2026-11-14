@@ -71,7 +71,7 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
 }
 
 std::unique_ptr<OrtValue> QwenVisionPipeline::CreateTensor(const float* data, size_t count, const std::vector<int64_t>& shape) const {
-  auto memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  auto memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
   std::span<float> data_span(const_cast<float*>(data), count);
   std::span<const int64_t> shape_span(shape.data(), shape.size());
   return OrtValue::CreateTensor<float>(*memory_info, data_span, shape_span);

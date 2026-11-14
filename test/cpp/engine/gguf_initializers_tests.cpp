@@ -314,7 +314,7 @@ class GgufInitializersTest : public ::testing::Test {
   static std::vector<float> RunLargeModel(OrtSession& session, size_t count) {
     std::vector<float> input(count, 1.0f);
     const std::vector<int64_t> shape{static_cast<int64_t>(input.size())};
-    auto memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+    auto memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
     auto x = OrtValue::CreateTensor(*memory_info, input.data(), input.size() * sizeof(float), shape,
                                     ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     const char* input_name = "x";
@@ -368,6 +368,11 @@ TEST_F(GgufInitializersTest, DefaultShapesLoadWithoutExternalData) {
   WriteConfig(kDefaultMapping);
   auto model = LoadModel();
   EXPECT_FALSE(model->config_->model.decoder.gguf_initializers.tensors[0].has_shape);
+  ASSERT_EQ(model->gguf_external_values_.size(), 2u);
+  for (const auto& value : model->gguf_external_values_) {
+    EXPECT_EQ(value->GetTensorMemoryInfo().GetMemoryType(), OrtMemTypeDefault);
+    EXPECT_EQ(value->GetTensorMemoryInfo().GetDeviceType(), OrtMemoryInfoDeviceType_CPU);
+  }
   CheckOutputs(*model, *model->session_options_);
 }
 

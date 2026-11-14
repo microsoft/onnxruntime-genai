@@ -127,8 +127,6 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   const int64_t hidden_size = feature_shape[1];
   const size_t pixel_element_size = Ort::SizeOf(pixel_type);
   const size_t feature_element_size = Ort::SizeOf(feature_type);
-  auto* pixel_data = static_cast<uint8_t*>(pixel_values->GetTensorMutableRawData());
-  auto* feature_data = static_cast<uint8_t*>(image_features->GetTensorMutableRawData());
   const int64_t merge_size = model_.config_->model.vision.spatial_merge_size;
   if (merge_size <= 0) {
     throw std::runtime_error("Qwen spatial_merge_size must be positive");
@@ -160,7 +158,6 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
                              ") for " + std::to_string(num_images_) + " images");
   }
 
-  auto cpu_memory = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   int64_t patch_offset = 0;
   int64_t feature_offset = 0;
   for (int64_t image = 0; image < num_images_; ++image) {
@@ -199,14 +196,14 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
       return static_cast<size_t>(CheckedQwenVisionProduct(
           CheckedQwenVisionProduct(features, hidden_size), static_cast<int64_t>(feature_element_size)));
     };
-    auto image_pixel_values = OrtValue::CreateTensor(
-        *cpu_memory, pixel_data + pixel_bytes(image_patch_offset),
+    auto image_pixel_values = pixel_values->CreateTensorView(
+        pixel_bytes(image_patch_offset),
         pixel_bytes(num_patches), image_pixel_shape, pixel_type);
-    auto image_grid = OrtValue::CreateTensor(
-        *cpu_memory, const_cast<int64_t*>(grid_data + image * 3), 3 * sizeof(int64_t),
+    auto image_grid = grid->CreateTensorView(
+        static_cast<size_t>(image * 3) * sizeof(int64_t), 3 * sizeof(int64_t),
         image_grid_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-    auto image_feature_values = OrtValue::CreateTensor(
-        *cpu_memory, feature_data + feature_bytes(feature_offset), feature_bytes(num_features),
+    auto image_feature_values = image_features->CreateTensorView(
+        feature_bytes(feature_offset), feature_bytes(num_features),
         image_feature_shape, feature_type);
 
     inputs_[pixel_values_index] = image_pixel_values.get();

@@ -183,4 +183,34 @@ TEST(MultiModalDevicePlacementTests, EmbeddingsPreserveAdditionalFeatureDimensio
   EXPECT_EQ(state.inputs_.back(), embeddings.Get());
 }
 
+// Plugin execution providers reject OrtMemTypeCPU views, and a host description would misplace device features.
+TEST(MultiModalDevicePlacementTests, TensorViewsKeepTheSourceMemoryInfo) {
+  Ort::InitApi();
+  auto& allocator = Generators::GetDeviceInterface(Generators::DeviceType::CPU)->GetAllocator();
+  auto source = OrtValue::CreateTensor<int64_t>(allocator, std::array<int64_t, 2>{2, 3});
+
+  auto view = source->CreateTensorView(3 * sizeof(int64_t), 3 * sizeof(int64_t),
+                                       std::array<int64_t, 2>{1, 3}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+
+  EXPECT_EQ(view->GetTensorMemoryInfo().GetMemoryType(), OrtMemTypeDefault);
+  EXPECT_TRUE(view->GetTensorMemoryInfo() == source->GetTensorMemoryInfo());
+  EXPECT_EQ(view->GetTensorData<int64_t>(), source->GetTensorData<int64_t>() + 3);
+}
+
+TEST(MultiModalDevicePlacementTests, TensorViewsKeepDeviceIdentity) {
+  Ort::InitApi();
+  // Descriptor-only test: no kernel or device copy accesses this buffer.
+  std::array<int64_t, 6> storage{};
+  auto memory_info = OrtMemoryInfo::Create("Cuda", OrtDeviceAllocator, 3, OrtMemTypeDefault);
+  auto source = OrtValue::CreateTensor<int64_t>(*memory_info, storage, std::array<int64_t, 2>{2, 3});
+
+  auto view = source->CreateTensorView(3 * sizeof(int64_t), 3 * sizeof(int64_t),
+                                       std::array<int64_t, 2>{1, 3}, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+
+  EXPECT_TRUE(view->GetTensorMemoryInfo() == *memory_info);
+  EXPECT_EQ(view->GetTensorMemoryInfo().GetDeviceId(), 3);
+  EXPECT_EQ(view->GetTensorMemoryInfo().GetDeviceType(), OrtMemoryInfoDeviceType_GPU);
+  EXPECT_EQ(view->GetTensorData<int64_t>(), storage.data() + 3);
+}
+
 }  // namespace

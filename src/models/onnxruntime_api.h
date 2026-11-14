@@ -48,7 +48,7 @@ NOTE: The std::unique_ptr<t>s could just be 'auto', it's expanded for clarity
 Ort::InitApi();
 std::unique_ptr<OrtEnv> p_env=OrtEnv::Create(ORT_LOGGING_LEVEL_WARNING, "test");
 
-std::unique_ptr<OrtMemoryInfo> p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+std::unique_ptr<OrtMemoryInfo> p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
 std::unique_ptr<OrtValue> p_input_tensor = OrtValue::CreateTensor<float>(*p_memory_info, input_image_.data(), input_image_.size(), input_shape_.data(), input_shape_.size());
 std::unique_ptr<OrtValue> p_output_tensor = OrtValue::CreateTensor<float>(*p_memory_info, results_.data(), results_.size(), output_shape_.data(), output_shape_.size());
 
@@ -1043,6 +1043,11 @@ struct OrtValue {
    */
   static std::unique_ptr<OrtValue> CreateTensor(const OrtMemoryInfo& info, void* p_data, size_t p_data_byte_count, std::span<const int64_t> shape,
                                                 ONNXTensorElementDataType type);
+
+  // Borrows a byte range with this tensor's memory info. The caller must keep the source buffer alive
+  // and ensure the range and shape fit within it.
+  std::unique_ptr<OrtValue> CreateTensorView(size_t byte_offset, size_t byte_count,
+                                             std::span<const int64_t> shape, ONNXTensorElementDataType type);
 
   /** \brief Creates a tensor using a supplied OrtAllocator. Wraps OrtApi::CreateTensorAsOrtValue.
    * \tparam T The numeric datatype. This API is not suitable for strings.

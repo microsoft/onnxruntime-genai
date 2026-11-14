@@ -1189,7 +1189,7 @@ void Model::AddGgufInitializers(OrtSessionOptions& session_options) {
     }
   }
 
-  auto cpu_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  auto cpu_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
   std::vector<std::string> ext_names;
   ext_names.reserve(gguf_cfg.tensors.size());
   std::vector<std::unique_ptr<OrtValue>> ext_values;
