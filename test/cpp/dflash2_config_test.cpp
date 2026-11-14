@@ -3593,6 +3593,7 @@ TEST(PrefixSnapshotCacheTest, CudaSizeChurnReclaimsPhysicalBacking) {
       std::array<size_t, 3>{64 * mib, 64 * mib, 0}, 1);
   for (size_t size : {16 * mib, 32 * mib, 8 * mib, 24 * mib}) {
     SCOPED_TRACE(size);
+    ASSERT_TRUE(cache->SetDeviceMemoryLimit(64 * mib, device));
     auto entry = std::make_shared<PrefixSnapshotCache::Entry>();
     entry->type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
     entry->shapes = {{static_cast<int64_t>(size)}};
