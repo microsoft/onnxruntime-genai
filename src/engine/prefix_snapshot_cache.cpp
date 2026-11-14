@@ -518,9 +518,15 @@ void PrefixSnapshotCache::Move(Entry& entry, Tier tier, DeviceInterface* device)
                .count());
 }
 
+bool IsPrefixCachingRequested(const Config& config) {
+  return config.engine.dynamic_batching &&
+         config.engine.dynamic_batching->prefix_caching.value_or(!config.model.decoder.sliding_window.has_value());
+}
+
 bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceInterface* device,
                                    std::string_view component,
-                                   size_t component_max_entries) {
+                                   size_t component_max_entries,
+                                   bool preserve_existing) {
   if (entry->state != State::Empty || entry->accounting) {
     throw std::logic_error("Prefix snapshot storage may only be allocated once.");
   }
@@ -554,6 +560,11 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     return refuse("payload_exceeds_tiers");
   }
   Prune();
+  if (preserve_existing &&
+      (entries_.size() >= max_entries_ ||
+       (!component.empty() && Count(component) >= component_max_entries))) {
+    return refuse("preserving_existing_count");
+  }
   entries_.reserve(entries_.size() + 1);
   const auto publish = [&] {
     entry->component = component;
@@ -576,7 +587,15 @@ bool PrefixSnapshotCache::Allocate(const std::shared_ptr<Entry>& entry, DeviceIn
     if (!EvictOldest()) return refuse("shared_count_leased");
   }
   for (size_t index = 0; index < limits_.size(); ++index) {
-    if (!device_resident && !MakeRoom(static_cast<Tier>(index), entry->bytes, device)) continue;
+    if (static_cast<Tier>(index) == Tier::Disk && disk_writes_disabled_) continue;
+    if (!device_resident) {
+      if (preserve_existing) {
+        if (accounting_->used[index] > limits_[index] ||
+            entry->bytes > limits_[index] - accounting_->used[index]) continue;
+      } else if (!MakeRoom(static_cast<Tier>(index), entry->bytes, device)) {
+        continue;
+      }
+    }
     Entry staged;
     staged.shapes = entry->shapes;
     staged.type = entry->type;

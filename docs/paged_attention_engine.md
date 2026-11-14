@@ -337,8 +337,10 @@ restores the request cursor.
 A windowed DFlash2 drafter without a matching optional draft checkpoint can ingest
 the recomputed target suffix into a fresh ring. Drafting and draft-checkpoint
 capture remain disabled until that ring holds a complete attention window.
-Full-attention drafters still require their entire prefix; their admission behavior
-is unchanged.
+Full-attention DFlash drafters can instead reuse their immutable context through
+the target's physical block IDs. A hit requires a compatible paired checkpoint
+whose lease protects the complete target/drafter ancestry. Query spills remain private,
+and non-proposal turns still ingest context so later greedy turns can reuse it.
 
 Admission charges an adopted retained block against reclaimable capacity only when
 that block is actually in the prefix cache's reclaimable set. Fixed-state and draft
@@ -358,7 +360,12 @@ than a ring could retain. Omitting the setting or setting it to `false` preserve
 ring storage with prefix caching disabled. Builders emit an explicit `false`
 opt-out for these models.
 
-Auxiliary caches that mirror every target block are still rejected when caching
+Full-attention DFlash prefix reuse defaults on for non-sliding targets; explicit
+`false` disables it. Sliding-window targets still require explicit opt-in and a
+nonzero `snapshot_cache` byte budget. Their KV rings and quantization scales are
+snapshotted at paired boundaries and restored into private rings on adoption.
+Zero snapshot counts or an explicit all-zero storage policy disable paired reuse.
+DSpark and unsupported target-state combinations remain rejected when caching
 is explicitly enabled, and default to caching disabled when the setting is omitted.
 A fixed-size Engine-hosted auxiliary pool
 can coexist with target prefix caching. For a windowed DFlash 2 drafter, an
@@ -381,8 +388,8 @@ snapshot storage on CPU/CUDA without disabling target prefix caching.
 allowance. It is unbounded when omitted. Separate Engine instances have
 independent policies; these are not process-wide limits.
 
-**Current integration: DFlash snapshots only.** DFlash ring payloads are the
-only component registered with this policy today. These limits do not cover retained
+**Current integration: drafter and target-window snapshots.** DFlash ring payloads
+and paired target sliding-window KV/scale payloads share this policy. These limits do not cover retained
 target KV, hybrid fixed-state checkpoints, active drafter rings, or total process
 memory. Target KV and fixed state remain device-resident under their existing
 budgets. CPU execution supports explicit RAM and disk tiers; explicit VRAM
@@ -413,8 +420,8 @@ reclaimed at the count limit. Target KV and fixed-state reclamation are unchange
 ```
 
 `dflash2_max_snapshots` defaults to one and adds a DFlash-only count ceiling
-across all tiers. Zero disables DFlash snapshots without disabling target prefix
-caching. The DFlash count is also capped by the hybrid fixed-state checkpoint
+across all tiers. Zero disables DFlash snapshots and full-attention paired reuse,
+but preserves legacy target-only prefix caching. The DFlash count is also capped by the hybrid fixed-state checkpoint
 capacity (`max_batch_size`). `max_snapshots` is an optional additional count cap
 shared by every producer; zero disables all snapshot publication. Neither count
 increases a tier budget or enables storage when an explicit policy sets all byte
@@ -2339,7 +2346,7 @@ It can ingest newly executed target tokens into a fresh windowed ring and resume
 drafting only after those tokens fill the required context window; a short
 request can remain target-only throughout. The skipped prefix is not rebuilt.
 A full-attention block
-drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
+drafter (DFlash 2 or DSpark) instead mirrors the target pool: its bytes per target block and its fixed
 query-spill bytes are charged against the same budget before target capacity is selected, using the
 cache element type reported by the graph. That trade is explicit -- a DSpark drafter with the same
 layer geometry as the target roughly halves the target's paged-cache capacity for the same GPU
