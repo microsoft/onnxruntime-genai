@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <array>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -177,4 +178,30 @@ TEST(QwenVisionMultiImageTest, PreservesTemporalPaddingWhenStrideMatchesMaximumG
   EXPECT_EQ(layout.ImagePatchCount(4, 2, 2), 8);
   EXPECT_EQ(layout.ImagePatchOffset(1, 8), 8);
   EXPECT_EQ(layout.ImagePatchCount(8, 2, 2), 8);
+}
+
+TEST(QwenVisionMultiImageTest, RejectsInvalidAndOverflowingGridCounts) {
+  constexpr auto max = std::numeric_limits<int64_t>::max();
+  EXPECT_THROW(Generators::GetQwenGridTokenCount(-1, 2, 4), std::runtime_error);
+  EXPECT_THROW(Generators::GetQwenGridTokenCount(1, 0, 4), std::runtime_error);
+  EXPECT_THROW(Generators::GetQwenGridTokenCount(max / 2 + 1, 2, 4), std::runtime_error);
+  EXPECT_THROW(Generators::GetQwenGridTokenCount(1, max / 2 + 1, 2), std::runtime_error);
+  EXPECT_THROW(Generators::GetQwenGridTokenCount(1, 2, 4, 0), std::runtime_error);
+  EXPECT_THROW(Generators::GetQwenGridTokenCount(1, 2, 4, max), std::runtime_error);
+  EXPECT_EQ(Generators::GetQwenGridTokenCount(2, 32, 48), 3072);
+  EXPECT_EQ(Generators::GetQwenGridTokenCount(2, 32, 48, 2), 768);
+}
+
+TEST(QwenVisionMultiImageTest, RejectsOverflowingPaddedPatchViews) {
+  constexpr auto max = std::numeric_limits<int64_t>::max();
+  const Generators::QwenPatchLayout temporal_layout{.temporal_multiplier = max / 2 + 1};
+  EXPECT_THROW(temporal_layout.ImagePatchCount(8, 2, 2), std::runtime_error);
+  const Generators::QwenPatchLayout stride_layout{.padded_image_stride = max / 2 + 1};
+  EXPECT_THROW(stride_layout.ImagePatchOffset(2, 0), std::runtime_error);
+}
+
+TEST(QwenVisionMultiImageTest, RejectsOverflowingAggregateGridCount) {
+  constexpr auto max = std::numeric_limits<int64_t>::max();
+  const auto grid_tokens = Generators::GetQwenGridTokenCount(max / 2 + 1, 1, 1);
+  EXPECT_THROW(Generators::CheckedQwenVisionSum(grid_tokens, grid_tokens), std::runtime_error);
 }

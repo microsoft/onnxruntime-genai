@@ -665,7 +665,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.False(typeof(ASRPostProcessorTimestampRecord).GetProperty(nameof(ASRPostProcessorTimestampRecord.Text))!.CanWrite);
             Assert.Equal(typeof(ValueTuple<long, long>), typeof(ASRPostProcessorTimestampRecord)
                 .GetProperty(nameof(ASRPostProcessorTimestampRecord.FrameInterval))!.PropertyType);
-            Assert.Equal(typeof(ValueTuple<double, double>), typeof(ASRPostProcessorTimestampRecord)
+            Assert.Equal(typeof(ValueTuple<long, long>), typeof(ASRPostProcessorTimestampRecord)
                 .GetProperty(nameof(ASRPostProcessorTimestampRecord.TimeInterval))!.PropertyType);
             using var model = new Model(_tinyRandomGpt2ModelPath);
             using var tokenizer = new Tokenizer(model);

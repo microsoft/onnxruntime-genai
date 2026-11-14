@@ -39,7 +39,7 @@ struct NativeBoltExecutionState final : NemotronBoltExecutionState {
   size_t Prefill(std::span<const int32_t> tokens, int max_length, PrefixCacheMetrics& events) override {
     params->search.max_length = max_length;
     if (!state)
-      state = std::make_unique<NemotronBoltState>(*model, *params);
+      state = model->CreateNativeState(*params);
     else
       state->RewindTo(0);
     state->Prefill(tokens, &events);

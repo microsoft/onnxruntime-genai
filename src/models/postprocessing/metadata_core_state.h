@@ -23,7 +23,7 @@ struct TokenMetadataInput {
 struct TimestampRecord {
   std::string text;
   std::pair<int64_t, int64_t> frame_interval;
-  std::pair<double, double> time_interval;
+  std::pair<int64_t, int64_t> time_interval;
 };
 
 struct TimestampResult {
@@ -46,7 +46,10 @@ struct TimestampPostProcessorConfig {
 // Model-derived metadata options copied into each processor.
 struct MetadataCoreConfig {
   TimestampPostProcessorConfig timestamps;
-  std::optional<double> seconds_per_frame;
+  // Exact frame duration: milliseconds_per_frame + millisecond_remainder / sample_rate.
+  int64_t milliseconds_per_frame{};
+  int millisecond_remainder{};
+  int sample_rate{};
 };
 
 class MetadataCoreState {
@@ -69,7 +72,6 @@ class MetadataCoreState {
   const MetadataCoreConfig& config_;
   TokenWordGroupingState word_grouping_;
   std::optional<int> segment_gap_threshold_frames_;
-  double seconds_per_frame_{};
   // Keep intervals until the word grouper's pending-token watermark releases them.
   std::deque<std::pair<int64_t, int64_t>> pending_token_intervals_;
   size_t first_pending_token_index_{};

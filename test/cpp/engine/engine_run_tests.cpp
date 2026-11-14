@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -32,6 +33,7 @@
 
 #include <gtest/gtest.h>
 
+#include "scoped-environment-variable.h"
 #include "engine_test_helpers.h"
 #include "engine/decoders/simple_decoder.h"
 #include "engine_test_doubles.h"
@@ -2960,6 +2962,104 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
   EXPECT_EQ(RunOne(*engine.engine).request, decode);
   EXPECT_EQ(prefill->ProcessedSequenceLength(), 2);
   EXPECT_EQ(engine.cache->AllocatedCount(), 2u);
+}
+
+TEST_F(EngineRunTest, SpeculativeTraceReadsAndRestoresProcessEnvironment) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  const auto has_trace = [&]() {
+    auto engine = MakeDoublesEngine(model_, 8, filler);
+    engine.cache->SetMaxDraftTokensPerStep(1);
+    auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
+    EXPECT_EQ(RunOne(*engine.engine).request, request);
+    request->SetDraftTokens(std::vector<int32_t>{11});
+    engine.executor->SetVerifyRowTokens({12, 13});
+    ::testing::internal::CaptureStdout();
+    std::array<EngineEvent, 2> events;
+    EXPECT_NO_THROW(static_cast<void>(engine.engine->Run(events)));
+    return ::testing::internal::GetCapturedStdout().find("SpeculativeTrace") != std::string::npos;
+  };
+
+  ScopedEnvironmentVariable initially_disabled{"ORT_GENAI_TRACE_SPECULATIVE", "0"};
+  EXPECT_FALSE(has_trace());
+  {
+    ScopedEnvironmentVariable enabled{"ORT_GENAI_TRACE_SPECULATIVE", "1"};
+    EXPECT_TRUE(has_trace());
+    {
+      ScopedEnvironmentVariable disabled{"ORT_GENAI_TRACE_SPECULATIVE", "0"};
+      EXPECT_FALSE(has_trace());
+    }
+    EXPECT_TRUE(has_trace());
+  }
+  EXPECT_FALSE(has_trace());
+}
+
+TEST_F(EngineRunTest, SpeculativeTraceDownloadsSharedBuffersOnce) {
+  const auto copy_counts = [](bool tracing) {
+    CountingCudaDevice device;
+    auto model = LoadDummyDecoderModel();
+    model->p_device_inputs_ = &device;
+    const int32_t eos = EosToken(*model);
+    const int32_t filler = eos == 5 ? 6 : 5;
+    auto engine = MakeDoublesEngine(model, 8, filler);
+    engine.cache->SetMaxDraftTokensPerStep(3);
+    auto first = CreateRequestWithPrompt(engine.engine, Prompt(10));
+    auto second = CreateRequestWithPrompt(engine.engine, Prompt(10));
+    std::array<EngineEvent, 2> prefill;
+    EXPECT_EQ(engine.engine->Run(prefill), 2u);
+    first->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+    second->SetDraftTokens(std::vector<int32_t>{15, 16, 17});
+    engine.executor->SetVerifyRowTokens({11, 12, 13, 14, 15, 16, 17, 18});
+    device.state->device_to_host_copies = 0;
+    device.state->argmax_rows.clear();
+
+    ScopedEnvironmentVariable trace_enabled{"ORT_GENAI_TRACE_SPECULATIVE", tracing ? "1" : "0"};
+    ::testing::internal::CaptureStdout();
+    std::array<EngineEvent, 8> events;
+    EXPECT_EQ(engine.engine->Run(events), 8u);
+    const auto output = ::testing::internal::GetCapturedStdout();
+    EXPECT_EQ(output.find("SpeculativeTrace") != std::string::npos, tracing);
+    return std::pair{device.state->device_to_host_copies, !device.state->argmax_rows.empty()};
+  };
+
+  const auto [without_trace, device_argmax] = copy_counts(false);
+  const auto [with_trace, traced_device_argmax] = copy_counts(true);
+  EXPECT_EQ(traced_device_argmax, device_argmax);
+  EXPECT_EQ(with_trace, without_trace + static_cast<size_t>(device_argmax));
+}
+
+TEST_F(EngineRunTest, SpeculativeTraceOrdersNonFiniteScores) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, 8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(1);
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+
+  const size_t vocab_size = static_cast<size_t>(model_->config_->model.vocab_size);
+  ASSERT_GT(vocab_size, 11u);
+  const float infinity = std::numeric_limits<float>::infinity();
+  std::vector<float> scores(vocab_size, std::numeric_limits<float>::quiet_NaN());
+  scores[2] = scores[4] = infinity;
+  scores[1] = scores[3] = 3.0f;
+  scores[6] = -5.0f;
+  scores[7] = scores[8] = -infinity;
+  std::vector<float> bonus(vocab_size, -infinity);
+  bonus[filler] = 1.0f;
+  request->SetDraftTokens(std::vector<int32_t>{11});
+  engine.executor->SetVerifyRowLogits({scores, bonus});
+
+  ScopedEnvironmentVariable trace_enabled{"ORT_GENAI_TRACE_SPECULATIVE", "1"};
+  ::testing::internal::CaptureStdout();
+  std::array<EngineEvent, 2> events;
+  EXPECT_NO_THROW(static_cast<void>(engine.engine->Run(events)));
+  const auto trace_output = ::testing::internal::GetCapturedStdout();
+  EXPECT_NE(trace_output.find("SpeculativeTrace {\"event\":\"verify\""), std::string::npos);
+  EXPECT_NE(trace_output.find("\"draft_logit\":null"), std::string::npos);
+  EXPECT_NE(trace_output.find("\"target_logit\":null"), std::string::npos);
+  EXPECT_NE(trace_output.find(
+                "\"top\":[[2,null],[4,null],[1,3],[3,3],[6,-5],[7,null],[8,null],[0,null]]"),
+            std::string::npos);
 }
 
 TEST_F(EngineRunTest, SpeculativeRunKeepsAcceptedPrefixAndEmitsAllTokens) {

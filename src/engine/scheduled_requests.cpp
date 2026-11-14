@@ -7,12 +7,18 @@
 #include "request_index.h"
 #include "../constrained_logits_processor.h"
 #include "../decoding/speculative_sampling.h"
+#include "../models/env_utils.h"
 #include "../search.h"
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <exception>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <numeric>
+#include <sstream>
 
 namespace Generators {
 
@@ -451,6 +457,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
   std::vector<int32_t> row_argmax =
       step_has_drafts ? TryDeviceArgmaxPerRow(*model_->p_device_inputs_, verify_rows)
                       : std::vector<int32_t>{};
+  bool verification_rows_downloaded = false;
   if (step_has_drafts && row_argmax.empty()) {
     row_argmax.resize(verify_rows.size());
     const bool rows_share_buffer =
@@ -470,6 +477,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
           std::max_element(row_values.begin(), row_values.end()) -
           row_values.begin());
     }
+    verification_rows_downloaded = true;
   }
   int max_sampling_top_k = 0;
   bool any_checkpoint_needed = false;
@@ -485,6 +493,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
   const TopKScores topk = TryDeviceTopKScoresPerRow(
       *model_->p_device_inputs_, verify_rows, max_sampling_top_k);
   SampledCategorical sampling_scratch;
+  std::vector<DeviceSpan<float>> traced_buffers;
   size_t row = 0;
   for (size_t i = 0; i < requests_.size(); ++i) {
     const size_t draft_count =
@@ -587,7 +596,76 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
       }
       ++accepted_count;
     }
+    const auto trace = GetEnv("ORT_GENAI_TRACE_SPECULATIVE");
+    const bool trace_greedy = !trace.empty() && trace.front() == '1';
+    const int64_t verification_position = trace_greedy ? requests_[i]->CurrentSequenceLength() - static_cast<int64_t>(draft_count) : 0;
+    const int64_t verification_past = trace_greedy ? requests_[i]->ProcessedSequenceLength() : 0;
     requests_[i]->CommitAcceptedDraftsForTransaction(accepted_count);
+    if (trace_greedy) {
+      std::ostringstream record;
+      record << std::setprecision(9)
+             << "{\"event\":\"verify\",\"request\":" << reinterpret_cast<uintptr_t>(requests_[i].get())
+             << ",\"turn\":" << requests_[i]->CurrentTurnId()
+             << ",\"base\":" << verification_position << ",\"past\":" << verification_past
+             << ",\"row_begin\":" << row << ",\"proposed\":" << draft_count
+             << ",\"argmax_prefix\":" << accepted_count << ",\"next_target\":" << row_argmax[row + accepted_count]
+             << ",\"accepted\":" << requests_[i]->AcceptedDraftTokenCount()
+             << ",\"evaluated\":" << requests_[i]->EvaluatedDraftTokenCount()
+             << ",\"draft_ids\":[";
+      for (size_t offset = 0; offset < draft_count; ++offset) {
+        record << (offset == 0 ? "" : ",") << drafts[offset];
+      }
+      record << "],\"rows\":[";
+      for (size_t offset = 0; offset < requests_[i]->EvaluatedDraftTokenCount(); ++offset) {
+        auto& score_row = verify_rows[row + offset];
+        if (!verification_rows_downloaded &&
+            std::none_of(traced_buffers.begin(), traced_buffers.end(), [&score_row](const auto& downloaded) {
+              return downloaded.SameBufferAs(score_row);
+            })) {
+          score_row.CopyDeviceToCpu();
+          traced_buffers.push_back(score_row);
+        }
+        const auto scores = score_row.CpuSpan();
+        const int32_t draft = drafts[offset];
+        const int32_t target = row_argmax[row + offset];
+        const bool valid_draft = draft >= 0 && static_cast<size_t>(draft) < scores.size();
+        const bool valid_target = target >= 0 && static_cast<size_t>(target) < scores.size();
+        const float draft_score = valid_draft ? scores[draft] : -std::numeric_limits<float>::infinity();
+        const size_t rank = 1 + std::count_if(scores.begin(), scores.end(), [draft_score](float value) { return value > draft_score; });
+        std::vector<size_t> top(scores.size());
+        std::iota(top.begin(), top.end(), 0);
+        const size_t top_count = std::min<size_t>(8, top.size());
+        std::partial_sort(top.begin(), top.begin() + top_count, top.end(), [&scores](size_t left, size_t right) {
+          const bool left_nan = std::isnan(scores[left]);
+          const bool right_nan = std::isnan(scores[right]);
+          if (left_nan != right_nan)
+            return !left_nan;
+          if (left_nan)
+            return left < right;
+          return scores[left] > scores[right] || (scores[left] == scores[right] && left < right);
+        });
+        const auto write_score = [&record](float value) {
+          if (std::isfinite(value))
+            record << value;
+          else
+            record << "null";
+        };
+        record << (offset == 0 ? "" : ",") << "{\"offset\":" << offset << ",\"draft\":" << draft
+               << ",\"target\":" << target << ",\"draft_rank\":" << rank << ",\"draft_logit\":";
+        write_score(draft_score);
+        record << ",\"target_logit\":";
+        write_score(valid_target ? scores[target] : std::numeric_limits<float>::quiet_NaN());
+        record << ",\"top\":[";
+        for (size_t index = 0; index < top_count; ++index) {
+          record << (index == 0 ? "" : ",") << "[" << top[index] << ",";
+          write_score(scores[top[index]]);
+          record << "]";
+        }
+        record << "]}";
+      }
+      record << "]}";
+      std::cout << "SpeculativeTrace " << record.str() << std::endl;
+    }
     greedy_tokens[i] = row_argmax[row + accepted_count];
     sampled_rows.push_back(verify_rows[row + accepted_count]);
     row += draft_count + 1;

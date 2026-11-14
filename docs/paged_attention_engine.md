@@ -2501,8 +2501,10 @@ shared by Generators and Engines using the same Model:
 ```
 
 For Bolt this configuration selects native memory/snapshot policy, not paged execution. `num_blocks`
-is unsupported because the exported target has fixed cache shapes. The native target always
-consumes eight-token blocks; one Engine prefill step processes the complete prompt synchronously.
+is unsupported because the exported target has fixed cache shapes. Fixed-R8 targets consume
+eight-token blocks. Dynamic-prefill packages use `search.chunk_size` (4,096 by default) for
+large eager target passes and captured R8 for short tails and speculative verification;
+one Engine prefill step still processes the complete prompt synchronously.
 Both native Bolt and Qwen accept `device_memory_budget_bytes`, configured before model loading,
 with an explicit `device_memory_headroom_bytes` allowance (zero is allowed). Fixed model weights,
 native state, and warmed graph allocations are charged first; remaining bytes cap retained VRAM
@@ -2531,8 +2533,11 @@ A windowed DFlash2 drafter is required.
 
 Only the last complete eight-token prompt boundary is published. A hit restores both dense KV heads,
 the committed recurrent row, the pending target prediction, and the trailing committed auxiliary
-features needed to rebuild the drafter. An unaligned tail is recomputed, preserving the target's
-original block boundaries. The longest exact token-prefix match is used; divergent suffixes are
+features needed to rebuild the drafter. Prefill passes split at the checkpoint boundary regardless
+of chunk size; dynamic passes select recurrent slot 7 and gather only the needed auxiliary rows.
+An unaligned tail is recomputed through R8. Changing chunk size can change prefill floating-point
+arithmetic; qualify the actual package/runtime rather than assuming bitwise parity with fixed-R8.
+The longest exact token-prefix match is used; divergent suffixes are
 prefilled normally. Snapshots survive Request close and Generator reset/destruction, but not Model
 destruction. Snapshot allocation or spill-publication failures refuse caching without failing
 generation; restoration and device errors still fail the operation.
