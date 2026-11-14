@@ -54,31 +54,34 @@ TEST(KvCacheTests, IgnoresTopLevelDeviceWindowSizeForPipelineModel) {
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 4096), 0);
 }
 
-TEST(KvCacheTests, KeepsFullWindowWhenMaxLengthIsShorter) {
+TEST(KvCacheTests, CapsWindowCapacityAtMaxLength) {
   CacheTestModel model{false};
   Generators::Config::Search search;
   for (const int max_length : {16, 63, 64}) {
-    EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, max_length), 64);
+    EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, max_length), max_length);
   }
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 70), 70);
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 80), 80);
+
+  model.config_->model.decoder.sliding_window->window_size = 262144;
+  EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 200), 200);
 }
 
-TEST(KvCacheTests, LimitsSlackWithoutTruncatingWindow) {
+TEST(KvCacheTests, CapsWindowAndSlackAtMaxLength) {
   CacheTestModel model{false};
   Generators::Config::Search search;
   search.chunk_size = 33;
-  EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 16), 64);
+  EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 16), 16);
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 80), 80);
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 4096), 96);
 
   model.config_->model.decoder.sliding_window->cache_slack = 48;
-  EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 16), 64);
+  EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 16), 16);
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 100), 100);
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 4096), 112);
 }
 
-TEST(KvCacheTests, PreservesWindowCapacityWithGraphDerivedHeadShapes) {
+TEST(KvCacheTests, CapsWindowCapacityWithGraphDerivedHeadShapes) {
   for (const bool explicit_layers : {false, true}) {
     CacheTestModel model{false};
     auto& decoder = model.config_->model.decoder;
@@ -99,7 +102,7 @@ TEST(KvCacheTests, PreservesWindowCapacityWithGraphDerivedHeadShapes) {
 
     ASSERT_EQ(cache.GetPresents().size(), 2U);
     for (const auto& present : cache.GetPresents()) {
-      EXPECT_EQ(present->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{1, 4, 64, 256}));
+      EXPECT_EQ(present->GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{1, 4, 16, 256}));
     }
     cache.Update({}, 16);
     EXPECT_NO_THROW(cache.RewindTo(4));
