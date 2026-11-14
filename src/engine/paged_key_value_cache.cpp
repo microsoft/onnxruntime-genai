@@ -1272,6 +1272,11 @@ void PagedKeyValueCache::RestoreWindowPrefix(
     }
     model_->p_device_kvcache_->Synchronize();
     prefix_snapshot_cache_->Touch(*checkpoint);
+  } catch (const PrefixSnapshotReadError&) {
+    // Fence partial transfers before the reservation releases its private window blocks.
+    model_->p_device_kvcache_->Synchronize();
+    prefix_snapshot_cache_->Discard(*checkpoint);
+    throw;
   } catch (...) {
     model_->p_device_kvcache_->Synchronize();
     throw;

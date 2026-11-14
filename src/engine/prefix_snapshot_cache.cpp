@@ -239,8 +239,12 @@ void PrefixSnapshotCache::Entry::Read(
   auto* cpu = GetDeviceInterface(DeviceType::CPU);
   auto* buffer = static_cast<uint8_t*>(TransferBuffer(destination.p_device_));
   TransferBatches(ranges, [&](size_t offset, std::span<const Range> batch, size_t count) {
-    disk->file.seekg(static_cast<std::streamoff>(layer_offsets[layer] + offset));
-    disk->file.read(reinterpret_cast<char*>(buffer), static_cast<std::streamsize>(count));
+    try {
+      disk->file.seekg(static_cast<std::streamoff>(layer_offsets[layer] + offset));
+      disk->file.read(reinterpret_cast<char*>(buffer), static_cast<std::streamsize>(count));
+    } catch (const std::ios_base::failure& error) {
+      throw PrefixSnapshotReadError(error.what());
+    }
     for (const auto& range : batch) {
       CopyBytes(destination.p_device_, data + range.tensor_offset, cpu, buffer + range.offset, range.bytes);
     }

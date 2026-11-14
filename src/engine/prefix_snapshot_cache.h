@@ -5,6 +5,7 @@
 
 #include <array>
 #include <filesystem>
+#include <ios>
 #include <limits>
 #include <memory>
 #include <string>
@@ -15,6 +16,11 @@
 #include "../models/model.h"
 
 namespace Generators {
+
+// Only disk seek/read failures use this type; device transfers and cache contracts remain fatal.
+struct PrefixSnapshotReadError : std::ios_base::failure {
+  using std::ios_base::failure::failure;
+};
 
 // Storage policy is independent of prefix identity and the contents of the snapshot.
 class PrefixSnapshotCache {

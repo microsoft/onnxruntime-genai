@@ -3,7 +3,9 @@
 
 #include <array>
 #include <algorithm>
+#include <filesystem>
 #include <limits>
+#include <random>
 #include <utility>
 
 #include <gtest/gtest.h>
@@ -1787,9 +1789,9 @@ TEST_P(Dflash2SnapshotEngineTest, ReusesMultiplePromptsWithFullLeasedPoolAndCanc
 
 INSTANTIATE_TEST_SUITE_P(SnapshotLimits, Dflash2SnapshotEngineTest, ::testing::Values(0u, 1u, 2u, 3u));
 
-class Dflash2MappedPrefixTest : public ::testing::TestWithParam<bool> {
+class Dflash2MappedPrefixTestBase : public ::testing::Test {
  protected:
-  std::shared_ptr<Model> LoadModel() const {
+  static std::shared_ptr<Model> LoadModel(bool windowed) {
     auto model = LoadSyntheticPagedPerTokenModel();
     model->config_->search.chunk_size = 4;
     auto& batching = *model->config_->engine.dynamic_batching;
@@ -1798,7 +1800,7 @@ class Dflash2MappedPrefixTest : public ::testing::TestWithParam<bool> {
     batching.max_snapshots = 1;
     batching.dflash2_max_snapshots = 1;
     batching.snapshot_cache.ram_bytes = 1024 * 1024;
-    if (GetParam()) {
+    if (windowed) {
       auto& decoder = model->config_->model.decoder;
       decoder.sliding_window.emplace();
       decoder.sliding_window->window_size = 4;
@@ -1846,6 +1848,147 @@ class Dflash2MappedPrefixTest : public ::testing::TestWithParam<bool> {
     EXPECT_TRUE(request->IsTurnComplete());
   }
 };
+
+class Dflash2MappedPrefixTest : public Dflash2MappedPrefixTestBase,
+                                public ::testing::WithParamInterface<bool> {
+ protected:
+  std::shared_ptr<Model> LoadModel() const {
+    return Dflash2MappedPrefixTestBase::LoadModel(GetParam());
+  }
+};
+
+TEST_F(Dflash2MappedPrefixTestBase, DiskReadFailureRollsBackPairedAdoptionAndReplansFreshPrefill) {
+  for (const int failure_case : {0, 1, 2}) {
+    SCOPED_TRACE(failure_case);
+    const bool partial_read = failure_case == 1;
+    const bool device_failure = failure_case == 2;
+    struct SnapshotDirectory {
+      std::filesystem::path path{std::filesystem::temp_directory_path() /
+                                 ("oga-paired-read-failure-" + std::to_string(std::random_device{}()))};
+      SnapshotDirectory() {
+        if (!std::filesystem::create_directory(path))
+          throw std::runtime_error("Unable to create snapshot test directory.");
+      }
+      ~SnapshotDirectory() {
+        std::error_code error;
+        std::filesystem::remove(path, error);
+      }
+    } directory;
+    CountingCudaDevice fence{DeviceType::CPU};
+    auto model = LoadModel(true);
+    auto& storage = model->config_->engine.dynamic_batching->snapshot_cache;
+    storage.ram_bytes = 0;
+    storage.disk_bytes = 1024 * 1024;
+    storage.directory = directory.path.string();
+    auto dependencies = Engine::CreateDependencies(model);
+    auto cache = dependencies.cache_manager;
+    auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+    const std::array<int32_t, 5> prompt{2, 3, 4, 5, 6};
+    auto warm = engine->CreateRequest();
+    warm->BeginTurn(std::span<const int32_t>{prompt}.first(4), 1);
+    Drain(*engine, warm);
+    ASSERT_FALSE(HasFatalFailure());
+    warm->Close();
+
+    auto replay = engine->CreateRequest();
+    replay->BeginTurn(prompt, 3);
+    auto second = engine->CreateRequest();
+    second->BeginTurn(prompt, 3);
+    const auto match = cache->MatchPrefix(*replay);
+    ASSERT_NE(match, nullptr);
+    ASSERT_NE(match->target_window_checkpoint, nullptr);
+    const auto& checkpoint = match->target_window_checkpoint;
+    ASSERT_EQ(checkpoint->tier, PrefixSnapshotCache::Tier::Disk);
+    ASSERT_GT(checkpoint->shapes.size(), 1u);
+    const auto payload = std::filesystem::directory_iterator(directory.path)->path() / "payload";
+    std::filesystem::resize_file(
+        payload, partial_read ? static_cast<uintmax_t>(checkpoint->shapes.front().front()) : 0);
+    const auto before = cache->Snapshot();
+    std::array<EngineEvent, 16> events;
+    if (device_failure) {
+      auto* device = model->p_device_kvcache_;
+      fence.state->fail_synchronize = true;
+      model->p_device_kvcache_ = &fence;
+      size_t count = 0;
+      ASSERT_NO_THROW(count = engine->Run(events));
+      model->p_device_kvcache_ = device;
+      ASSERT_GT(count, 0u);
+      EXPECT_NE(events[0].flags & EngineEventFlagFailed, 0u);
+      EXPECT_GT(fence.state->synchronize_calls, 0u);
+      EXPECT_THROW(engine->Run(events), EngineStepError);
+      EXPECT_EQ(checkpoint->state, PrefixSnapshotCache::State::Resident);
+      EXPECT_TRUE(ValidateCacheInvariants(cache->Snapshot()).empty());
+      continue;
+    }
+    EXPECT_EQ(engine->Run(events), 0u);
+    EXPECT_TRUE(engine->HasPendingRequests());
+    EXPECT_EQ(checkpoint->state, PrefixSnapshotCache::State::Evicted);
+    EXPECT_FALSE(match->draft_checkpoint->IsResident());
+    EXPECT_EQ(cache->MatchPrefix(*replay), nullptr);
+    for (const auto& request : {replay, second}) {
+      EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+      EXPECT_EQ(request->TurnCachedPromptTokens(), 0u);
+      EXPECT_FALSE(cache->IsResident(request));
+    }
+    const auto after = cache->Snapshot();
+    EXPECT_EQ(after.free_blocks, before.free_blocks);
+    EXPECT_EQ(after.window_blocks.free_blocks, before.window_blocks.free_blocks);
+    EXPECT_TRUE(after.transaction_reserved_block_ids.empty());
+    EXPECT_TRUE(after.transaction_adopted_block_ids.empty());
+    EXPECT_TRUE(after.window_blocks.transaction_reserved_block_ids.empty());
+    EXPECT_TRUE(ValidateCacheInvariants(after).empty());
+
+    auto cold_model = LoadModel(true);
+    cold_model->config_->engine.dynamic_batching->prefix_caching = false;
+    auto cold_engine = std::make_shared<Engine>(cold_model);
+    auto cold = cold_engine->CreateRequest();
+    cold->BeginTurn(prompt, 3);
+    std::vector<int32_t> expected;
+    Drain(*cold_engine, cold, &expected);
+    ASSERT_FALSE(HasFatalFailure());
+    ASSERT_FALSE(expected.empty());
+    cold->Close();
+
+    std::array<std::vector<int32_t>, 2> outputs;
+    size_t steps = 0;
+    while (engine->HasPendingRequests()) {
+      ASSERT_LT(++steps, 100u);
+      const size_t count = engine->Run(events);
+      for (size_t i = 0; i < count; ++i) {
+        ASSERT_EQ(events[i].flags & EngineEventFlagFailed, 0u);
+        if (events[i].flags & EngineEventFlagToken) {
+          outputs[events[i].request == replay ? 0 : 1].push_back(events[i].token);
+        }
+      }
+    }
+    for (size_t i = 0; i < outputs.size(); ++i) {
+      EXPECT_EQ(outputs[i], expected);
+    }
+    for (const auto& request : {replay, second}) {
+      EXPECT_TRUE(request->IsTurnComplete());
+      EXPECT_EQ(request->TurnCachedPromptTokens(), 0u);
+      request->Close();
+    }
+    auto unrelated = engine->CreateRequest();
+    const std::array<int32_t, 5> other_prompt{7, 8, 9, 10, 11};
+    unrelated->BeginTurn(other_prompt, 3);
+    cold = cold_engine->CreateRequest();
+    cold->BeginTurn(other_prompt, 3);
+    std::vector<int32_t> actual;
+    expected.clear();
+    Drain(*engine, unrelated, &actual);
+    Drain(*cold_engine, cold, &expected);
+    ASSERT_FALSE(HasFatalFailure());
+    ASSERT_FALSE(expected.empty());
+    EXPECT_EQ(actual, expected);
+    unrelated->Close();
+    cold->Close();
+    EXPECT_EQ(engine->GetSpeculativeStats().dflash2_failures, 0u);
+    EXPECT_EQ(engine->GetSpeculativeStats().dflash2_disables, 0u);
+    EXPECT_EQ(cache->ResidentRequestCount(), 0u);
+    EXPECT_TRUE(ValidateCacheInvariants(cache->Snapshot()).empty());
+  }
+}
 
 TEST_P(Dflash2MappedPrefixTest, DisabledStorageConstructsAndDecodesWithoutPairedReuse) {
   for (const auto* policy : {

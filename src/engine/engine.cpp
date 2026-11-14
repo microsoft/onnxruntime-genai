@@ -2348,6 +2348,11 @@ void Engine::RunDynamic() {
               "Fixed state slots do not match scheduled request row order.");
         }
       }
+    } catch (const PrefixSnapshotReadError&) {
+      // ReserveStep unwound its provisional ownership and discarded the unreadable checkpoint.
+      // The adoption guard restores request boundaries; the next Run replans without that hit.
+      ++transaction_metrics_.rollbacks;
+      return;
     } catch (...) {
       ++transaction_metrics_.reservation_failures;
       MarkUnhealthyAndThrow(
