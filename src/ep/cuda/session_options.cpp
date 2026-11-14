@@ -67,6 +67,19 @@ bool IsProviderBridgeAvailable() {
   }
 }
 
+Config::ProviderOptions ResolveGraphCaptureOptions(const Config::ProviderOptions& provider_options,
+                                                   bool disable_graph_capture) {
+  auto resolved = provider_options;
+  if (disable_graph_capture) {
+    resolved.options.erase(
+        std::remove_if(resolved.options.begin(), resolved.options.end(),
+                       [](const auto& option) { return option.first == "enable_cuda_graph"; }),
+        resolved.options.end());
+    resolved.options.emplace_back("enable_cuda_graph", "0");
+  }
+  return resolved;
+}
+
 namespace {
 
 void EnsureCudaPluginEpRegistered(bool require_plugin) {
@@ -164,7 +177,7 @@ void AddCudaStreamConfig(OrtSessionOptions& session_options, DeviceInterface* de
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          const Config::ProviderOptions& provider_options,
                                          const Config& /*config*/,
-                                         bool /*disable_graph_capture*/) {
+                                         bool disable_graph_capture) {
   auto device = GetDeviceInterface(DeviceType::CUDA);
 
   // Resolve the selected CUDA device before creating/attaching the stream or appending the EP,
@@ -195,15 +208,13 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   (void)device->GetDeviceId(&effective_options);
   AddCudaStreamConfig(session_options, device);
 
-  // CUDA EP honors enable_cuda_graph from the config as-is. Non-decoder
-  // sessions (vision, embedding, speech) should set enable_cuda_graph=0
-  // in their own session_options in genai_config.json.
+  const auto capture_options = ResolveGraphCaptureOptions(provider_options, disable_graph_capture);
 
   // Try pre-registered plugin path first
-  if (!AppendExecutionProviderV2(session_options, provider_options,
+  if (!AppendExecutionProviderV2(session_options, capture_options,
                                  DeviceType::CUDA, "CUDAExecutionProvider")) {
     CUDAExecutionProvider::AppendProviderBridgeExecutionProvider(
-        session_options, provider_options, device);
+        session_options, capture_options, device);
   }
 
   return device;

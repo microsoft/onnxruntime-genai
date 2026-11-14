@@ -613,14 +613,34 @@ def _run_prompt(model, prompt, audios, num_tokens):
 
 
 def _model_on(model_path, provider):
-    config = og.Config(os.fspath(model_path))
-    config.clear_providers()
-    config.append_provider(provider)
-    if provider == "cuda":
-        # The CUDA EP allows TF32 math by default, which on some GPUs moves the encoder's features by
-        # up to about 3e-4 from CPU's. Without it, the comparisons with CPU only see the hand-offs.
-        config.set_provider_option("cuda", "use_tf32", "0")
+    # Select only the decoder, preserving components explicitly configured for CPU.
+    # Disable TF32 so comparisons with CPU measure hand-offs rather than rounding differences.
+    config_path = Path(model_path) / "genai_config.json"
+    original = config_path.read_bytes()
+    document = json.loads(original)
+    document["model"]["decoder"]["session_options"]["provider_options"] = [
+        {provider: {"use_tf32": "0"} if provider == "cuda" else {}}
+    ]
+    try:
+        config_path.write_text(json.dumps(document))
+        config = og.Config(os.fspath(model_path))
+    finally:
+        config_path.write_bytes(original)
     return og.Model(config)
+
+
+@pytest.mark.parametrize("provider", ["CPU", "nonexistent_provider"])
+def test_lfm2_audio_model_on_selects_backend_and_restores_fixture(test_data_path, tmp_path, provider):
+    model_path = _copy_model(test_data_path, tmp_path)
+    config_path = model_path / "genai_config.json"
+    original = config_path.read_bytes()
+    if provider == "CPU":
+        _model_on(model_path, provider)
+    else:
+        with pytest.raises(RuntimeError):
+            _model_on(model_path, provider)
+    assert config_path.read_bytes() == original
+    og.Model(os.fspath(model_path))
 
 
 def _skip_unless_available(provider):
@@ -648,7 +668,7 @@ def _follow_decoder(model_path, graphs):
 def test_lfm2_audio_decoder_on_another_provider_matches_cpu(
     test_data_path, tmp_path, provider, follows_decoder, num_clips
 ):
-    # append_provider moves only the decoder: the fixture's speech and embedding entries have
+    # _model_on selects only the decoder: the fixture's speech and embedding entries have
     # session_options of their own, as a CPU export writes them, so each stays on CPU unless
     # follows_decoder drops them. Two clips run the encoder once per clip. The fixture decoder's
     # tokens depend on the last clip alone, so the prompt's embeddings are compared as well.

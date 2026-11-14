@@ -3269,20 +3269,26 @@ Config::SessionOptions ResolveQwen38AuxiliarySessionOptions(const Config::Sessio
                                                             const std::optional<Config::SessionOptions>& configured,
                                                             bool inherit) {
   Config::SessionOptions options = configured.value_or(Config::SessionOptions{});
-  for (const auto& po : options.provider_options) {
-    if (std::find(options.providers.begin(), options.providers.end(), po.name) == options.providers.end()) {
-      options.providers.push_back(po.name);
+  if (!options.providers_explicitly_selected) {
+    for (const auto& po : options.provider_options) {
+      if (std::find(options.providers.begin(), options.providers.end(), po.name) == options.providers.end()) {
+        options.providers.push_back(po.name);
+      }
     }
   }
+
   if (inherit) {
     InheritSessionOptionsFromParent(parent, options);
     return options;
   }
   if (options.providers.empty()) {
     options.providers = parent.providers;
+    options.providers_explicitly_selected = parent.providers_explicitly_selected;
   }
+
   for (const auto& parent_provider : parent.provider_options) {
-    if (std::find(options.providers.begin(), options.providers.end(), parent_provider.name) == options.providers.end()) {
+    if (!options.providers_explicitly_selected &&
+        std::find(options.providers.begin(), options.providers.end(), parent_provider.name) == options.providers.end()) {
       options.providers.push_back(parent_provider.name);
     }
     auto child_provider = std::find_if(options.provider_options.begin(), options.provider_options.end(),

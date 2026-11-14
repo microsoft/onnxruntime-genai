@@ -21,12 +21,321 @@
 
 #include "config.h"
 #include "engine_test_doubles.h"
+#include "models/cpu_embedding.h"
+#include "models/decoder_only.h"
 #include "models/model_type.h"
+#include "models/qwen38_graph.h"
 #include "models/runtime_profiles.h"
 #include "models/session_options.h"
 #include "scoped-environment-variable.h"
 
 namespace Generators::test {
+
+TEST(ConfigTest, ModelProviderOverridesPrimarySessionsWithoutReplacingTheirOptions) {
+  Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, {}};
+  auto& model = config.model;
+  model.decoder.pipeline.resize(2);
+  model.vision.pipeline.resize(2);
+  std::vector<Config::SessionOptions*> sessions{&model.decoder.session_options};
+  for (auto* options : {&model.encoder.session_options, &model.embedding.session_options,
+                        &model.engram.session_options, &model.vision.session_options,
+                        &model.speech.session_options, &model.joiner.session_options,
+                        &model.vad.session_options, &model.audio_output.depthformer.session_options,
+                        &model.audio_output.embedding.session_options, &model.qwen38_graph.head.session_options,
+                        &model.qwen38_graph.fold.head_r2.session_options,
+                        &model.qwen38_graph.prefill.dense.session_options,
+                        &model.qwen38_graph.prefill.head_kv.session_options,
+                        &model.decoder.pipeline[0].session_options, &model.vision.pipeline[0].session_options}) {
+    sessions.push_back(&options->emplace());
+  }
+
+  for (size_t i = 0; i < sessions.size(); ++i) {
+    auto& options = *sessions[i];
+    options.providers = {"WebGPU"};
+    options.provider_options = {{"WebGPU", {{"validationMode", "basic"}}},
+                                {"cuda", {{"enable_cuda_graph", "1"}}}};
+    options.provider_options[1].device_filtering_options.emplace().hardware_device_id = 7;
+    options.intra_op_num_threads = 2;
+    options.log_id = std::to_string(i);
+    options.config_entries = {{"session.disable_cpu_ep_fallback", "1"}};
+  }
+
+  ClearProviders(config);
+  SetProviderOption(config, "CUDAExecutionProvider", {}, {});
+  SetProviderOption(config, "cuda", {}, {});
+
+  for (size_t i = 0; i < sessions.size(); ++i) {
+    const auto& options = *sessions[i];
+    EXPECT_EQ(options.providers, (std::vector<std::string>{"cuda"}));
+    ASSERT_EQ(options.provider_options.size(), 2u);
+    EXPECT_EQ(options.provider_options[0].name, "WebGPU");
+    EXPECT_EQ(options.provider_options[0].options, (std::vector<Config::NamedString>{{"validationMode", "basic"}}));
+    EXPECT_EQ(options.provider_options[1].options, (std::vector<Config::NamedString>{{"enable_cuda_graph", "1"}}));
+    ASSERT_TRUE(options.provider_options[1].device_filtering_options);
+    EXPECT_EQ(options.provider_options[1].device_filtering_options->hardware_device_id, 7u);
+    EXPECT_EQ(options.intra_op_num_threads, 2);
+    EXPECT_EQ(options.log_id, std::to_string(i));
+    EXPECT_EQ(options.config_entries, (std::vector<Config::NamedString>{{"session.disable_cpu_ep_fallback", "1"}}));
+  }
+
+  EXPECT_FALSE(model.decoder.pipeline[1].session_options);
+  EXPECT_FALSE(model.vision.pipeline[1].session_options);
+}
+
+TEST(ConfigTest, ModelProviderSupportsCpuAndMissingProviderOptions) {
+  Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, {}};
+  config.model.vision.session_options.emplace();
+  for (const auto* provider : {"WebGpuExecutionProvider", "CPUExecutionProvider", "webgpu"}) {
+    ClearProviders(config);
+    SetProviderOption(config, provider, {}, {});
+    const std::string expected = std::string_view{provider} == "CPUExecutionProvider" ? "CPU" : "WebGPU";
+    EXPECT_EQ(config.model.decoder.session_options.providers, (std::vector<std::string>{expected}));
+    EXPECT_EQ(config.model.vision.session_options->providers, (std::vector<std::string>{expected}));
+  }
+
+  ASSERT_EQ(config.model.vision.session_options->provider_options.size(), 2u);
+  EXPECT_TRUE(config.model.vision.session_options->provider_options[0].options.empty());
+  EXPECT_FALSE(config.model.embedding.session_options);
+  EXPECT_FALSE(config.model.speech.session_options);
+  EXPECT_EQ(config.model.decoder.session_options.providers, (std::vector<std::string>{"WebGPU"}));
+}
+
+TEST(ConfigTest, ProviderOptionsApplyToComponentsWithoutChangingDraft) {
+  Config config{fs::path{MODEL_PATH "engine/dummy-decoder"}, {}};
+  config.model.vision.session_options.emplace();
+  config.model.vision.session_options->providers = {"WebGPU"};
+  config.model.vision.session_options->provider_options = {{"cuda", {{"enable_cuda_graph", "1"}, {"device_id", "0"}}}};
+  config.model.draft.emplace().session_options.providers = {"WebGPU"};
+
+  SetProviderOption(config, "cuda", "enable_cuda_graph", "0");
+  SetProviderOption(config, "CUDAExecutionProvider", "enable_cuda_graph", "0");
+
+  EXPECT_EQ(config.model.vision.session_options->providers, config.model.decoder.session_options.providers);
+  EXPECT_EQ(config.model.vision.session_options->provider_options[0].options,
+            (std::vector<Config::NamedString>{{"device_id", "0"}, {"enable_cuda_graph", "0"}}));
+  EXPECT_EQ(config.model.decoder.session_options.provider_options.back().options,
+            (std::vector<Config::NamedString>{{"enable_cuda_graph", "0"}}));
+  EXPECT_EQ(config.model.draft->session_options.providers, (std::vector<std::string>{"WebGPU"}));
+}
+
+TEST(ConfigTest, ClearProvidersDoesNotReactivateStoredComponentProviders) {
+  Config config;
+  config.model.vision.session_options.emplace().provider_options = {{"nonexistent_provider", {}}};
+  ClearProviders(config);
+  const auto& configured = *config.model.vision.session_options;
+  EXPECT_TRUE(configured.providers.empty());
+  ASSERT_EQ(configured.provider_options.size(), 1u);
+  auto options = OrtSessionOptions::Create();
+  EXPECT_NO_THROW(SetProviderSessionOptions(*options, configured.providers, configured.provider_options, false, config,
+                                            false, configured.providers_explicitly_selected));
+}
+
+TEST(ConfigTest, AppendProvidersKeepsComponentPriorityInSync) {
+  Config config;
+  config.model.vision.session_options.emplace().providers = {"WebGPU"};
+  ClearProviders(config);
+  SetProviderOption(config, "CUDAExecutionProvider", {}, {});
+  config.model.embedding.session_options.emplace();
+  SetProviderOption(config, "CPUExecutionProvider", {}, {});
+  SetProviderOption(config, "cuda", {}, {});
+  EXPECT_EQ(config.model.decoder.session_options.providers, (std::vector<std::string>{"cuda", "CPU"}));
+  EXPECT_EQ(config.model.vision.session_options->providers, config.model.decoder.session_options.providers);
+  EXPECT_EQ(config.model.embedding.session_options->providers, config.model.decoder.session_options.providers);
+  ASSERT_EQ(config.model.embedding.session_options->provider_options.size(), 2u);
+  EXPECT_EQ(config.model.embedding.session_options->provider_options[0].name, "cuda");
+  EXPECT_EQ(config.model.embedding.session_options->provider_options[1].name, "CPU");
+}
+
+TEST(ConfigTest, ModelProviderSelectionIsAuthoritativeForNonPrimarySessions) {
+  auto config = std::make_unique<Config>(fs::path{MODEL_PATH "engine/dummy-decoder"}, "");
+  auto& stage = config->model.decoder.pipeline.emplace_back();
+  stage.model_id = "stage";
+  stage.session_options.emplace();
+  for (auto* options : {&stage.session_options, &config->model.engram.session_options,
+                        &config->model.vad.session_options}) {
+    options->emplace().provider_options = {{"WebGPU", {}}, {"nonexistent_provider", {}}};
+  }
+
+  auto legacy = std::make_unique<Config>(*config);
+  EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(legacy)), std::exception);
+
+  ClearProviders(*config);
+  SetProviderOption(*config, "CPU", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  EXPECT_EQ(model->p_device_->GetType(), DeviceType::CPU);
+  const auto trivial = GetTrivialModel();
+  EXPECT_NO_THROW(OrtSession::Create(GetOrtEnv(), trivial.data(), trivial.size(), model->GetSessionOptions("stage")));
+  for (const auto* configured : {&*model->config_->model.engram.session_options,
+                                 &*model->config_->model.vad.session_options}) {
+    auto options = OrtSessionOptions::Create();
+    EXPECT_NO_THROW(model->CreateSessionOptionsFromConfig(*configured, *options, false));
+    EXPECT_NO_THROW(OrtSession::Create(GetOrtEnv(), trivial.data(), trivial.size(), options.get()));
+    ASSERT_EQ(configured->provider_options.size(), 3u);
+    EXPECT_EQ(configured->provider_options[0].name, "WebGPU");
+    EXPECT_EQ(configured->provider_options[1].name, "nonexistent_provider");
+  }
+}
+
+TEST(ConfigTest, ModelProviderSelectionSurvivesUnrelatedEngramOverlays) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"engram":{"session_options":{"provider_options":[{"WebGPU":{}}]}}}})");
+  ClearProviders(config);
+  SetProviderOption(config, "cuda", {}, {});
+  OverlayConfig(config, R"({"search":{"max_length":8},"model":{"engram":{"session_options":{"intra_op_num_threads":2}}}})");
+  const auto& options = *config.model.engram.session_options;
+  EXPECT_EQ(options.providers, (std::vector<std::string>{"cuda"}));
+  ASSERT_EQ(options.provider_options.size(), 2u);
+  EXPECT_EQ(options.provider_options[0].name, "WebGPU");
+  EXPECT_EQ(options.intra_op_num_threads, 2);
+
+  OverlayConfig(config, R"({"model":{"engram":{"session_options":{"provider_options":[{"CPU":{}}]}}}})");
+  EXPECT_EQ(config.model.engram.session_options->providers, (std::vector<std::string>{"WebGPU", "cuda", "CPU"}));
+}
+
+TEST(ConfigTest, ModelProviderSelectionSurvivesNonProviderComponentOverlays) {
+  for (bool select : {false, true}) {
+    Config config;
+    OverlayConfig(config, R"({"model":{
+      "encoder":{"session_options":{}},"embedding":{"session_options":{}},
+      "vision":{"session_options":{}},"speech":{"session_options":{}},
+      "joiner":{"session_options":{}},"vad":{"session_options":{}},
+      "audio_output":{"depthformer":{"session_options":{}},"embedding":{"session_options":{}}},
+      "qwen38_graph":{"head":{"session_options":{}},"fold":{"head_r2":{"session_options":{}}},
+        "prefill":{"dense":{"session_options":{}},"head_kv":{"session_options":{}}}}
+    }})");
+    auto& model = config.model;
+    const std::vector<Config::SessionOptions*> sessions{
+        &*model.encoder.session_options, &*model.embedding.session_options,
+        &*model.vision.session_options, &*model.speech.session_options,
+        &*model.joiner.session_options, &*model.vad.session_options,
+        &*model.audio_output.depthformer.session_options, &*model.audio_output.embedding.session_options,
+        &*model.qwen38_graph.head.session_options, &*model.qwen38_graph.fold.head_r2.session_options,
+        &*model.qwen38_graph.prefill.dense.session_options, &*model.qwen38_graph.prefill.head_kv.session_options};
+    for (auto* session : sessions) {
+      session->log_id = "preserved";
+    }
+    if (select) {
+      ClearProviders(config);
+      SetProviderOption(config, "cuda", "device_id", "2");
+    }
+    OverlayConfig(config, R"({"model":{
+      "encoder":{"session_options":{"intra_op_num_threads":2}},
+      "embedding":{"session_options":{"intra_op_num_threads":2}},
+      "vision":{"session_options":{"intra_op_num_threads":2}},
+      "speech":{"session_options":{"intra_op_num_threads":2}},
+      "joiner":{"session_options":{"intra_op_num_threads":2}},
+      "vad":{"session_options":{"intra_op_num_threads":2}},
+      "audio_output":{"depthformer":{"session_options":{"intra_op_num_threads":2}},
+        "embedding":{"session_options":{"intra_op_num_threads":2}}},
+      "qwen38_graph":{"head":{"session_options":{"intra_op_num_threads":2}},
+        "fold":{"head_r2":{"session_options":{"intra_op_num_threads":2}}},
+        "prefill":{"dense":{"session_options":{"intra_op_num_threads":2}},
+          "head_kv":{"session_options":{"intra_op_num_threads":2}}}}
+    }})");
+    for (const auto* session : sessions) {
+      EXPECT_EQ(session->intra_op_num_threads, 2);
+      EXPECT_EQ(session->providers_explicitly_selected, select);
+      EXPECT_EQ(session->log_id, select ? std::optional<std::string>{"preserved"} : std::nullopt);
+      if (select) {
+        EXPECT_EQ(session->providers, (std::vector<std::string>{"cuda"}));
+        ASSERT_EQ(session->provider_options.size(), 1u);
+        EXPECT_EQ(session->provider_options.front().options, (std::vector<Config::NamedString>{{"device_id", "2"}}));
+      }
+    }
+  }
+}
+
+TEST(ConfigTest, ModelProviderSelectionSurvivesAuxiliarySessionResolution) {
+  Config config;
+  config.model.decoder.session_options.provider_options = {{"WebGPU", {}}};
+  config.model.qwen38_graph.head.session_options.emplace().provider_options = {{"WebGPU", {}}};
+  ClearProviders(config);
+  SetProviderOption(config, "CPU", {}, {});
+  for (bool inherit : {false, true}) {
+    for (const auto& configured : {std::optional<Config::SessionOptions>{},
+                                   config.model.qwen38_graph.head.session_options}) {
+      const auto resolved = ResolveQwen38AuxiliarySessionOptions(config.model.decoder.session_options, configured, inherit);
+      auto options = OrtSessionOptions::Create();
+      EXPECT_NO_THROW(SetProviderSessionOptions(*options, resolved.providers, resolved.provider_options, false, config,
+                                                false, resolved.providers_explicitly_selected));
+      EXPECT_EQ(resolved.providers, (std::vector<std::string>{"CPU"}));
+    }
+  }
+}
+
+TEST(ConfigTest, ModelProviderCpuLoadsEngineWithExplicitEmbeddingSessionOptions) {
+  // Real ONNX graphs: Cast + Unsqueeze maps int64[n] IDs to float[n,1]; the decoder forwards those embeddings.
+  constexpr uint8_t embedding[] = {
+      0x08, 0x09, 0x3a, 0xa1, 0x01, 0x0a, 0x22, 0x0a, 0x09, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x5f, 0x69,
+      0x64, 0x73, 0x12, 0x04, 0x63, 0x61, 0x73, 0x74, 0x22, 0x04, 0x43, 0x61, 0x73, 0x74, 0x2a, 0x09,
+      0x0a, 0x02, 0x74, 0x6f, 0x18, 0x01, 0xa0, 0x01, 0x02, 0x0a, 0x26, 0x0a, 0x04, 0x63, 0x61, 0x73,
+      0x74, 0x0a, 0x04, 0x61, 0x78, 0x69, 0x73, 0x12, 0x0d, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x73, 0x5f,
+      0x65, 0x6d, 0x62, 0x65, 0x64, 0x73, 0x22, 0x09, 0x55, 0x6e, 0x73, 0x71, 0x75, 0x65, 0x65, 0x7a,
+      0x65, 0x12, 0x09, 0x65, 0x6d, 0x62, 0x65, 0x64, 0x64, 0x69, 0x6e, 0x67, 0x2a, 0x0c, 0x08, 0x01,
+      0x10, 0x07, 0x38, 0x01, 0x42, 0x04, 0x61, 0x78, 0x69, 0x73, 0x5a, 0x18, 0x0a, 0x09, 0x69, 0x6e,
+      0x70, 0x75, 0x74, 0x5f, 0x69, 0x64, 0x73, 0x12, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x12, 0x05, 0x0a,
+      0x03, 0x12, 0x01, 0x6e, 0x62, 0x20, 0x0a, 0x0d, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x73, 0x5f, 0x65,
+      0x6d, 0x62, 0x65, 0x64, 0x73, 0x12, 0x0f, 0x0a, 0x0d, 0x08, 0x01, 0x12, 0x09, 0x0a, 0x03, 0x12,
+      0x01, 0x6e, 0x0a, 0x02, 0x08, 0x01, 0x42, 0x02, 0x10, 0x15};
+  constexpr uint8_t decoder[] = {
+      0x08, 0x09, 0x3a, 0x69, 0x0a, 0x21, 0x0a, 0x0d, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x73, 0x5f, 0x65,
+      0x6d, 0x62, 0x65, 0x64, 0x73, 0x12, 0x06, 0x6c, 0x6f, 0x67, 0x69, 0x74, 0x73, 0x22, 0x08, 0x49,
+      0x64, 0x65, 0x6e, 0x74, 0x69, 0x74, 0x79, 0x12, 0x07, 0x64, 0x65, 0x63, 0x6f, 0x64, 0x65, 0x72,
+      0x5a, 0x20, 0x0a, 0x0d, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x73, 0x5f, 0x65, 0x6d, 0x62, 0x65, 0x64,
+      0x73, 0x12, 0x0f, 0x0a, 0x0d, 0x08, 0x01, 0x12, 0x09, 0x0a, 0x03, 0x12, 0x01, 0x6e, 0x0a, 0x02,
+      0x08, 0x01, 0x62, 0x19, 0x0a, 0x06, 0x6c, 0x6f, 0x67, 0x69, 0x74, 0x73, 0x12, 0x0f, 0x0a, 0x0d,
+      0x08, 0x01, 0x12, 0x09, 0x0a, 0x03, 0x12, 0x01, 0x6e, 0x0a, 0x02, 0x08, 0x01, 0x42, 0x02, 0x10,
+      0x15};
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("genai_cpu_embedding_" + std::to_string(std::random_device{}()));
+  ASSERT_TRUE(std::filesystem::create_directory(directory));
+  struct Cleanup {
+    std::filesystem::path path;
+    ~Cleanup() {
+      std::error_code ignored;
+      std::filesystem::remove_all(path, ignored);
+    }
+  } cleanup{directory};
+  for (const auto& [name, bytes] : {std::pair{"embedding.onnx", std::span<const uint8_t>{embedding}},
+                                    std::pair{"decoder.onnx", std::span<const uint8_t>{decoder}}}) {
+    std::ofstream out{directory / name, std::ios::binary};
+    out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    ASSERT_TRUE(out.good());
+  }
+
+  for (bool retained_provider : {false, true}) {
+    auto config = std::make_unique<Config>(fs::path{MODEL_PATH "engine/dummy-decoder"}, "");
+    config->config_path = fs::path{directory.string()};
+    config->engine.dynamic_batching.emplace();
+    config->model.type = "llama";
+    config->model.decoder.hidden_size = 1;
+    config->model.embedding.filename = "embedding.onnx";
+    config->model.embedding.session_options.emplace().intra_op_num_threads = 2;
+    if (retained_provider) {
+      config->model.embedding.session_options->provider_options = {{"WebGPU", {}}};
+    }
+
+    ClearProviders(*config);
+    SetProviderOption(*config, "CPU", {}, {});
+    auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(CreateModel(GetOrtEnv(), std::move(config)));
+    ASSERT_NE(model, nullptr);
+    ASSERT_NE(model->cpu_embedding_, nullptr);
+    EXPECT_EQ(model->cpu_embedding_->hidden_size_, 1);
+    EXPECT_EQ(model->config_->model.embedding.session_options->intra_op_num_threads, 2);
+    if (retained_provider) {
+      EXPECT_EQ(model->config_->model.embedding.session_options->provider_options[0].name, "WebGPU");
+    }
+
+    ClearProviders(*model->config_);
+    SetProviderOption(*model->config_, "cuda", {}, {});
+    EXPECT_EQ(model->config_->model.decoder.session_options.providers, (std::vector<std::string>{"cuda"}));
+    EXPECT_NO_THROW(CpuEmbedding(*model, GetOrtEnv()));
+    SetProviderOption(*model->config_, "cuda", "enable_cuda_graph", "1");
+    EXPECT_NO_THROW(CpuEmbedding(*model, GetOrtEnv()));
+    EXPECT_EQ(model->config_->model.embedding.session_options->intra_op_num_threads, 2);
+    EXPECT_TRUE(IsGraphCaptureEnabled(model->config_->model.decoder.session_options));
+  }
+}
 
 TEST(ConfigTest, ParsesDeterministicCompute) {
   Config config;

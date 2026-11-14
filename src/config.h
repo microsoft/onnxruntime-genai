@@ -162,7 +162,8 @@ struct Config {
 
     std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
     std::vector<ProviderOptions> provider_options;
-    std::vector<std::string> providers;  // List of providers to use at runtime, not persisted in the json currently
+    std::vector<std::string> providers;    // List of providers to use at runtime, not persisted in the json currently
+    bool providers_explicitly_selected{};  // Retained options must not implicitly activate unselected providers.
   };
 
   using RunOptions = std::vector<NamedString>;  // Entries go into OrtRunOptions::AddConfigEntry

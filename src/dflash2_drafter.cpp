@@ -137,6 +137,7 @@ void InheritProviderOptions(const Config::SessionOptions& parent,
                             Config::SessionOptions& child) {
   if (child.providers.empty()) {
     child.providers = parent.providers;
+    child.providers_explicitly_selected = parent.providers_explicitly_selected;
   }
   for (const auto& parent_provider : parent.provider_options) {
     auto child_provider = std::find_if(

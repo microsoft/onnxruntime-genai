@@ -1336,7 +1336,8 @@ static DeviceInterface* AppendSessionProviders(Model& model,
                                                bool disable_graph_capture = false) {
   auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
                                                   config_session_options.provider_options, is_primary_session_options,
-                                                  *model.config_, disable_graph_capture);
+                                                  *model.config_, disable_graph_capture,
+                                                  config_session_options.providers_explicitly_selected);
 
   if (!model.p_device_) {
     model.p_device_ = session_device;

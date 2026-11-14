@@ -41,6 +41,7 @@ void InheritProviderOptions(const Config::SessionOptions& parent,
                             Config::SessionOptions& child) {
   if (child.providers.empty()) {
     child.providers = parent.providers;
+    child.providers_explicitly_selected = parent.providers_explicitly_selected;
   }
 
   for (const auto& parent_provider : parent.provider_options) {
@@ -444,6 +445,7 @@ struct SessionOptions_Element : JSON::Element {
 
   JSON::Element& OnArray(std::string_view name) override {
     if (name == "provider_options") {
+      v_.providers_explicitly_selected = false;
       return provider_options_;
     }
     if (name == "custom_ops_libraries") {
@@ -1169,7 +1171,9 @@ struct Encoder_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -1791,7 +1795,9 @@ struct Vision_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -1886,7 +1892,9 @@ struct Speech_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -1925,7 +1933,9 @@ struct AudioOutputGraph_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2019,7 +2029,9 @@ struct Joiner_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2064,7 +2076,9 @@ struct VAD_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2455,7 +2469,9 @@ struct Embedding_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2534,7 +2550,10 @@ struct Engram_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
+
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2571,7 +2590,9 @@ struct Qwen38GraphHead_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2617,7 +2638,9 @@ struct Qwen38GraphFoldHeadR2_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -2677,7 +2700,9 @@ struct Qwen38GraphPrefillModel_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      v_.session_options = Config::SessionOptions{};
+      if (!v_.session_options || !v_.session_options->providers_explicitly_selected) {
+        v_.session_options = Config::SessionOptions{};
+      }
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
     }
@@ -3797,8 +3822,42 @@ void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name,
   }
 }
 
+template <typename Fn>
+static void ForEachPrimarySessionOptions(Config& config, Fn&& fn) {
+  auto& model = config.model;
+  fn(model.decoder.session_options);
+  // Absent component options inherit the decoder. Independently configured speculative models are not changed.
+  for (auto* options : {&model.encoder.session_options, &model.embedding.session_options,
+                        &model.engram.session_options, &model.vision.session_options,
+                        &model.speech.session_options, &model.joiner.session_options,
+                        &model.vad.session_options, &model.audio_output.depthformer.session_options,
+                        &model.audio_output.embedding.session_options, &model.qwen38_graph.head.session_options,
+                        &model.qwen38_graph.fold.head_r2.session_options,
+                        &model.qwen38_graph.prefill.dense.session_options,
+                        &model.qwen38_graph.prefill.head_kv.session_options}) {
+    if (*options) {
+      fn(**options);
+    }
+  }
+
+  for (auto& stage : model.decoder.pipeline) {
+    if (stage.session_options) {
+      fn(*stage.session_options);
+    }
+  }
+
+  for (auto& stage : model.vision.pipeline) {
+    if (stage.session_options) {
+      fn(*stage.session_options);
+    }
+  }
+}
+
 void ClearProviders(Config& config) {
-  config.model.decoder.session_options.providers.clear();
+  ForEachPrimarySessionOptions(config, [](Config::SessionOptions& options) {
+    options.providers.clear();
+    options.providers_explicitly_selected = true;
+  });
 }
 
 // Escape a string for safe embedding inside a JSON string literal. Prevents JSON
@@ -3861,19 +3920,6 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
     config.model.decoder.session_options.providers.push_back(std::string(normalized_provider));
   }
 
-  // Remove any existing options with the same name to avoid duplicates
-  for (auto& provider_options : config.model.decoder.session_options.provider_options) {
-    if (provider_options.name == normalized_provider && !option_name.empty()) {
-      provider_options.options.erase(
-          std::remove_if(provider_options.options.begin(),
-                         provider_options.options.end(),
-                         [&option_name](const Config::NamedString& opt) {
-                           return opt.first == option_name;
-                         }),
-          provider_options.options.end());
-    }
-  }
-
   // JSON-escape all caller-supplied string fragments before concatenating them into the
   // JSON document. Without escaping, quote/backslash characters in the provider name,
   // option_name, or option_value would let a caller inject arbitrary JSON structure
@@ -3885,8 +3931,30 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   }
   json << R"(}})";
 
-  ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options};
-  JSON::Parse(element, json.str());
+  const auto provider_json = json.str();
+  ForEachPrimarySessionOptions(config, [&](Config::SessionOptions& options) {
+    options.providers = config.model.decoder.session_options.providers;
+    options.providers_explicitly_selected = true;
+    if (&options != &config.model.decoder.session_options) {
+      for (const auto& provider : config.model.decoder.session_options.provider_options) {
+        if (contains(options.providers, provider.name) &&
+            std::none_of(options.provider_options.begin(), options.provider_options.end(),
+                         [&provider](const Config::ProviderOptions& existing) { return existing.name == provider.name; })) {
+          options.provider_options.push_back(provider);
+        }
+      }
+    }
+    for (auto& provider_options : options.provider_options) {
+      if (provider_options.name == normalized_provider && !option_name.empty()) {
+        provider_options.options.erase(
+            std::remove_if(provider_options.options.begin(), provider_options.options.end(),
+                           [&option_name](const Config::NamedString& opt) { return opt.first == option_name; }),
+            provider_options.options.end());
+      }
+    }
+    ProviderOptionsArray_Element element{options.provider_options};
+    JSON::Parse(element, provider_json);
+  });
 }
 
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
@@ -4116,7 +4184,7 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
 }
 
 void RefreshEngramProviders(Config& config) {
-  if (config.model.engram.session_options) {
+  if (config.model.engram.session_options && !config.model.engram.session_options->providers_explicitly_selected) {
     auto& options = *config.model.engram.session_options;
     options.providers.clear();
     for (const auto& provider : options.provider_options)

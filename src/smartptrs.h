@@ -249,7 +249,8 @@ struct StateUpdateReplayDesc {
 // Version 20: Config gained memory budget/headroom settings; DeviceInterface gained sampler startup-byte sizing.
 // Version 21: Config::Engine::DynamicBatching gained host/device media budgets, changing Config's layout.
 // Version 22: Config's decoder/drafter layouts gained GGUF initializer mappings.
-inline constexpr uint32_t kDeviceInterfaceVersion = 22;
+// Version 23: Config::SessionOptions gained providers_explicitly_selected.
+inline constexpr uint32_t kDeviceInterfaceVersion = 23;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

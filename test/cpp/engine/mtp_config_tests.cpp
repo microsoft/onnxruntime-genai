@@ -98,6 +98,36 @@ TEST(MtpDecoderConfigTest, ParsesDisabledRuntimeToggle) {
   EXPECT_EQ(config.model.mtp.inputs.logits_indices, "head_logits_indices");
 }
 
+TEST(MtpDecoderConfigTest, ModelProviderOverridePreservesHeadInheritanceAndGraphCapture) {
+  for (bool explicit_provider : {false, true}) {
+    Config config;
+    config.model.decoder.hidden_size = 16;
+    auto& mtp = config.model.mtp;
+    mtp.filename = "mtp.onnx";
+    mtp.num_key_value_heads = 1;
+    mtp.head_size = 16;
+    auto& head_options = mtp.session_options.emplace();
+    head_options.provider_options = {{"cuda", {{"enable_cuda_graph", "1"}}}};
+    if (explicit_provider) {
+      head_options.providers = {"CPU"};
+    }
+
+    ClearProviders(config);
+    SetProviderOption(config, "CUDAExecutionProvider", {}, {});
+    SetProviderOption(config, "cuda", "enable_cuda_graph", "0");
+
+    const auto projected = CreateMtpDecoderConfig(config);
+    EXPECT_EQ(projected->model.decoder.session_options.providers,
+              (std::vector<std::string>{explicit_provider ? "CPU" : "cuda"}));
+    EXPECT_EQ(head_options.providers,
+              (explicit_provider ? std::vector<std::string>{"CPU"} : std::vector<std::string>{}));
+    ASSERT_EQ(projected->model.decoder.session_options.provider_options.front().options.size(), 1u);
+    EXPECT_EQ(projected->model.decoder.session_options.provider_options.front().options.front(),
+              Config::NamedString("enable_cuda_graph", "1"));
+    EXPECT_FALSE(IsGraphCaptureEnabled(config.model.decoder.session_options));
+  }
+}
+
 TEST(MtpDecoderConfigTest, IndexShareIsOptInAndRequiresCompleteMetadata) {
   Config config;
   config.model.decoder.hidden_size = 16;
